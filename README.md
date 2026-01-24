@@ -2,6 +2,14 @@
 
 A comprehensive pure Zig implementation of the Domain Name System (DNS) protocol. Supports both stub and recursive resolution with modern transport protocols.
 
+## Status
+
+| Aspect | Info |
+|--------|------|
+| API Stability | Beta |
+| Zig Version | 0.14.0+ |
+| Platforms | Linux, macOS, Windows |
+
 ## Features
 
 ### Implemented
