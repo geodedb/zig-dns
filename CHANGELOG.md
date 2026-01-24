@@ -7,23 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-01-24
+
+Initial public release under Apache-2.0 license.
+
 ### Added
 - Merge request template for standardized contributions
 - Issue templates for bug reports, features, and questions
 
 ### Changed
 - Updated CI catalog components to v1.7.1
+- Updated cli dependency to use GitLab archive URL
 
 ### Security
 - Fixed gitleaks allowlist for test data and implementation details
 - Added GitLab native Secret Detection
 - Enabled Advanced SAST and Dependency Scanning
 
-## [0.1.0] - 2026-01-23
-
-Initial public release under Apache-2.0 license.
-
-### Added
+### Features
 
 #### Core DNS Library
 - RFC 1035 compliant DNS message parsing and encoding
