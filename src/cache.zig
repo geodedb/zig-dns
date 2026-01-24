@@ -1,0 +1,284 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2024-2025 CodePros
+
+//! DNS Response Cache
+//!
+//! RFC 1035 Section 7.4: Using the cache
+//!
+//! Implements TTL-based caching for DNS responses to reduce
+//! network traffic and improve resolution latency.
+
+const std = @import("std");
+const name_mod = @import("name");
+const types_mod = @import("types");
+const record_mod = @import("record");
+
+pub const Name = name_mod.Name;
+pub const Type = types_mod.Type;
+pub const Class = types_mod.Class;
+pub const ResourceRecord = record_mod.ResourceRecord;
+
+/// Cache entry for a DNS record
+pub const CacheEntry = struct {
+    /// Domain name (owned by cache)
+    name: []const u8,
+
+    /// Record type
+    rtype: Type,
+
+    /// Record class
+    class: Class,
+
+    /// Cached RDATA (owned by cache)
+    rdata: []const u8,
+
+    /// Original TTL from the record
+    original_ttl: u32,
+
+    /// Timestamp when this entry was cached (in seconds since epoch)
+    cached_at: i64,
+
+    const Self = @This();
+
+    /// Check if this entry has expired
+    pub fn isExpired(self: Self, now: i64) bool {
+        const age = now - self.cached_at;
+        return age < 0 or age >= self.original_ttl;
+    }
+
+    /// Get remaining TTL
+    pub fn remainingTtl(self: Self, now: i64) u32 {
+        const age = now - self.cached_at;
+        if (age < 0 or age >= self.original_ttl) {
+            return 0;
+        }
+        return self.original_ttl - @as(u32, @intCast(age));
+    }
+};
+
+/// DNS Response Cache - Simple array-based implementation
+pub const Cache = struct {
+    allocator: std.mem.Allocator,
+    entries: []CacheEntry,
+    count: usize,
+    max_entries: usize,
+
+    const Self = @This();
+
+    /// Create a new cache with the given maximum number of entries
+    pub fn init(allocator: std.mem.Allocator, max_entries: usize) Self {
+        return Self{
+            .allocator = allocator,
+            .entries = &[_]CacheEntry{},
+            .count = 0,
+            .max_entries = max_entries,
+        };
+    }
+
+    /// Free all cache resources
+    pub fn deinit(self: *Self) void {
+        for (self.entries[0..self.count]) |entry| {
+            self.allocator.free(entry.name);
+            self.allocator.free(entry.rdata);
+        }
+        if (self.entries.len > 0) {
+            self.allocator.free(self.entries);
+        }
+    }
+
+    /// Add a record to the cache
+    pub fn put(self: *Self, domain: []const u8, rr: ResourceRecord) !void {
+        // Don't cache records with TTL of 0
+        if (rr.ttl == 0) {
+            return;
+        }
+
+        const now = std.time.timestamp();
+
+        // Check if we need to evict entries
+        if (self.count >= self.max_entries) {
+            self.evictExpired(now);
+        }
+
+        // Still full? Evict oldest
+        if (self.count >= self.max_entries and self.count > 0) {
+            self.evictOldest();
+        }
+
+        // Grow entries array if needed
+        if (self.count >= self.entries.len) {
+            const new_cap = if (self.entries.len == 0) 16 else self.entries.len * 2;
+            const capped = @min(new_cap, self.max_entries);
+            const new_entries = try self.allocator.alloc(CacheEntry, capped);
+            if (self.entries.len > 0) {
+                @memcpy(new_entries[0..self.count], self.entries[0..self.count]);
+                self.allocator.free(self.entries);
+            }
+            self.entries = new_entries;
+        }
+
+        const name_copy = try self.allocator.dupe(u8, domain);
+        errdefer self.allocator.free(name_copy);
+
+        const rdata_copy = try self.allocator.dupe(u8, rr.rdata);
+        errdefer self.allocator.free(rdata_copy);
+
+        self.entries[self.count] = CacheEntry{
+            .name = name_copy,
+            .rtype = rr.rtype,
+            .class = rr.class,
+            .rdata = rdata_copy,
+            .original_ttl = rr.ttl,
+            .cached_at = now,
+        };
+        self.count += 1;
+    }
+
+    /// Get cached records for a domain and type
+    pub fn get(self: *Self, domain: []const u8, rtype: Type, class: Class) ?[]const CacheEntry {
+        const now = std.time.timestamp();
+
+        // Find matching entries
+        var start: ?usize = null;
+        var end: usize = 0;
+
+        for (self.entries[0..self.count], 0..) |entry, i| {
+            if (entry.rtype == rtype and entry.class == class and
+                std.ascii.eqlIgnoreCase(entry.name, domain) and
+                !entry.isExpired(now))
+            {
+                if (start == null) {
+                    start = i;
+                }
+                end = i + 1;
+            }
+        }
+
+        if (start) |s| {
+            // Return slice of matching entries (they may not be contiguous, so just return first match)
+            return self.entries[s..end];
+        }
+
+        return null;
+    }
+
+    /// Remove expired entries from the cache
+    pub fn evictExpired(self: *Self, now: i64) void {
+        var write_idx: usize = 0;
+        for (self.entries[0..self.count]) |entry| {
+            if (!entry.isExpired(now)) {
+                self.entries[write_idx] = entry;
+                write_idx += 1;
+            } else {
+                self.allocator.free(entry.name);
+                self.allocator.free(entry.rdata);
+            }
+        }
+        self.count = write_idx;
+    }
+
+    /// Evict the oldest entry
+    fn evictOldest(self: *Self) void {
+        if (self.count == 0) return;
+
+        var oldest_idx: usize = 0;
+        var oldest_time: i64 = self.entries[0].cached_at;
+
+        for (self.entries[1..self.count], 1..) |entry, i| {
+            if (entry.cached_at < oldest_time) {
+                oldest_time = entry.cached_at;
+                oldest_idx = i;
+            }
+        }
+
+        // Free the oldest entry
+        self.allocator.free(self.entries[oldest_idx].name);
+        self.allocator.free(self.entries[oldest_idx].rdata);
+
+        // Move last entry to fill the gap
+        if (oldest_idx < self.count - 1) {
+            self.entries[oldest_idx] = self.entries[self.count - 1];
+        }
+        self.count -= 1;
+    }
+
+    /// Clear all entries from the cache
+    pub fn clear(self: *Self) void {
+        for (self.entries[0..self.count]) |entry| {
+            self.allocator.free(entry.name);
+            self.allocator.free(entry.rdata);
+        }
+        self.count = 0;
+    }
+};
+
+test "Cache basic operations" {
+    const allocator = std.testing.allocator;
+    var cache = Cache.init(allocator, 1000);
+    defer cache.deinit();
+
+    // Create a mock resource record
+    const rdata = [_]u8{ 93, 184, 216, 34 };
+    const rr = ResourceRecord{
+        .name = undefined,
+        .rtype = .a,
+        .class = .in,
+        .ttl = 300,
+        .rdlength = 4,
+        .rdata = &rdata,
+        .wire_length = 0,
+    };
+
+    try cache.put("example.com", rr);
+    try std.testing.expectEqual(@as(usize, 1), cache.count);
+
+    const entries = cache.get("example.com", .a, .in);
+    try std.testing.expect(entries != null);
+    try std.testing.expectEqualSlices(u8, &rdata, entries.?[0].rdata);
+}
+
+test "Cache case insensitive lookup" {
+    const allocator = std.testing.allocator;
+    var cache = Cache.init(allocator, 1000);
+    defer cache.deinit();
+
+    const rdata = [_]u8{ 93, 184, 216, 34 };
+    const rr = ResourceRecord{
+        .name = undefined,
+        .rtype = .a,
+        .class = .in,
+        .ttl = 300,
+        .rdlength = 4,
+        .rdata = &rdata,
+        .wire_length = 0,
+    };
+
+    try cache.put("Example.COM", rr);
+
+    // Should find with different case
+    const entries = cache.get("example.com", .a, .in);
+    try std.testing.expect(entries != null);
+}
+
+test "Cache clear" {
+    const allocator = std.testing.allocator;
+    var cache = Cache.init(allocator, 1000);
+    defer cache.deinit();
+
+    const rdata = [_]u8{ 93, 184, 216, 34 };
+    const rr = ResourceRecord{
+        .name = undefined,
+        .rtype = .a,
+        .class = .in,
+        .ttl = 300,
+        .rdlength = 4,
+        .rdata = &rdata,
+        .wire_length = 0,
+    };
+
+    try cache.put("example.com", rr);
+    try std.testing.expectEqual(@as(usize, 1), cache.count);
+
+    cache.clear();
+    try std.testing.expectEqual(@as(usize, 0), cache.count);
+}

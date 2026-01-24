@@ -1,0 +1,185 @@
+version: 2
+
+project_name: zdig
+
+# Note: GoReleaser is used for packaging Zig-built binaries
+# Zig builds are handled separately by GitLab CI
+
+before:
+  hooks:
+    # Binaries are built separately by GitLab CI with Zig
+    # They are placed in dist/ directory before GoReleaser runs
+
+# Zig builds are handled separately (GitLab CI)
+# GoReleaser is used only for packaging, not building
+builds:
+  - id: zdig
+    skip: true
+
+# Create archives from pre-built binaries
+# Using meta: true with a single archive containing all platform binaries
+archives:
+  - id: zdig-archives
+    meta: true
+    name_template: "zdig_{{ .Version }}_all"
+    formats:
+      - tar.gz
+      - zip
+    files:
+      # Include binaries from Zig build output (all platforms)
+      - src: "binaries/zdig-*"
+        dst: "."
+        strip_parent: true
+      # Include documentation
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ .Branch }}-{{ .ShortCommit }}-snapshot"
+
+changelog:
+  sort: asc
+  use: git
+  groups:
+    - title: "Breaking Changes"
+      regexp: '^.*!:.*$'
+      order: 0
+    - title: "Features"
+      regexp: '^.*feat(\(.+\))?:.*$'
+      order: 1
+    - title: "Bug Fixes"
+      regexp: '^.*fix(\(.+\))?:.*$'
+      order: 2
+    - title: "Security"
+      regexp: '^.*sec(\(.+\))?:.*$'
+      order: 3
+    - title: "Performance"
+      regexp: '^.*perf(\(.+\))?:.*$'
+      order: 4
+    - title: "Documentation"
+      regexp: '^.*docs(\(.+\))?:.*$'
+      order: 5
+    - title: "Refactor"
+      regexp: '^.*refactor(\(.+\))?:.*$'
+      order: 6
+    - title: "Tests"
+      regexp: '^.*test(\(.+\))?:.*$'
+      order: 7
+    - title: "CI/CD"
+      regexp: '^.*ci(\(.+\))?:.*$'
+      order: 8
+    - title: "Build System"
+      regexp: '^.*build(\(.+\))?:.*$'
+      order: 9
+    - title: "Other"
+      order: 999
+  filters:
+    exclude:
+      - '^chore:'
+      - '^style:'
+      - 'Merge pull request'
+      - 'Merge branch'
+
+# System packages (deb, rpm, apk) - disabled for Zig builds
+# nfpms doesn't work with skipped builds in GoReleaser
+# TODO: Use nfpm directly or create packages in CI
+nfpms: []
+
+# Universal binaries for manual distribution
+upx:
+  # UPX compression disabled - Zig binaries are already well-optimized
+  []
+
+# GitLab release configuration
+release:
+  gitlab:
+    owner: devnw
+    name: zig/dns
+
+  name_template: "zdig v{{ .Version }}"
+
+  prerelease: auto
+  draft: false
+
+  header: |
+    ## zdig v{{ .Version }}
+
+    A dig-like DNS query tool built on zigdns.
+
+    ### Highlights
+
+    - Fast DNS queries with dig-style output
+    - Multiple record type support (A, AAAA, MX, NS, TXT, SOA, etc.)
+    - JSON output format
+    - TCP mode support
+    - DNS trace functionality
+
+  footer: |
+    ---
+
+    ### Installation
+
+    **Linux (Debian/Ubuntu)**
+    ```bash
+    # Download from GitLab Package Registry
+    wget {{ .Env.CI_API_V4_URL }}/projects/{{ .Env.CI_PROJECT_ID }}/packages/generic/zdig/{{ .Version }}/zdig_{{ .Version }}_Linux_x86_64.deb
+    sudo dpkg -i zdig_{{ .Version }}_Linux_x86_64.deb
+    ```
+
+    **Linux (RHEL/Fedora)**
+    ```bash
+    wget {{ .Env.CI_API_V4_URL }}/projects/{{ .Env.CI_PROJECT_ID }}/packages/generic/zdig/{{ .Version }}/zdig_{{ .Version }}_Linux_x86_64.rpm
+    sudo rpm -i zdig_{{ .Version }}_Linux_x86_64.rpm
+    ```
+
+    **Alpine Linux**
+    ```bash
+    wget {{ .Env.CI_API_V4_URL }}/projects/{{ .Env.CI_PROJECT_ID }}/packages/generic/zdig/{{ .Version }}/zdig_{{ .Version }}_Linux_x86_64.apk
+    sudo apk add --allow-untrusted zdig_{{ .Version }}_Linux_x86_64.apk
+    ```
+
+    **Manual Installation**
+    Download the appropriate archive for your platform from the assets below.
+
+    ### Usage
+
+    ```bash
+    zdig example.com              # Query A record
+    zdig example.com MX           # Query MX record
+    zdig @1.1.1.1 google.com AAAA # Query using Cloudflare DNS
+    zdig +short google.com        # Short output
+    zdig +tcp google.com          # Force TCP
+    zdig +json example.com        # JSON output
+    ```
+
+  disable: false
+
+# GitLab Package Registry uploads
+# Publishes packages to GitLab's package registry
+publishers:
+  - name: gitlab-packages
+    ids:
+      - zdig-packages
+    cmd: |
+      curl --header "JOB-TOKEN: {{ .Env.CI_JOB_TOKEN }}" \
+           --upload-file "{{ .ArtifactPath }}" \
+           "{{ .Env.CI_API_V4_URL }}/projects/{{ .Env.CI_PROJECT_ID }}/packages/generic/zdig/{{ .Version }}/{{ .ArtifactName }}"
+    env:
+      - CI_JOB_TOKEN={{ .Env.CI_JOB_TOKEN }}
+      - CI_API_V4_URL={{ .Env.CI_API_V4_URL }}
+      - CI_PROJECT_ID={{ .Env.CI_PROJECT_ID }}
+
+# Announce releases (disabled for GitLab)
+announce:
+  skip: true
+
+# Metadata
+metadata:
+  mod_timestamp: "{{ .CommitTimestamp }}"
+
+# SBOMs (disabled for simplicity)
+sboms: []
