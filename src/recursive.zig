@@ -426,7 +426,7 @@ pub const RecursiveResolver = struct {
         }
         state.last_query_name = try self.allocator.dupe(u8, query_name);
 
-        const query = try message_mod.buildQuery(self.allocator, id, query_name, qtype, self.config.dnssec);
+        const query = try message_mod.buildQuery(self.allocator, id, query_name, qtype, .in, self.config.dnssec);
         defer self.allocator.free(query);
 
         // Try servers in order
@@ -434,10 +434,9 @@ pub const RecursiveResolver = struct {
         for (servers[0..max_tries]) |server| {
             const response = self.sendQuery(query, server) catch continue;
 
-            // Verify ID matches
             if (response.len >= 2) {
                 const resp_id = std.mem.readInt(u16, response[0..2], .big);
-                if (resp_id == id) {
+                if (resp_id == id and responseMatchesQuery(self.allocator, response, query_name, qtype, .in)) {
                     return response;
                 }
             }
@@ -468,13 +467,29 @@ pub const RecursiveResolver = struct {
         // Send query
         _ = try std.posix.sendto(sock, query, 0, &server.address.any, server.address.getOsSockLen());
 
-        // Receive response
-        var buffer: [65535]u8 = undefined;
-        const recv_len = try std.posix.recvfrom(sock, &buffer, 0, null, null);
+        const start_ms = std.time.milliTimestamp();
+        while (true) {
+            if (std.time.milliTimestamp() - start_ms >= self.config.timeout_ms) {
+                return error.Timeout;
+            }
 
-        const response = try self.allocator.alloc(u8, recv_len);
-        @memcpy(response, buffer[0..recv_len]);
-        return response;
+            // Receive response (capture source)
+            var buffer: [65535]u8 = undefined;
+            var src_addr: std.net.Address = undefined;
+            var src_len: std.posix.socklen_t = @sizeOf(std.net.Address);
+            const recv_len = std.posix.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len) catch |err| switch (err) {
+                error.WouldBlock, error.ConnectionTimedOut => return error.Timeout,
+                else => return err,
+            };
+
+            if (!std.net.Address.eql(src_addr, server.address)) {
+                continue;
+            }
+
+            const response = try self.allocator.alloc(u8, recv_len);
+            @memcpy(response, buffer[0..recv_len]);
+            return response;
+        }
     }
 
     /// Extract referral information from a response
@@ -572,11 +587,16 @@ pub const RecursiveResolver = struct {
 
     /// Cache a successful response
     fn cacheResponse(self: *Self, response: []const u8, msg: Message) !void {
+        var q_iter = msg.questions();
+        const q = (try q_iter.next()) orelse return;
+        const qname = q.getName(self.allocator, msg.data) catch return;
+        defer self.allocator.free(qname);
+
         var ans_iter = try msg.answers();
         while (try ans_iter.next()) |rr| {
             const name_str = try rr.getName(self.allocator, response);
             defer self.allocator.free(name_str);
-            try self.cache.put(name_str, rr);
+            try self.cache.putWithBailiwick(name_str, rr, qname);
         }
     }
 
@@ -585,6 +605,39 @@ pub const RecursiveResolver = struct {
         self.cache.clear();
     }
 };
+
+fn trimTrailingDot(name: []const u8) []const u8 {
+    if (name.len > 0 and name[name.len - 1] == '.') {
+        return name[0 .. name.len - 1];
+    }
+    return name;
+}
+
+fn namesEqual(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(trimTrailingDot(a), trimTrailingDot(b));
+}
+
+fn responseMatchesQuery(
+    allocator: std.mem.Allocator,
+    response: []const u8,
+    expected_name: []const u8,
+    expected_type: Type,
+    expected_class: Class,
+) bool {
+    const msg = Message.parse(response) catch return false;
+    if (!msg.header.qr) return false;
+    if (msg.header.opcode != .query) return false;
+    if (msg.header.qdcount == 0) return false;
+
+    var q_iter = msg.questions();
+    const q = (q_iter.next() catch null) orelse return false;
+    if (q.qtype != expected_type or q.qclass != expected_class) return false;
+
+    const qname = q.getName(allocator, msg.data) catch return false;
+    defer allocator.free(qname);
+
+    return namesEqual(qname, expected_name);
+}
 
 /// Internal resolution state
 const ResolutionState = struct {

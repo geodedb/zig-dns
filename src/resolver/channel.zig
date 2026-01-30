@@ -74,6 +74,9 @@ pub const DoTOptions = struct {
     addr: SocketAddress,
     ca_pem: []const u8,
     alpn_dot: []const u8 = "dot",
+    /// Explicitly use system CA trust store (SEC-GAP-057: CWE-295)
+    /// If false and ca_pem is empty, connection will fail
+    use_system_ca: bool = false,
 };
 
 /// DNS over HTTPS options

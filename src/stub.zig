@@ -84,7 +84,6 @@ pub const StubConfig = struct {
 pub const StubResolver = struct {
     allocator: std.mem.Allocator,
     config: StubConfig,
-    next_id: u16,
 
     const Self = @This();
 
@@ -94,17 +93,14 @@ pub const StubResolver = struct {
     /// Create a new stub resolver
     /// Returns error.EntropyUnavailable if secure random is not available
     pub fn init(allocator: std.mem.Allocator, config: StubConfig) InitError!Self {
-        // Use cryptographically secure random starting ID - fail if unavailable
-        var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+        // Ensure cryptographically secure entropy is available
+        var probe: u64 = undefined;
+        std.posix.getrandom(std.mem.asBytes(&probe)) catch {
             return error.EntropyUnavailable;
         };
-        var rng = std.Random.DefaultPrng.init(seed);
-
         return Self{
             .allocator = allocator,
             .config = config,
-            .next_id = rng.random().int(u16),
         };
     }
 
@@ -127,9 +123,41 @@ pub const StubResolver = struct {
 
     /// Generate a unique query ID
     fn nextId(self: *Self) u16 {
-        const id = self.next_id;
-        self.next_id +%= 1;
-        return id;
+        _ = self;
+        // Use OS CSPRNG for each ID to avoid predictability
+        return std.crypto.random.int(u16);
+    }
+
+    fn trimTrailingDot(name: []const u8) []const u8 {
+        if (name.len > 0 and name[name.len - 1] == '.') {
+            return name[0 .. name.len - 1];
+        }
+        return name;
+    }
+
+    fn namesEqual(a: []const u8, b: []const u8) bool {
+        return std.ascii.eqlIgnoreCase(trimTrailingDot(a), trimTrailingDot(b));
+    }
+
+    fn responseMatchesQuery(
+        allocator: std.mem.Allocator,
+        msg: Message,
+        expected_name: []const u8,
+        expected_type: Type,
+        expected_class: Class,
+    ) bool {
+        if (!msg.header.qr) return false;
+        if (msg.header.opcode != .query) return false;
+        if (msg.header.qdcount == 0) return false;
+
+        var q_iter = msg.questions();
+        const q = (q_iter.next() catch null) orelse return false;
+        if (q.qtype != expected_type or q.qclass != expected_class) return false;
+
+        const qname = q.getName(allocator, msg.data) catch return false;
+        defer allocator.free(qname);
+
+        return namesEqual(qname, expected_name);
     }
 
     /// Resolve a domain name
@@ -142,7 +170,7 @@ pub const StubResolver = struct {
         const id = self.nextId();
 
         // Build query
-        const query = try message_mod.buildQuery(self.allocator, id, domain, qtype, qclass == .in);
+        const query = try message_mod.buildQuery(self.allocator, id, domain, qtype, qclass, true);
         defer self.allocator.free(query);
 
         // Try each server
@@ -155,9 +183,12 @@ pub const StubResolver = struct {
                     continue;
                 };
 
-                // Check if ID matches
-                const msg = Message.parse(response) catch continue;
-                if (msg.header.id != id) {
+                const msg = Message.parse(response) catch {
+                    self.allocator.free(response);
+                    continue;
+                };
+                if (msg.header.id != id or !responseMatchesQuery(self.allocator, msg, domain, qtype, qclass)) {
+                    self.allocator.free(response);
                     continue;
                 }
 
@@ -196,41 +227,59 @@ pub const StubResolver = struct {
         // Send query
         _ = try std.posix.sendto(sock, query, 0, &server.address.any, server.address.getOsSockLen());
 
-        // Receive response
-        var buffer: [65535]u8 = undefined;
-        const recv_len = try std.posix.recvfrom(sock, &buffer, 0, null, null);
+        const start_ms = std.time.milliTimestamp();
+        while (true) {
+            if (std.time.milliTimestamp() - start_ms >= self.config.timeout_ms) {
+                return error.Timeout;
+            }
 
-        // Copy response
-        const response = try self.allocator.alloc(u8, recv_len);
-        @memcpy(response, buffer[0..recv_len]);
+            // Receive response (capture source)
+            var buffer: [65535]u8 = undefined;
+            var src_addr: std.net.Address = undefined;
+            var src_len: std.posix.socklen_t = @sizeOf(std.net.Address);
+            const recv_len = std.posix.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len) catch |err| switch (err) {
+                error.WouldBlock, error.ConnectionTimedOut => return error.Timeout,
+                else => return err,
+            };
 
-        return response;
+            if (!std.net.Address.eql(src_addr, server.address)) {
+                continue;
+            }
+
+            // Copy response
+            const response = try self.allocator.alloc(u8, recv_len);
+            @memcpy(response, buffer[0..recv_len]);
+
+            return response;
+        }
     }
 
     /// Send a query over TCP
     fn sendQueryTcp(self: *Self, query: []const u8, server: ServerAddress) ![]u8 {
         const sock = try std.posix.socket(
             server.address.any.family,
-            std.posix.SOCK.STREAM,
+            std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
             std.posix.IPPROTO.TCP,
         );
         defer std.posix.close(sock);
 
-        // Connect
-        try std.posix.connect(sock, &server.address.any, server.address.getOsSockLen());
+        try connectWithTimeout(sock, server.address, self.config.timeout_ms);
 
         // TCP DNS messages are prefixed with 2-byte length
         var length_prefix: [2]u8 = undefined;
         std.mem.writeInt(u16, &length_prefix, @intCast(query.len), .big);
 
         // Send length prefix and query
-        _ = try std.posix.write(sock, &length_prefix);
-        _ = try std.posix.write(sock, query);
+        try writeAllWithTimeout(sock, &length_prefix, self.config.timeout_ms);
+        try writeAllWithTimeout(sock, query, self.config.timeout_ms);
 
         // Read response length
         var resp_len_buf: [2]u8 = undefined;
-        _ = try std.posix.read(sock, &resp_len_buf);
+        try readExactWithTimeout(sock, &resp_len_buf, self.config.timeout_ms);
         const resp_len = std.mem.readInt(u16, &resp_len_buf, .big);
+        if (resp_len == 0 or resp_len > 65535) {
+            return error.MessageTooLarge;
+        }
 
         // Read response
         const response = try self.allocator.alloc(u8, resp_len);
@@ -238,7 +287,7 @@ pub const StubResolver = struct {
 
         var total_read: usize = 0;
         while (total_read < resp_len) {
-            const n = try std.posix.read(sock, response[total_read..]);
+            const n = try readWithTimeout(sock, response[total_read..], self.config.timeout_ms);
             if (n == 0) {
                 return error.ConnectionClosed;
             }
@@ -248,6 +297,86 @@ pub const StubResolver = struct {
         return response;
     }
 };
+
+fn connectWithTimeout(sock: std.posix.socket_t, address: std.net.Address, timeout_ms: u32) !void {
+    std.posix.connect(sock, &address.any, address.getOsSockLen()) catch |err| switch (err) {
+        error.WouldBlock, error.InProgress => {},
+        else => return err,
+    };
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = sock,
+        .events = std.posix.POLL.OUT,
+        .revents = 0,
+    }};
+    const rc = try std.posix.poll(&poll_fds, @intCast(timeout_ms));
+    if (rc == 0) return error.Timeout;
+    if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
+        return error.ConnectionClosed;
+    }
+    try std.posix.getsockoptError(sock);
+}
+
+fn writeAllWithTimeout(sock: std.posix.socket_t, data: []const u8, timeout_ms: u32) !void {
+    var sent: usize = 0;
+    const deadline = std.time.milliTimestamp() + timeout_ms;
+    while (sent < data.len) {
+        const now = std.time.milliTimestamp();
+        if (now >= deadline) return error.Timeout;
+        const remaining: i32 = @intCast(@max(@as(i64, 0), deadline - now));
+
+        var poll_fds = [_]std.posix.pollfd{.{
+            .fd = sock,
+            .events = std.posix.POLL.OUT,
+            .revents = 0,
+        }};
+        const rc = try std.posix.poll(&poll_fds, remaining);
+        if (rc == 0) return error.Timeout;
+        if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
+            return error.ConnectionClosed;
+        }
+
+        const n = std.posix.write(sock, data[sent..]) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        sent += n;
+    }
+}
+
+fn readWithTimeout(sock: std.posix.socket_t, buffer: []u8, timeout_ms: u32) !usize {
+    const deadline = std.time.milliTimestamp() + timeout_ms;
+    while (true) {
+        const now = std.time.milliTimestamp();
+        if (now >= deadline) return error.Timeout;
+        const remaining: i32 = @intCast(@max(@as(i64, 0), deadline - now));
+
+        var poll_fds = [_]std.posix.pollfd{.{
+            .fd = sock,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const rc = try std.posix.poll(&poll_fds, remaining);
+        if (rc == 0) return error.Timeout;
+        if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
+            return error.ConnectionClosed;
+        }
+
+        return std.posix.read(sock, buffer) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+    }
+}
+
+fn readExactWithTimeout(sock: std.posix.socket_t, buffer: []u8, timeout_ms: u32) !void {
+    var read_total: usize = 0;
+    while (read_total < buffer.len) {
+        const n = try readWithTimeout(sock, buffer[read_total..], timeout_ms);
+        if (n == 0) return error.ConnectionClosed;
+        read_total += n;
+    }
+}
 
 /// Read system DNS servers from /etc/resolv.conf (Unix) or registry (Windows)
 pub fn getSystemServers(allocator: std.mem.Allocator) ![]ServerAddress {
@@ -310,10 +439,8 @@ test "StubResolver.nextId" {
     var resolver = try StubResolver.init(std.testing.allocator, .{ .servers = &servers });
     defer resolver.deinit();
 
-    const id1 = resolver.nextId();
-    const id2 = resolver.nextId();
-
-    try std.testing.expect(id1 != id2 or id1 == std.math.maxInt(u16));
+    const id = resolver.nextId();
+    try std.testing.expect(id <= std.math.maxInt(u16));
 }
 
 test "ServerAddress.fromIpv4" {

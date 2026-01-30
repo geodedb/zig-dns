@@ -204,6 +204,12 @@ pub const DoQTransport = struct {
         }
 
         const msg_len = std.mem.readInt(u16, response_with_prefix[0..2], .big);
+        if (msg_len == 0) {
+            return error.InvalidResponse;
+        }
+        if (msg_len > max_message_size or response_with_prefix.len > max_message_size + 2) {
+            return error.MessageTooLarge;
+        }
         if (msg_len + 2 > response_with_prefix.len) {
             return error.InvalidResponse;
         }
@@ -225,6 +231,13 @@ pub const DoQTransport = struct {
 /// Prepare DoQ wire message (set ID=0, add length prefix)
 /// Per RFC 9250: Message ID MUST be 0, 2-byte length prefix
 pub fn prepareDoQMessage(allocator: std.mem.Allocator, wire_req: []const u8) ![]u8 {
+    if (wire_req.len < 2) {
+        return error.InvalidMessage;
+    }
+    if (wire_req.len > DoQTransport.max_message_size) {
+        return error.MessageTooLarge;
+    }
+
     const result = try allocator.alloc(u8, 2 + wire_req.len);
     errdefer allocator.free(result);
 
@@ -246,6 +259,12 @@ pub fn parseDoQResponse(data: []const u8) ![]const u8 {
     }
 
     const msg_len = std.mem.readInt(u16, data[0..2], .big);
+    if (msg_len == 0) {
+        return error.InvalidResponse;
+    }
+    if (msg_len > DoQTransport.max_message_size or data.len > DoQTransport.max_message_size + 2) {
+        return error.MessageTooLarge;
+    }
     if (msg_len + 2 > data.len) {
         return error.InvalidResponse;
     }
@@ -553,6 +572,19 @@ test "prepareDoQMessage" {
     try std.testing.expectEqual(@as(u8, 0), doq_msg[3]);
 }
 
+test "prepareDoQMessage rejects short input" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidMessage, prepareDoQMessage(allocator, &[_]u8{0x01}));
+}
+
+test "prepareDoQMessage rejects oversized input" {
+    const allocator = std.testing.allocator;
+    const oversized = try allocator.alloc(u8, DoQTransport.max_message_size + 1);
+    defer allocator.free(oversized);
+    @memset(oversized, 0xAA);
+    try std.testing.expectError(error.MessageTooLarge, prepareDoQMessage(allocator, oversized));
+}
+
 test "parseDoQResponse" {
     // Valid response with ID=0
     const data = [_]u8{ 0x00, 0x04, 0x00, 0x00, 0x81, 0x80 };
@@ -566,6 +598,17 @@ test "parseDoQResponse invalid ID" {
     // Response with non-zero ID
     const data = [_]u8{ 0x00, 0x04, 0x12, 0x34, 0x81, 0x80 };
     try std.testing.expectError(error.InvalidMessageId, parseDoQResponse(&data));
+}
+
+test "parseDoQResponse rejects oversized response" {
+    const allocator = std.testing.allocator;
+    const oversized = try allocator.alloc(u8, DoQTransport.max_message_size + 3);
+    defer allocator.free(oversized);
+    @memset(oversized, 0);
+    std.mem.writeInt(u16, oversized[0..2], @intCast(DoQTransport.max_message_size + 1), .big);
+    oversized[2] = 0;
+    oversized[3] = 0;
+    try std.testing.expectError(error.MessageTooLarge, parseDoQResponse(oversized));
 }
 
 test "MockQuicBackend basic" {

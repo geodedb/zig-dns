@@ -23,6 +23,8 @@ const testing_dummy_fd: std.posix.fd_t = if (builtin.os.tag == .windows)
 else
     0;
 
+const max_message_size: usize = 65535;
+
 /// Connection pool configuration
 pub const PoolConfig = struct {
     /// Maximum connections per server
@@ -468,6 +470,11 @@ pub const PipelinedBatch = struct {
                 len_read += n;
             }
             const resp_len = std.mem.readInt(u16, &resp_len_buf, .big);
+            if (resp_len == 0 or resp_len > max_message_size) {
+                q.err = error.MessageTooLarge;
+                q.completed = true;
+                continue;
+            }
 
             // Read response
             const response = try self.allocator.alloc(u8, resp_len);
@@ -527,23 +534,22 @@ pub const PooledTcpTransport = struct {
         errdefer self.pool.release(conn, false, 0, 0);
 
         // Connect if needed (socket was created non-blocking)
-        std.posix.connect(conn.fd, &self.address.any, self.address.getOsSockLen()) catch |err| {
-            if (err != error.WouldBlock and err != error.AlreadyConnected) {
-                return err;
-            }
-        };
+        try connectWithTimeout(conn.fd, self.address, timeout_ms);
 
         // Send query with TCP length prefix
         var length_prefix: [2]u8 = undefined;
         std.mem.writeInt(u16, &length_prefix, @intCast(wire_req.len), .big);
 
-        _ = try std.posix.write(conn.fd, &length_prefix);
-        _ = try std.posix.write(conn.fd, wire_req);
+        try writeAllWithTimeout(conn.fd, &length_prefix, timeout_ms);
+        try writeAllWithTimeout(conn.fd, wire_req, timeout_ms);
 
         // Read response length
         var resp_len_buf: [2]u8 = undefined;
-        _ = try std.posix.read(conn.fd, &resp_len_buf);
+        try readExactWithTimeout(conn.fd, &resp_len_buf, timeout_ms);
         const resp_len = std.mem.readInt(u16, &resp_len_buf, .big);
+        if (resp_len == 0 or resp_len > max_message_size) {
+            return error.MessageTooLarge;
+        }
 
         // Read response
         const response = try self.allocator.alloc(u8, resp_len);
@@ -551,7 +557,7 @@ pub const PooledTcpTransport = struct {
 
         var total_read: usize = 0;
         while (total_read < resp_len) {
-            const n = try std.posix.read(conn.fd, response[total_read..]);
+            const n = try readWithTimeout(conn.fd, response[total_read..], timeout_ms);
             if (n == 0) return error.ConnectionClosed;
             total_read += n;
         }
@@ -566,11 +572,7 @@ pub const PooledTcpTransport = struct {
         errdefer self.pool.release(conn, false, 0, 0);
 
         // Connect if needed
-        std.posix.connect(conn.fd, &self.address.any, self.address.getOsSockLen()) catch |err| {
-            if (err != error.WouldBlock and err != error.AlreadyConnected) {
-                return err;
-            }
-        };
+        try connectWithTimeout(conn.fd, self.address, timeout_ms);
 
         var total_sent: u64 = 0;
         var total_recv: u64 = 0;
@@ -580,8 +582,8 @@ pub const PooledTcpTransport = struct {
             var length_prefix: [2]u8 = undefined;
             std.mem.writeInt(u16, &length_prefix, @intCast(q.len), .big);
 
-            _ = try std.posix.write(conn.fd, &length_prefix);
-            _ = try std.posix.write(conn.fd, q);
+            try writeAllWithTimeout(conn.fd, &length_prefix, timeout_ms);
+            try writeAllWithTimeout(conn.fd, q, timeout_ms);
             total_sent += q.len + 2;
         }
 
@@ -598,8 +600,11 @@ pub const PooledTcpTransport = struct {
         for (responses) |*resp| {
             // Read response length
             var resp_len_buf: [2]u8 = undefined;
-            _ = try std.posix.read(conn.fd, &resp_len_buf);
+            try readExactWithTimeout(conn.fd, &resp_len_buf, timeout_ms);
             const resp_len = std.mem.readInt(u16, &resp_len_buf, .big);
+            if (resp_len == 0 or resp_len > max_message_size) {
+                return error.MessageTooLarge;
+            }
 
             // Read response
             const response = try self.allocator.alloc(u8, resp_len);
@@ -607,7 +612,7 @@ pub const PooledTcpTransport = struct {
 
             var total_read: usize = 0;
             while (total_read < resp_len) {
-                const n = try std.posix.read(conn.fd, response[total_read..]);
+                const n = try readWithTimeout(conn.fd, response[total_read..], timeout_ms);
                 if (n == 0) return error.ConnectionClosed;
                 total_read += n;
             }
@@ -620,6 +625,87 @@ pub const PooledTcpTransport = struct {
         return responses;
     }
 };
+
+fn connectWithTimeout(sock: std.posix.socket_t, address: std.net.Address, timeout_ms: u32) !void {
+    std.posix.connect(sock, &address.any, address.getOsSockLen()) catch |err| switch (err) {
+        error.WouldBlock, error.InProgress => {},
+        error.IsConnected => return,
+        else => return err,
+    };
+
+    var poll_fds = [_]std.posix.pollfd{.{
+        .fd = sock,
+        .events = std.posix.POLL.OUT,
+        .revents = 0,
+    }};
+    const rc = try std.posix.poll(&poll_fds, @intCast(timeout_ms));
+    if (rc == 0) return error.Timeout;
+    if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
+        return error.ConnectionClosed;
+    }
+    try std.posix.getsockoptError(sock);
+}
+
+fn writeAllWithTimeout(sock: std.posix.socket_t, data: []const u8, timeout_ms: u32) !void {
+    var sent: usize = 0;
+    const deadline = std.time.milliTimestamp() + timeout_ms;
+    while (sent < data.len) {
+        const now = std.time.milliTimestamp();
+        if (now >= deadline) return error.Timeout;
+        const remaining: i32 = @intCast(@max(@as(i64, 0), deadline - now));
+
+        var poll_fds = [_]std.posix.pollfd{.{
+            .fd = sock,
+            .events = std.posix.POLL.OUT,
+            .revents = 0,
+        }};
+        const rc = try std.posix.poll(&poll_fds, remaining);
+        if (rc == 0) return error.Timeout;
+        if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
+            return error.ConnectionClosed;
+        }
+
+        const n = std.posix.write(sock, data[sent..]) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        sent += n;
+    }
+}
+
+fn readWithTimeout(sock: std.posix.socket_t, buffer: []u8, timeout_ms: u32) !usize {
+    const deadline = std.time.milliTimestamp() + timeout_ms;
+    while (true) {
+        const now = std.time.milliTimestamp();
+        if (now >= deadline) return error.Timeout;
+        const remaining: i32 = @intCast(@max(@as(i64, 0), deadline - now));
+
+        var poll_fds = [_]std.posix.pollfd{.{
+            .fd = sock,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const rc = try std.posix.poll(&poll_fds, remaining);
+        if (rc == 0) return error.Timeout;
+        if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
+            return error.ConnectionClosed;
+        }
+
+        return std.posix.read(sock, buffer) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+    }
+}
+
+fn readExactWithTimeout(sock: std.posix.socket_t, buffer: []u8, timeout_ms: u32) !void {
+    var read_total: usize = 0;
+    while (read_total < buffer.len) {
+        const n = try readWithTimeout(sock, buffer[read_total..], timeout_ms);
+        if (n == 0) return error.ConnectionClosed;
+        read_total += n;
+    }
+}
 
 // ============================================================================
 // Tests

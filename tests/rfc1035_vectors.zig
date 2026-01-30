@@ -203,7 +203,7 @@ test "header flags encoding" {
 
 test "build DNS query message" {
     const allocator = std.testing.allocator;
-    const query = try message.buildQuery(allocator, 0x5678, "test.example.com", .a, true);
+    const query = try message.buildQuery(allocator, 0x5678, "test.example.com", .a, .in, true);
     defer allocator.free(query);
 
     const msg = try message.Message.parse(query);

@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2024-2025 CodePros
 #
-# NOTE: Build/test skipped - requires Zig 0.15.x which is not yet released.
-# Security scanning is enabled.
+# Build, test, and security scanning are enabled.
 
 include:
   # Security scanning (Advanced SAST enabled by default)
@@ -33,7 +32,36 @@ default:
     - linux
 
 stages:
+  - build
+  - test
   - security
   - sbom
   - release
 
+# SEC-GAP-058: Pin Docker images by digest (CWE-829)
+# Image digests should be verified and updated regularly
+# To find digest: docker pull ziglang/zig:0.15.1 && docker inspect --format='{{.RepoDigests}}' ziglang/zig:0.15.1
+# Example pinned format: ziglang/zig:0.15.1@sha256:abc123...
+
+build:
+  stage: build
+  # TODO: Replace with pinned digest - ziglang/zig@sha256:<digest>
+  # Current tag-based image (not pinned, security risk)
+  image: ziglang/zig:0.15.1
+  script:
+    - zig version
+    - zig build
+  artifacts:
+    when: always
+    paths:
+      - zig-out/
+      - zig-cache/
+
+test:
+  stage: test
+  # TODO: Replace with pinned digest - ziglang/zig@sha256:<digest>
+  # Current tag-based image (not pinned, security risk)
+  image: ziglang/zig:0.15.1
+  script:
+    - zig version
+    - zig build test --summary all

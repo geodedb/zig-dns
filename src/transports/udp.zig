@@ -55,15 +55,31 @@ pub const UdpTransport = struct {
         // Send query
         _ = try std.posix.sendto(sock, wire_req, 0, &self.address.any, self.address.getOsSockLen());
 
-        // Receive response
-        var buffer: [65535]u8 = undefined;
-        const recv_len = try std.posix.recvfrom(sock, &buffer, 0, null, null);
+        const start_ms = std.time.milliTimestamp();
+        while (true) {
+            if (std.time.milliTimestamp() - start_ms >= timeout_ms) {
+                return error.Timeout;
+            }
 
-        // Copy response
-        const response = try self.allocator.alloc(u8, recv_len);
-        @memcpy(response, buffer[0..recv_len]);
+            // Receive response (capture source)
+            var buffer: [65535]u8 = undefined;
+            var src_addr: std.net.Address = undefined;
+            var src_len: std.posix.socklen_t = @sizeOf(std.net.Address);
+            const recv_len = std.posix.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len) catch |err| switch (err) {
+                error.WouldBlock, error.ConnectionTimedOut => return error.Timeout,
+                else => return err,
+            };
 
-        return response;
+            if (!std.net.Address.eql(src_addr, self.address)) {
+                continue;
+            }
+
+            // Copy response
+            const response = try self.allocator.alloc(u8, recv_len);
+            @memcpy(response, buffer[0..recv_len]);
+
+            return response;
+        }
     }
 
     fn closeImpl(_: *anyopaque) void {

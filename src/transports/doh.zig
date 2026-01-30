@@ -76,6 +76,7 @@ pub const HttpBackend = struct {
             url: []const u8,
             headers: []const Header,
             timeout_ms: u32,
+            tls: TlsConfig,
         ) anyerror!Response,
 
         /// Perform HTTP POST request
@@ -86,6 +87,7 @@ pub const HttpBackend = struct {
             headers: []const Header,
             body: []const u8,
             timeout_ms: u32,
+            tls: TlsConfig,
         ) anyerror!Response,
 
         /// Close/cleanup the backend
@@ -97,10 +99,17 @@ pub const HttpBackend = struct {
         value: []const u8,
     };
 
+    pub const TlsConfig = struct {
+        ca_pem: []const u8,
+        bootstrap_ip: ?channel.SocketAddress,
+    };
+
     pub const Response = struct {
         status_code: u16,
         body: []u8,
         allocator: std.mem.Allocator,
+        /// Content-Type header value (SEC-GAP-056: CWE-319)
+        content_type: ?[]const u8 = null,
 
         pub fn deinit(self: *Response) void {
             self.allocator.free(self.body);
@@ -112,8 +121,9 @@ pub const HttpBackend = struct {
         url: []const u8,
         headers: []const Header,
         timeout_ms: u32,
+        tls: TlsConfig,
     ) !Response {
-        return self.vtable.get(self.ctx, url, headers, timeout_ms);
+        return self.vtable.get(self.ctx, url, headers, timeout_ms, tls);
     }
 
     pub fn post(
@@ -122,8 +132,9 @@ pub const HttpBackend = struct {
         headers: []const Header,
         body: []const u8,
         timeout_ms: u32,
+        tls: TlsConfig,
     ) !Response {
-        return self.vtable.post(self.ctx, url, headers, body, timeout_ms);
+        return self.vtable.post(self.ctx, url, headers, body, timeout_ms, tls);
     }
 
     pub fn deinit(self: HttpBackend) void {
@@ -158,6 +169,11 @@ pub const DoHTransport = struct {
 
     /// Initialize DoH transport with HTTP backend
     pub fn init(allocator: std.mem.Allocator, options: DoHOptions, http_backend: ?HttpBackend) !Self {
+        // Validate HTTPS scheme (SEC-GAP-056: CWE-319)
+        if (!std.mem.startsWith(u8, options.uri, "https://")) {
+            return error.HttpsRequired;
+        }
+
         return Self{
             .allocator = allocator,
             .options = options,
@@ -184,6 +200,11 @@ pub const DoHTransport = struct {
 
         const backend = self.http_backend orelse return error.NoHttpBackend;
 
+        const tls = HttpBackend.TlsConfig{
+            .ca_pem = self.options.ca_pem,
+            .bootstrap_ip = self.options.bootstrap_ip,
+        };
+
         // Build URL and headers
         const headers = [_]HttpBackend.Header{
             .{ .name = "Accept", .value = media_type },
@@ -203,21 +224,43 @@ pub const DoHTransport = struct {
             );
             defer self.allocator.free(url);
 
-            var response = try backend.get(url, &headers, timeout_ms);
+            var response = try backend.get(url, &headers, timeout_ms, tls);
             defer response.deinit();
 
             if (response.status_code != 200) {
                 return error.HttpError;
             }
 
+            // Validate Content-Type (SEC-GAP-056: CWE-319)
+            if (response.content_type) |ct| {
+                if (!std.mem.eql(u8, ct, media_type)) {
+                    return error.InvalidContentType;
+                }
+            }
+
+            if (response.body.len > max_response_size) {
+                return error.MessageTooLarge;
+            }
+
             return try self.allocator.dupe(u8, response.body);
         } else {
             // POST method: send wire format in body
-            var response = try backend.post(self.options.uri, &headers, wire_req, timeout_ms);
+            var response = try backend.post(self.options.uri, &headers, wire_req, timeout_ms, tls);
             defer response.deinit();
 
             if (response.status_code != 200) {
                 return error.HttpError;
+            }
+
+            // Validate Content-Type (SEC-GAP-056: CWE-319)
+            if (response.content_type) |ct| {
+                if (!std.mem.eql(u8, ct, media_type)) {
+                    return error.InvalidContentType;
+                }
+            }
+
+            if (response.body.len > max_response_size) {
+                return error.MessageTooLarge;
             }
 
             return try self.allocator.dupe(u8, response.body);
@@ -350,6 +393,8 @@ pub const MockHttpBackend = struct {
         method: []const u8,
         url: []const u8,
         body: []const u8,
+        ca_pem: []const u8,
+        bootstrap_ip: ?channel.SocketAddress,
     };
 
     const Self = @This();
@@ -373,6 +418,10 @@ pub const MockHttpBackend = struct {
             self.allocator.free(r.method);
             self.allocator.free(r.url);
             self.allocator.free(r.body);
+            self.allocator.free(r.ca_pem);
+            if (r.bootstrap_ip) |addr| {
+                self.allocator.free(addr.host);
+            }
         }
         self.requests.deinit(self.allocator);
     }
@@ -392,16 +441,35 @@ pub const MockHttpBackend = struct {
         };
     }
 
-    fn getImpl(ctx: *anyopaque, url: []const u8, headers: []const HttpBackend.Header, timeout_ms: u32) anyerror!HttpBackend.Response {
+    fn getImpl(
+        ctx: *anyopaque,
+        url: []const u8,
+        headers: []const HttpBackend.Header,
+        timeout_ms: u32,
+        tls: HttpBackend.TlsConfig,
+    ) anyerror!HttpBackend.Response {
         _ = headers;
         _ = timeout_ms;
         const self: *Self = @ptrCast(@alignCast(ctx));
+
+        const ca_copy = try self.allocator.dupe(u8, tls.ca_pem);
+        errdefer self.allocator.free(ca_copy);
+        const bootstrap_copy = if (tls.bootstrap_ip) |addr|
+            channel.SocketAddress{
+                .host = try self.allocator.dupe(u8, addr.host),
+                .port = addr.port,
+            }
+        else
+            null;
+        errdefer if (bootstrap_copy) |addr| self.allocator.free(addr.host);
 
         // Record request
         try self.requests.append(self.allocator, .{
             .method = try self.allocator.dupe(u8, "GET"),
             .url = try self.allocator.dupe(u8, url),
             .body = try self.allocator.dupe(u8, ""),
+            .ca_pem = ca_copy,
+            .bootstrap_ip = bootstrap_copy,
         });
 
         if (self.response_index >= self.responses.items.len) {
@@ -418,16 +486,36 @@ pub const MockHttpBackend = struct {
         };
     }
 
-    fn postImpl(ctx: *anyopaque, url: []const u8, headers: []const HttpBackend.Header, body: []const u8, timeout_ms: u32) anyerror!HttpBackend.Response {
+    fn postImpl(
+        ctx: *anyopaque,
+        url: []const u8,
+        headers: []const HttpBackend.Header,
+        body: []const u8,
+        timeout_ms: u32,
+        tls: HttpBackend.TlsConfig,
+    ) anyerror!HttpBackend.Response {
         _ = headers;
         _ = timeout_ms;
         const self: *Self = @ptrCast(@alignCast(ctx));
+
+        const ca_copy = try self.allocator.dupe(u8, tls.ca_pem);
+        errdefer self.allocator.free(ca_copy);
+        const bootstrap_copy = if (tls.bootstrap_ip) |addr|
+            channel.SocketAddress{
+                .host = try self.allocator.dupe(u8, addr.host),
+                .port = addr.port,
+            }
+        else
+            null;
+        errdefer if (bootstrap_copy) |addr| self.allocator.free(addr.host);
 
         // Record request
         try self.requests.append(self.allocator, .{
             .method = try self.allocator.dupe(u8, "POST"),
             .url = try self.allocator.dupe(u8, url),
             .body = try self.allocator.dupe(u8, body),
+            .ca_pem = ca_copy,
+            .bootstrap_ip = bootstrap_copy,
         });
 
         if (self.response_index >= self.responses.items.len) {
@@ -571,7 +659,12 @@ test "MockHttpBackend basic" {
     try mock.addResponse(200, "test response");
 
     const backend = mock.backend();
-    var response = try backend.get("https://example.com", &.{}, 1000);
+    var response = try backend.get(
+        "https://example.com",
+        &.{},
+        1000,
+        .{ .ca_pem = "", .bootstrap_ip = null },
+    );
     defer response.deinit();
 
     try std.testing.expectEqual(@as(u16, 200), response.status_code);
@@ -589,7 +682,8 @@ test "DoHTransport with MockHttpBackend GET" {
 
     var doh = try DoHTransport.init(allocator, .{
         .uri = "https://dns.example.com/dns-query",
-        .ca_pem = "",
+        .ca_pem = "test-ca",
+        .bootstrap_ip = .{ .host = "9.9.9.9", .port = 443 },
         .prefer_get = true,
     }, http_mock.backend());
     defer doh.deinit();
@@ -604,6 +698,10 @@ test "DoHTransport with MockHttpBackend GET" {
     // Verify request was recorded
     try std.testing.expectEqual(@as(usize, 1), http_mock.requests.items.len);
     try std.testing.expectEqualStrings("GET", http_mock.requests.items[0].method);
+    try std.testing.expectEqualStrings("test-ca", http_mock.requests.items[0].ca_pem);
+    try std.testing.expect(http_mock.requests.items[0].bootstrap_ip != null);
+    try std.testing.expectEqualStrings("9.9.9.9", http_mock.requests.items[0].bootstrap_ip.?.host);
+    try std.testing.expectEqual(@as(u16, 443), http_mock.requests.items[0].bootstrap_ip.?.port);
 }
 
 test "DoHTransport with MockHttpBackend POST" {
@@ -631,4 +729,28 @@ test "DoHTransport with MockHttpBackend POST" {
     // Verify POST was used
     try std.testing.expectEqual(@as(usize, 1), http_mock.requests.items.len);
     try std.testing.expectEqualStrings("POST", http_mock.requests.items[0].method);
+}
+
+test "DoHTransport response size cap" {
+    const allocator = std.testing.allocator;
+
+    var http_mock = MockHttpBackend.init(allocator);
+    defer http_mock.deinit();
+
+    const oversized = try allocator.alloc(u8, DoHTransport.max_response_size + 1);
+    defer allocator.free(oversized);
+    @memset(oversized, 0xAB);
+
+    try http_mock.addResponse(200, oversized);
+
+    var doh = try DoHTransport.init(allocator, .{
+        .uri = "https://dns.example.com/dns-query",
+        .ca_pem = "",
+        .prefer_get = true,
+    }, http_mock.backend());
+    defer doh.deinit();
+
+    var ch = doh.channel();
+    const wire_req = [_]u8{ 0x00, 0x01, 0x01, 0x00 };
+    try std.testing.expectError(error.MessageTooLarge, ch.query(&wire_req, 1000));
 }

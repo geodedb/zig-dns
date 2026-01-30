@@ -18,24 +18,15 @@ paths = [
 ]
 regexTarget = "match"
 regexes = [
-  # TSIG/security code patterns - explicit allowlist instead of directory
-  '''secret: \[\d+\]u8''',                   # Zig array type declarations
-  '''var key: \[\d+\]u8''',                  # Key buffer declarations
+  # TSIG/security code patterns - narrow allowlist to protocol identifiers
   '''TSIG''',                                # TSIG protocol references
   '''HMAC''',                                # HMAC algorithm names
-  '''computeClientCookie''',                 # DNS cookie computation
   '''hmac_sha\d+''',                         # HMAC algorithm enum values
   '''hmac_md5''',                            # MD5 algorithm enum value
   '''TsigKey''',                             # TSIG key type name
   '''Sig0KeyPair''',                         # SIG(0) key type name
-  '''private_key''',                         # Private key field names
-  '''public_key''',                          # Public key field names
-  '''secret_key''',                          # Secret key field names
-  '''\.secret''',                            # Secret field access
-  '''initBase64.*secret''',                  # Base64 secret initialization
-  # EDNS cookie patterns (previously allowlisted via path)
-  '''client_cookie:.*\[8\]u8''',             # Cookie field declaration
-  '''server_cookie:.*\?\[\]const u8''',      # Optional server cookie field
+  # EDNS cookie patterns
+  '''computeClientCookie''',                 # DNS cookie computation
   '''Cookie\.''',                            # Cookie struct methods
   '''SipHash''',                             # SipHash for cookie computation
 ]

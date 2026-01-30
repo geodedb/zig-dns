@@ -118,6 +118,8 @@ pub const TlsConnectOptions = struct {
     tls_version: TlsVersion = .tls_1_3,
     /// Connection timeout in milliseconds
     timeout_ms: u32 = 5000,
+    /// Explicitly use system CA trust store (SEC-GAP-057: CWE-295)
+    use_system_ca: bool = false,
 };
 
 /// TLS version
@@ -206,6 +208,12 @@ pub const DoTTransport = struct {
             return error.InvalidAlpn;
         }
 
+        // Validate CA trust configuration (SEC-GAP-057: CWE-295)
+        // Either ca_pem must be provided OR use_system_ca must be explicitly true
+        if (options.ca_pem.len == 0 and !options.use_system_ca) {
+            return error.NoCaTrustConfigured;
+        }
+
         return Self{
             .allocator = allocator,
             .options = options,
@@ -264,6 +272,7 @@ pub const DoTTransport = struct {
             .alpn = self.options.alpn_dot,
             .tls_version = .tls_1_3,
             .timeout_ms = timeout_ms,
+            .use_system_ca = self.options.use_system_ca,
         });
 
         // Verify ALPN was negotiated correctly

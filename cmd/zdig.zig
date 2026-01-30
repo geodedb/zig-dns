@@ -402,6 +402,56 @@ fn asciiUpper(s: []const u8, buf: []u8) []const u8 {
     return buf[0..len];
 }
 
+/// Escape a string for JSON output (SEC-GAP-054: CWE-117)
+fn escapeJsonString(allocator: Allocator, input: []const u8) ![]u8 {
+    var escape_count: usize = 0;
+    for (input) |c| {
+        if (c == '"' or c == '\\' or c < 0x20) escape_count += 1;
+    }
+    if (escape_count == 0) return try allocator.dupe(u8, input);
+
+    var output = try allocator.alloc(u8, input.len + escape_count * 5);
+    errdefer allocator.free(output);
+
+    var out_idx: usize = 0;
+    for (input) |c| {
+        if (c == '"') {
+            output[out_idx] = '\\';
+            output[out_idx + 1] = '"';
+            out_idx += 2;
+        } else if (c == '\\') {
+            output[out_idx] = '\\';
+            output[out_idx + 1] = '\\';
+            out_idx += 2;
+        } else if (c == '\n') {
+            output[out_idx] = '\\';
+            output[out_idx + 1] = 'n';
+            out_idx += 2;
+        } else if (c == '\r') {
+            output[out_idx] = '\\';
+            output[out_idx + 1] = 'r';
+            out_idx += 2;
+        } else if (c == '\t') {
+            output[out_idx] = '\\';
+            output[out_idx + 1] = 't';
+            out_idx += 2;
+        } else if (c < 0x20) {
+            const hex = "0123456789abcdef";
+            output[out_idx] = '\\';
+            output[out_idx + 1] = 'u';
+            output[out_idx + 2] = '0';
+            output[out_idx + 3] = '0';
+            output[out_idx + 4] = hex[c >> 4];
+            output[out_idx + 5] = hex[c & 0x0F];
+            out_idx += 6;
+        } else {
+            output[out_idx] = c;
+            out_idx += 1;
+        }
+    }
+    return allocator.realloc(output, out_idx);
+}
+
 fn performQuery(allocator: Allocator, options: *const QueryOptions) !void {
     var stdout = StdoutContext{};
     defer stdout.flush() catch {};
@@ -410,11 +460,11 @@ fn performQuery(allocator: Allocator, options: *const QueryOptions) !void {
     // Record start time
     const query_start = std.time.milliTimestamp();
 
-    // Generate query ID
-    const id: u16 = @truncate(@as(u64, @bitCast(std.time.milliTimestamp())));
+    // Generate cryptographically secure query ID (SEC-GAP-035: CWE-330)
+    const id: u16 = std.crypto.random.int(u16);
 
     // Build the query message using the library's buildQuery function
-    const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, !options.no_recurse);
+    const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, options.qclass, !options.no_recurse);
     defer allocator.free(query_data);
 
     // Send query and get response
@@ -425,6 +475,45 @@ fn performQuery(allocator: Allocator, options: *const QueryOptions) !void {
 
     // Parse response
     const response = try dns.message.Message.parse(response_data);
+
+    // Validate response (SEC-GAP-043: CWE-345)
+    // 1. Validate transaction ID matches
+    if (response.header.id != id) {
+        return error.TransactionIdMismatch;
+    }
+
+    // 2. Validate question section matches our query
+    if (response.header.qdcount > 0) {
+        var q_iter = response.questions();
+        if (try q_iter.next()) |q| {
+            // Validate QTYPE matches
+            if (q.qtype != options.qtype) {
+                return error.QuestionTypeMismatch;
+            }
+            // Validate QCLASS matches
+            if (q.qclass != options.qclass) {
+                return error.QuestionClassMismatch;
+            }
+            // Validate QNAME matches (compare the wire format representations)
+            const q_name_str = try q.qname.toString(allocator, response_data);
+            defer allocator.free(q_name_str);
+
+            // Normalize both names for comparison (remove trailing dots)
+            const query_name_normalized = if (options.name.len > 0 and options.name[options.name.len - 1] == '.')
+                options.name[0..options.name.len - 1]
+            else
+                options.name;
+
+            const response_name_normalized = if (q_name_str.len > 0 and q_name_str[q_name_str.len - 1] == '.')
+                q_name_str[0..q_name_str.len - 1]
+            else
+                q_name_str;
+
+            if (!std.ascii.eqlIgnoreCase(query_name_normalized, response_name_normalized)) {
+                return error.QuestionNameMismatch;
+            }
+        }
+    }
 
     // Output the response
     if (options.json) {
@@ -462,25 +551,68 @@ fn sendUdp(allocator: Allocator, address: std.net.Address, query_data: []const u
     // Send query
     _ = try std.posix.sendto(sock, query_data, 0, &address.any, address.getOsSockLen());
 
-    // Receive response
+    // Receive response with source validation (SEC-GAP-042)
     const response_buf = try allocator.alloc(u8, 65535);
     errdefer allocator.free(response_buf);
 
-    const recv_len = std.posix.recvfrom(sock, response_buf, 0, null, null) catch |err| {
+    // Capture source address to validate it matches expected server
+    var source_addr: std.posix.sockaddr = undefined;
+    var source_addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(source_addr));
+
+    const recv_len = std.posix.recvfrom(sock, response_buf, 0, &source_addr, &source_addr_len) catch |err| {
         allocator.free(response_buf);
         return err;
     };
+
+    // Validate source address matches the server we queried (CWE-345)
+    if (!addressMatches(&address.any, &source_addr)) {
+        allocator.free(response_buf);
+        return error.SourceAddressMismatch;
+    }
 
     // Resize to actual length
     return allocator.realloc(response_buf, recv_len);
 }
 
+/// Validate that two socket addresses match (for response source validation)
+fn addressMatches(expected: *const std.posix.sockaddr, received: *const std.posix.sockaddr) bool {
+    // Check address family
+    if (expected.family != received.family) return false;
+
+    if (expected.family == std.posix.AF.INET) {
+        const expected_in: *const std.posix.sockaddr.in = @ptrCast(@alignCast(expected));
+        const received_in: *const std.posix.sockaddr.in = @ptrCast(@alignCast(received));
+        // Compare IPv4 address and port
+        return expected_in.addr == received_in.addr and expected_in.port == received_in.port;
+    } else if (expected.family == std.posix.AF.INET6) {
+        const expected_in6: *const std.posix.sockaddr.in6 = @ptrCast(@alignCast(expected));
+        const received_in6: *const std.posix.sockaddr.in6 = @ptrCast(@alignCast(received));
+        // Compare IPv6 address and port
+        return std.mem.eql(u8, &expected_in6.addr, &received_in6.addr) and
+               expected_in6.port == received_in6.port;
+    }
+
+    return false;
+}
+
 fn sendTcp(allocator: Allocator, address: std.net.Address, query_data: []const u8, timeout_secs: u32) ![]u8 {
-    _ = timeout_secs;
     const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
     defer std.posix.close(sock);
 
-    // Connect
+    // Set timeouts (SEC-GAP-047: CWE-400)
+    const timeout_us: i64 = @as(i64, timeout_secs) * 1_000_000;
+    const timeout = std.posix.timeval{
+        .sec = @intCast(@divFloor(timeout_us, 1_000_000)),
+        .usec = @intCast(@mod(timeout_us, 1_000_000)),
+    };
+
+    // Set send timeout
+    try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout));
+    // Set receive timeout
+    try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+
+    // Connect (timeout controlled by OS, typically ~75 seconds)
+    // For finer control, would need non-blocking socket + select/poll
     try std.posix.connect(sock, &address.any, address.getOsSockLen());
 
     // TCP DNS uses 2-byte length prefix
@@ -489,9 +621,14 @@ fn sendTcp(allocator: Allocator, address: std.net.Address, query_data: []const u
     _ = try std.posix.send(sock, &len_buf, 0);
     _ = try std.posix.send(sock, query_data, 0);
 
-    // Read response length
+    // Read response length with exact-read loop (SEC-GAP-046: CWE-400)
     var recv_len_buf: [2]u8 = undefined;
-    _ = try std.posix.recv(sock, &recv_len_buf, 0);
+    var len_bytes_read: usize = 0;
+    while (len_bytes_read < 2) {
+        const n = try std.posix.recv(sock, recv_len_buf[len_bytes_read..], 0);
+        if (n == 0) return error.ConnectionClosed;
+        len_bytes_read += n;
+    }
     const response_len = std.mem.readInt(u16, &recv_len_buf, .big);
 
     // Read response
@@ -744,8 +881,11 @@ fn outputJson(allocator: Allocator, writer: anytype, response: dns.message.Messa
         q_first = false;
         const q_name = try q.qname.toString(allocator, data);
         defer allocator.free(q_name);
+        // Escape qname for JSON (SEC-GAP-054: CWE-117)
+        const q_name_escaped = try escapeJsonString(allocator, q_name);
+        defer allocator.free(q_name_escaped);
         try writer.print("    {{\"name\": \"{s}\", \"type\": \"{s}\", \"class\": \"{s}\"}}", .{
-            q_name,
+            q_name_escaped,
             @tagName(q.qtype),
             @tagName(q.qclass),
         });
@@ -792,9 +932,12 @@ fn outputJson(allocator: Allocator, writer: anytype, response: dns.message.Messa
 fn outputJsonRR(allocator: Allocator, writer: anytype, rr: dns.record.ResourceRecord, data: []const u8) !void {
     const rr_name = try rr.name.toString(allocator, data);
     defer allocator.free(rr_name);
+    // Escape rr_name for JSON (SEC-GAP-054: CWE-117)
+    const rr_name_escaped = try escapeJsonString(allocator, rr_name);
+    defer allocator.free(rr_name_escaped);
 
     try writer.print("    {{\"name\": \"{s}\", \"type\": \"{s}\", \"class\": \"{s}\", \"ttl\": {d}, \"data\": \"", .{
-        rr_name,
+        rr_name_escaped,
         @tagName(rr.rtype),
         @tagName(rr.class),
         rr.ttl,
@@ -819,11 +962,11 @@ fn performTrace(allocator: Allocator, options: *const QueryOptions) !void {
     const max_depth = 20;
 
     while (depth < max_depth) {
-        // Generate query ID
-        const id: u16 = @truncate(@as(u64, @bitCast(std.time.milliTimestamp())));
+        // Generate cryptographically secure query ID (SEC-GAP-035: CWE-330)
+        const id: u16 = std.crypto.random.int(u16);
 
         // Build non-recursive query
-        const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, false);
+        const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, options.qclass, false);
         defer allocator.free(query_data);
 
         // Parse server address

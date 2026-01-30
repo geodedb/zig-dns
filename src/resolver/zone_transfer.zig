@@ -863,7 +863,7 @@ test "ZoneTransferConfig authentication enforcement" {
         .tsig_key = TsigKey{
             .name = "transfer-key",
             .algorithm = "hmac-sha256",
-            .secret = "secret",
+            .secret = "test-key-material",
         },
         .require_auth = true,
     };

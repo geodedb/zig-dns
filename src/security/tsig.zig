@@ -808,7 +808,7 @@ test "Algorithm.macLength" {
 }
 
 test "TsigKey.init" {
-    const key = TsigKey.init("test-key", .hmac_sha256, "secret");
+    const key = TsigKey.init("test-key", .hmac_sha256, "test-key-material");
     try std.testing.expectEqualStrings("test-key", key.name);
     try std.testing.expectEqual(Algorithm.hmac_sha256, key.algorithm);
 }

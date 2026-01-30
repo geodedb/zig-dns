@@ -105,8 +105,10 @@ pub const StubResolver = struct {
         while (attempt < max_attempts) : (attempt += 1) {
             const channel = self.selectChannel();
 
+            const id = try getSecureRandomId();
+
             // Build query
-            const query = try self.buildQuery(qname, qtype);
+            const query = try self.buildQuery(id, qname, qtype);
             defer self.allocator.free(query);
 
             // Send query
@@ -117,12 +119,15 @@ pub const StubResolver = struct {
                 }
                 return err;
             };
-            errdefer self.allocator.free(response);
-
-            // Parse response
             const msg = message.Message.parse(response) catch {
+                self.allocator.free(response);
                 continue;
             };
+
+            if (msg.header.id != id or !responseMatchesQuery(self.allocator, msg, qname, qtype, .in)) {
+                self.allocator.free(response);
+                continue;
+            }
 
             // Check for truncation - retry over TCP
             if (msg.header.tc and channel.kind == .udp) {
@@ -154,15 +159,24 @@ pub const StubResolver = struct {
                 self.metrics.incFormerr();
                 self.metrics.incEdnsRetries();
 
-                const query_no_edns = try self.buildQueryNoEdns(qname, qtype);
+                const retry_id = try getSecureRandomId();
+                const query_no_edns = try self.buildQueryNoEdns(retry_id, qname, qtype);
                 defer self.allocator.free(query_no_edns);
 
                 const retry_response = channel.query(query_no_edns, self.options.timeout_ms) catch continue;
+                const retry_msg = message.Message.parse(retry_response) catch {
+                    self.allocator.free(retry_response);
+                    continue;
+                };
+                if (retry_msg.header.id != retry_id or !responseMatchesQuery(self.allocator, retry_msg, qname, qtype, .in)) {
+                    self.allocator.free(retry_response);
+                    continue;
+                }
                 return Answer{
                     .status = .success,
                     .qname = qname,
                     .qtype = qtype,
-                    .rcode = .noerror,
+                    .rcode = retry_msg.header.rcode,
                     .response_data = retry_response,
                     .used_tcp = false,
                     .from_cache = false,
@@ -233,11 +247,9 @@ pub const StubResolver = struct {
         return prng.random().int(u16);
     }
 
-    fn buildQuery(self: *Self, qname: []const u8, qtype: Type) ![]u8 {
-        const id = try getSecureRandomId();
-
+    fn buildQuery(self: *Self, id: u16, qname: []const u8, qtype: Type) ![]u8 {
         // Build basic query
-        const query = try message.buildQuery(self.allocator, id, try types.Name.init(qname), qtype, true);
+        const query = try message.buildQuery(self.allocator, id, qname, qtype, .in, true);
         errdefer self.allocator.free(query);
 
         if (!self.options.use_edns) {
@@ -263,11 +275,42 @@ pub const StubResolver = struct {
         return full_query;
     }
 
-    fn buildQueryNoEdns(self: *Self, qname: []const u8, qtype: Type) ![]u8 {
-        const id = try getSecureRandomId();
-        return message.buildQuery(self.allocator, id, try types.Name.init(qname), qtype, true);
+    fn buildQueryNoEdns(self: *Self, id: u16, qname: []const u8, qtype: Type) ![]u8 {
+        return message.buildQuery(self.allocator, id, qname, qtype, .in, true);
     }
 };
+
+fn trimTrailingDot(name: []const u8) []const u8 {
+    if (name.len > 0 and name[name.len - 1] == '.') {
+        return name[0 .. name.len - 1];
+    }
+    return name;
+}
+
+fn namesEqual(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(trimTrailingDot(a), trimTrailingDot(b));
+}
+
+fn responseMatchesQuery(
+    allocator: std.mem.Allocator,
+    msg: message.Message,
+    expected_name: []const u8,
+    expected_type: Type,
+    expected_class: Class,
+) bool {
+    if (!msg.header.qr) return false;
+    if (msg.header.opcode != .query) return false;
+    if (msg.header.qdcount == 0) return false;
+
+    var q_iter = msg.questions();
+    const q = (q_iter.next() catch null) orelse return false;
+    if (q.qtype != expected_type or q.qclass != expected_class) return false;
+
+    const qname = q.getName(allocator, msg.data) catch return false;
+    defer allocator.free(qname);
+
+    return namesEqual(qname, expected_name);
+}
 
 test "StubResolver basic" {
     const allocator = std.testing.allocator;

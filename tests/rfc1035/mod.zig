@@ -163,10 +163,10 @@ test "RFC 1035 Section 4.2 - Message ID uniqueness" {
     // Message IDs should be unique per query
     const allocator = std.testing.allocator;
 
-    const q1 = try message_mod.buildQuery(allocator, 0x0001, "test.com", .a, true);
+    const q1 = try message_mod.buildQuery(allocator, 0x0001, "test.com", .a, .in, true);
     defer allocator.free(q1);
 
-    const q2 = try message_mod.buildQuery(allocator, 0x0002, "test.com", .a, true);
+    const q2 = try message_mod.buildQuery(allocator, 0x0002, "test.com", .a, .in, true);
     defer allocator.free(q2);
 
     const msg1 = try message_mod.Message.parse(q1);

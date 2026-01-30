@@ -94,6 +94,12 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Cache Poisoning Protection (RFC 5452)
+    const cache_protection_mod = b.addModule("cache_protection", .{
+        .root_source_file = b.path("src/resolver/cache_protection.zig"),
+        .target = target,
+    });
+
     // DNS caching (RFC 1035 Section 7.4)
     // TTL-based response caching
     const cache_mod = b.addModule("cache", .{
@@ -103,6 +109,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "name", .module = name_mod },
             .{ .name = "types", .module = types_mod },
             .{ .name = "record", .module = record_mod },
+            .{ .name = "cache_protection", .module = cache_protection_mod },
         },
     });
 
@@ -225,12 +232,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "message", .module = message_mod },
             .{ .name = "name", .module = name_mod },
         },
-    });
-
-    // Cache Poisoning Protection (RFC 5452)
-    const cache_protection_mod = b.addModule("cache_protection", .{
-        .root_source_file = b.path("src/resolver/cache_protection.zig"),
-        .target = target,
     });
 
     // Zone Transfer (RFC 5936 AXFR, RFC 1995 IXFR)
@@ -543,6 +544,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "name", .module = name_mod },
                 .{ .name = "types", .module = types_mod },
                 .{ .name = "record", .module = record_mod },
+                .{ .name = "cache_protection", .module = cache_protection_mod },
             },
         },
         .{

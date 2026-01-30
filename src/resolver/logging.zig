@@ -126,6 +126,8 @@ pub const DnsLogger = struct {
     stats: Stats,
     /// Random for sampling
     rng: std.Random.DefaultPrng,
+    /// Last flush timestamp (for periodic flushing)
+    last_flush_ms: i64,
 
     const Self = @This();
 
@@ -157,6 +159,7 @@ pub const DnsLogger = struct {
             .buffer = .empty,
             .stats = .{},
             .rng = std.Random.DefaultPrng.init(seed),
+            .last_flush_ms = std.time.milliTimestamp(),
         };
     }
 
@@ -174,6 +177,9 @@ pub const DnsLogger = struct {
 
         self.stats.total_entries += 1;
 
+        // Check buffer bounds and flush if needed (SEC-GAP-055: CWE-400)
+        try self.checkAndFlush();
+
         try self.formatQueryEntry(entry, level);
         self.stats.logged_entries += 1;
     }
@@ -188,6 +194,9 @@ pub const DnsLogger = struct {
 
         self.stats.total_entries += 1;
 
+        // Check buffer bounds and flush if needed (SEC-GAP-055: CWE-400)
+        try self.checkAndFlush();
+
         try self.formatResponseEntry(entry, level);
         self.stats.logged_entries += 1;
     }
@@ -197,6 +206,9 @@ pub const DnsLogger = struct {
         if (@intFromEnum(level) < @intFromEnum(self.config.min_level)) return;
 
         self.stats.total_entries += 1;
+
+        // Check buffer bounds and flush if needed (SEC-GAP-055: CWE-400)
+        try self.checkAndFlush();
 
         const timestamp = std.time.milliTimestamp();
 
@@ -230,6 +242,10 @@ pub const DnsLogger = struct {
 
         switch (self.config.format) {
             .text => {
+                // Sanitize qname for text output (SEC-GAP-054: CWE-117)
+                const qname_safe = try sanitizeLogString(self.allocator, entry.qname);
+                defer self.allocator.free(qname_safe);
+
                 if (self.config.include_timestamp) {
                     try writer.print("{d} ", .{entry.timestamp});
                 }
@@ -237,7 +253,7 @@ pub const DnsLogger = struct {
                 if (self.config.include_query_id) {
                     try writer.print("id={d} ", .{entry.query_id});
                 }
-                try writer.print("qname={s} qtype={s} ", .{ entry.qname, entry.qtype });
+                try writer.print("qname={s} qtype={s} ", .{ qname_safe, entry.qtype });
                 if (entry.client_ip) |ip| {
                     const display_ip = if (self.config.anonymize_ips) anonymizeIp(ip) else ip;
                     try writer.print("client={s} ", .{display_ip});
@@ -251,13 +267,17 @@ pub const DnsLogger = struct {
                 try self.buffer.append(self.allocator, '\n');
             },
             .json => {
+                // Escape qname for JSON output (SEC-GAP-054: CWE-117)
+                const qname_escaped = try escapeJsonString(self.allocator, entry.qname);
+                defer self.allocator.free(qname_escaped);
+
                 try writer.print(
                     \\{{"type":"query","timestamp":{d},"level":"{s}","query_id":{d},"qname":"{s}","qtype":"{s}","qclass":"{s}","protocol":"{s}"
                 , .{
                     entry.timestamp,
                     level.toString(),
                     entry.query_id,
-                    entry.qname,
+                    qname_escaped,
                     entry.qtype,
                     entry.qclass,
                     entry.protocol,
@@ -267,12 +287,16 @@ pub const DnsLogger = struct {
                     try writer.print(",\"client_ip\":\"{s}\"", .{display_ip});
                 }
                 if (entry.server) |server| {
-                    try writer.print(",\"server\":\"{s}\"", .{server});
+                    const server_escaped = try escapeJsonString(self.allocator, server);
+                    defer self.allocator.free(server_escaped);
+                    try writer.print(",\"server\":\"{s}\"", .{server_escaped});
                 }
                 try writer.print(",\"edns\":{},\"dnssec\":{}}}\n", .{ entry.edns, entry.dnssec });
             },
             else => {
-                try writer.print("QUERY {s} {s}\n", .{ entry.qname, entry.qtype });
+                const qname_safe = try sanitizeLogString(self.allocator, entry.qname);
+                defer self.allocator.free(qname_safe);
+                try writer.print("QUERY {s} {s}\n", .{ qname_safe, entry.qtype });
             },
         }
     }
@@ -282,6 +306,10 @@ pub const DnsLogger = struct {
 
         switch (self.config.format) {
             .text => {
+                // Sanitize qname and error message for text output (SEC-GAP-054: CWE-117)
+                const qname_safe = try sanitizeLogString(self.allocator, entry.query.qname);
+                defer self.allocator.free(qname_safe);
+
                 if (self.config.include_timestamp) {
                     try writer.print("{d} ", .{entry.query.timestamp});
                 }
@@ -290,25 +318,31 @@ pub const DnsLogger = struct {
                     try writer.print("id={d} ", .{entry.query.query_id});
                 }
                 try writer.print("qname={s} rcode={s} time={d}ms ", .{
-                    entry.query.qname,
+                    qname_safe,
                     entry.rcode,
                     entry.response_time_ms,
                 });
                 try writer.print("answers={d} ", .{entry.answer_count});
                 if (entry.cache_hit) try writer.writeAll("cached=true ");
                 if (entry.error_msg) |msg| {
-                    try writer.print("error=\"{s}\"", .{msg});
+                    const msg_safe = try sanitizeLogString(self.allocator, msg);
+                    defer self.allocator.free(msg_safe);
+                    try writer.print("error=\"{s}\"", .{msg_safe});
                 }
                 try self.buffer.append(self.allocator, '\n');
             },
             .json => {
+                // Escape qname and error message for JSON output (SEC-GAP-054: CWE-117)
+                const qname_escaped = try escapeJsonString(self.allocator, entry.query.qname);
+                defer self.allocator.free(qname_escaped);
+
                 try writer.print(
                     \\{{"type":"response","timestamp":{d},"level":"{s}","query_id":{d},"qname":"{s}","qtype":"{s}","rcode":"{s}","response_time_ms":{d},"answer_count":{d},"authority_count":{d},"additional_count":{d},"truncated":{},"authenticated":{},"cache_hit":{}
                 , .{
                     entry.query.timestamp,
                     level.toString(),
                     entry.query.query_id,
-                    entry.query.qname,
+                    qname_escaped,
                     entry.query.qtype,
                     entry.rcode,
                     entry.response_time_ms,
@@ -320,12 +354,16 @@ pub const DnsLogger = struct {
                     entry.cache_hit,
                 });
                 if (entry.error_msg) |msg| {
-                    try writer.print(",\"error\":\"{s}\"", .{msg});
+                    const msg_escaped = try escapeJsonString(self.allocator, msg);
+                    defer self.allocator.free(msg_escaped);
+                    try writer.print(",\"error\":\"{s}\"", .{msg_escaped});
                 }
                 try writer.writeAll("}\n");
             },
             else => {
-                try writer.print("RESPONSE {s} {s} {d}ms\n", .{ entry.query.qname, entry.rcode, entry.response_time_ms });
+                const qname_safe = try sanitizeLogString(self.allocator, entry.query.qname);
+                defer self.allocator.free(qname_safe);
+                try writer.print("RESPONSE {s} {s} {d}ms\n", .{ qname_safe, entry.rcode, entry.response_time_ms });
             },
         }
     }
@@ -336,6 +374,25 @@ pub const DnsLogger = struct {
 
         const random_val = self.rng.random().float(f32);
         return random_val < self.config.sample_rate;
+    }
+
+    /// Check buffer size and flush if needed (SEC-GAP-055: CWE-400)
+    fn checkAndFlush(self: *Self) !void {
+        const now = std.time.milliTimestamp();
+
+        // Check if buffer exceeds configured size
+        if (self.buffer.items.len >= self.config.buffer_size) {
+            self.clearBuffer();
+            self.last_flush_ms = now;
+            return;
+        }
+
+        // Check if flush interval has elapsed
+        const time_since_flush: u32 = @intCast(now - self.last_flush_ms);
+        if (time_since_flush >= self.config.flush_interval_ms) {
+            self.clearBuffer();
+            self.last_flush_ms = now;
+        }
     }
 
     /// Get buffered log data
@@ -362,6 +419,83 @@ fn anonymizeIp(ip: []const u8) []const u8 {
     // In a real implementation, this would properly parse and mask the IP
     _ = ip;
     return "anonymized";
+}
+
+/// Escape a string for JSON output (SEC-GAP-054: CWE-117)
+/// Escapes: ", \, control characters (0x00-0x1F)
+pub fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    // Count how many characters need escaping
+    var escape_count: usize = 0;
+    for (input) |c| {
+        if (c == '"' or c == '\\' or c < 0x20) {
+            escape_count += 1;
+        }
+    }
+
+    if (escape_count == 0) {
+        return try allocator.dupe(u8, input);
+    }
+
+    // Allocate with extra space for escape sequences (worst case: \uXXXX for each)
+    var output = try allocator.alloc(u8, input.len + escape_count * 5);
+    errdefer allocator.free(output);
+
+    var out_idx: usize = 0;
+    for (input) |c| {
+        if (c == '"') {
+            output[out_idx] = '\\';
+            output[out_idx + 1] = '"';
+            out_idx += 2;
+        } else if (c == '\\') {
+            output[out_idx] = '\\';
+            output[out_idx + 1] = '\\';
+            out_idx += 2;
+        } else if (c == '\n') {
+            output[out_idx] = '\\';
+            output[out_idx + 1] = 'n';
+            out_idx += 2;
+        } else if (c == '\r') {
+            output[out_idx] = '\\';
+            output[out_idx + 1] = 'r';
+            out_idx += 2;
+        } else if (c == '\t') {
+            output[out_idx] = '\\';
+            output[out_idx + 1] = 't';
+            out_idx += 2;
+        } else if (c < 0x20) {
+            // Escape control characters as \uXXXX
+            const hex = "0123456789abcdef";
+            output[out_idx] = '\\';
+            output[out_idx + 1] = 'u';
+            output[out_idx + 2] = '0';
+            output[out_idx + 3] = '0';
+            output[out_idx + 4] = hex[c >> 4];
+            output[out_idx + 5] = hex[c & 0x0F];
+            out_idx += 6;
+        } else {
+            output[out_idx] = c;
+            out_idx += 1;
+        }
+    }
+
+    return allocator.realloc(output, out_idx);
+}
+
+/// Sanitize a string for text log output (SEC-GAP-054: CWE-117)
+/// Replaces newlines and control characters with spaces
+pub fn sanitizeLogString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var output = try allocator.alloc(u8, input.len);
+    errdefer allocator.free(output);
+
+    for (input, 0..) |c, i| {
+        if (c == '\n' or c == '\r' or c < 0x20) {
+            output[i] = ' ';
+        } else {
+            output[i] = c;
+        }
+    }
+
+    return output;
 }
 
 /// Create a query log entry

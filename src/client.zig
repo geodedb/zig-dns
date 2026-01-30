@@ -192,6 +192,14 @@ pub const Client = struct {
         };
 
         // Process response
+        var cname_chain = try buildCnameChain(self.allocator, response, response.data, hostname);
+        defer {
+            for (cname_chain.items) |name_item| {
+                self.allocator.free(name_item);
+            }
+            cname_chain.deinit(self.allocator);
+        }
+
         var results: std.ArrayList([]const u8) = .empty;
         errdefer {
             for (results.items) |item| {
@@ -203,9 +211,16 @@ pub const Client = struct {
         // Extract answers
         var ans_iter = try response.answers();
         while (try ans_iter.next()) |rr| {
-            // Cache the record
+            const owner = rr.getName(self.allocator, response.data) catch continue;
+            defer self.allocator.free(owner);
+
+            if (!nameInChain(cname_chain.items, owner)) {
+                continue;
+            }
+
+            // Cache the record under its owner name
             if (self.cache) |*cache| {
-                cache.put(hostname, rr) catch {};
+                cache.put(owner, rr) catch {};
             }
 
             if (rr.rtype == qtype) {
@@ -309,6 +324,77 @@ pub const MXRecord = struct {
     exchange: []const u8,
 };
 
+fn trimTrailingDot(name: []const u8) []const u8 {
+    if (name.len > 0 and name[name.len - 1] == '.') {
+        return name[0 .. name.len - 1];
+    }
+    return name;
+}
+
+fn namesEqual(a: []const u8, b: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(trimTrailingDot(a), trimTrailingDot(b));
+}
+
+fn nameInChain(chain: []const []const u8, name: []const u8) bool {
+    for (chain) |item| {
+        if (namesEqual(item, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn buildCnameChain(
+    allocator: std.mem.Allocator,
+    msg: Message,
+    response: []const u8,
+    qname: []const u8,
+) !std.ArrayList([]const u8) {
+    var chain: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (chain.items) |item| {
+            allocator.free(item);
+        }
+        chain.deinit(allocator);
+    }
+
+    const qname_copy = try allocator.dupe(u8, trimTrailingDot(qname));
+    try chain.append(allocator, qname_copy);
+
+    var current = qname_copy;
+    var depth: u8 = 0;
+
+    while (depth < 8) : (depth += 1) {
+        var found = false;
+        var ans_iter = try msg.answers();
+        while (try ans_iter.next()) |rr| {
+            if (rr.rtype != .cname) continue;
+
+            const owner = rr.getName(allocator, response) catch continue;
+            defer allocator.free(owner);
+
+            if (!namesEqual(owner, current)) continue;
+
+            const target_name = rr.parseName(response) catch continue;
+            const target_str = target_name.toString(allocator, response) catch continue;
+
+            if (nameInChain(chain.items, target_str)) {
+                allocator.free(target_str);
+                return chain;
+            }
+
+            try chain.append(allocator, target_str);
+            current = target_str;
+            found = true;
+            break;
+        }
+
+        if (!found) break;
+    }
+
+    return chain;
+}
+
 test "Client.init default" {
     // Note: This test requires network access and system DNS
     // In practice, we'd mock the network layer
@@ -331,4 +417,59 @@ test "ClientConfig defaults" {
     try std.testing.expectEqual(Mode.stub, config.mode);
     try std.testing.expectEqual(@as(u32, 5000), config.timeout_ms);
     try std.testing.expectEqual(@as(usize, 1000), config.cache_size);
+}
+
+test "buildCnameChain from response" {
+    const allocator = std.testing.allocator;
+
+    const data = [_]u8{
+        // Header
+        0x12, 0x34, // ID
+        0x81, 0x80, // Flags: QR=1, RD=1, RA=1
+        0x00, 0x01, // QDCOUNT: 1
+        0x00, 0x02, // ANCOUNT: 2
+        0x00, 0x00, // NSCOUNT: 0
+        0x00, 0x00, // ARCOUNT: 0
+        // Question: www.example.com A IN
+        3, 'w', 'w', 'w',
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        3, 'c', 'o', 'm',
+        0,
+        0x00, 0x01, // QTYPE: A
+        0x00, 0x01, // QCLASS: IN
+        // Answer 1: CNAME www.example.com -> alias.example.net
+        0xC0, 0x0C, // Name pointer to question
+        0x00, 0x05, // TYPE: CNAME
+        0x00, 0x01, // CLASS: IN
+        0x00, 0x00, 0x01, 0x2C, // TTL: 300
+        0x00, 0x13, // RDLENGTH: 19
+        5, 'a', 'l', 'i', 'a', 's',
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        3, 'n', 'e', 't',
+        0,
+        // Answer 2: alias.example.net A IN 1.2.3.4
+        5, 'a', 'l', 'i', 'a', 's',
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        3, 'n', 'e', 't',
+        0,
+        0x00, 0x01, // TYPE: A
+        0x00, 0x01, // CLASS: IN
+        0x00, 0x00, 0x01, 0x2C, // TTL: 300
+        0x00, 0x04, // RDLENGTH: 4
+        1, 2, 3, 4, // RDATA
+    };
+
+    const msg = try Message.parse(&data);
+    var chain = try buildCnameChain(allocator, msg, msg.data, "www.example.com");
+    defer {
+        for (chain.items) |item| {
+            allocator.free(item);
+        }
+        chain.deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), chain.items.len);
+    try std.testing.expectEqualStrings("www.example.com", chain.items[0]);
+    try std.testing.expectEqualStrings("alias.example.net", chain.items[1]);
+    try std.testing.expect(nameInChain(chain.items, "ALIAS.EXAMPLE.NET"));
 }

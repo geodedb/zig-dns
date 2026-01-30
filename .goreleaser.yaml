@@ -38,6 +38,18 @@ checksum:
   name_template: "checksums.txt"
   algorithm: sha256
 
+signs:
+  - artifacts: checksum
+    cmd: gpg
+    args:
+      - "--batch"
+      - "--yes"
+      - "--armor"
+      - "--detach-sign"
+      - "--output"
+      - "${signature}"
+      - "${artifact}"
+
 snapshot:
   version_template: "{{ .Branch }}-{{ .ShortCommit }}-snapshot"
 
@@ -139,11 +151,12 @@ release:
     **Alpine Linux**
     ```bash
     wget {{ .Env.CI_API_V4_URL }}/projects/{{ .Env.CI_PROJECT_ID }}/packages/generic/zdig/{{ .Version }}/zdig_{{ .Version }}_Linux_x86_64.apk
-    sudo apk add --allow-untrusted zdig_{{ .Version }}_Linux_x86_64.apk
+    sudo apk add zdig_{{ .Version }}_Linux_x86_64.apk
     ```
 
     **Manual Installation**
     Download the appropriate archive for your platform from the assets below.
+    Verify `checksums.txt` against the detached signature before installing.
 
     ### Usage
 
@@ -181,5 +194,7 @@ announce:
 metadata:
   mod_timestamp: "{{ .CommitTimestamp }}"
 
-# SBOMs (disabled for simplicity)
-sboms: []
+# SBOMs
+sboms:
+  - artifacts: archive
+    format: spdx-json

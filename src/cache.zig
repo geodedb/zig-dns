@@ -12,11 +12,19 @@ const std = @import("std");
 const name_mod = @import("name");
 const types_mod = @import("types");
 const record_mod = @import("record");
+const cache_protection = @import("cache_protection");
 
 pub const Name = name_mod.Name;
 pub const Type = types_mod.Type;
 pub const Class = types_mod.Class;
 pub const ResourceRecord = record_mod.ResourceRecord;
+pub const CacheProtectionConfig = cache_protection.CacheProtectionConfig;
+
+/// Cache configuration
+pub const CacheConfig = struct {
+    max_entries: usize,
+    protection: CacheProtectionConfig = .{},
+};
 
 /// Cache entry for a DNS record
 pub const CacheEntry = struct {
@@ -62,16 +70,23 @@ pub const Cache = struct {
     entries: []CacheEntry,
     count: usize,
     max_entries: usize,
+    protection: CacheProtectionConfig,
 
     const Self = @This();
 
     /// Create a new cache with the given maximum number of entries
     pub fn init(allocator: std.mem.Allocator, max_entries: usize) Self {
+        return initWithConfig(allocator, .{ .max_entries = max_entries });
+    }
+
+    /// Create a new cache with custom configuration
+    pub fn initWithConfig(allocator: std.mem.Allocator, config: CacheConfig) Self {
         return Self{
             .allocator = allocator,
             .entries = &[_]CacheEntry{},
             .count = 0,
-            .max_entries = max_entries,
+            .max_entries = config.max_entries,
+            .protection = config.protection,
         };
     }
 
@@ -90,6 +105,11 @@ pub const Cache = struct {
     pub fn put(self: *Self, domain: []const u8, rr: ResourceRecord) !void {
         // Don't cache records with TTL of 0
         if (rr.ttl == 0) {
+            return;
+        }
+
+        const clamped_ttl = cache_protection.clampTtl(rr.ttl, self.protection, false);
+        if (clamped_ttl == 0) {
             return;
         }
 
@@ -128,10 +148,18 @@ pub const Cache = struct {
             .rtype = rr.rtype,
             .class = rr.class,
             .rdata = rdata_copy,
-            .original_ttl = rr.ttl,
+            .original_ttl = clamped_ttl,
             .cached_at = now,
         };
         self.count += 1;
+    }
+
+    /// Add a record to the cache with bailiwick validation
+    pub fn putWithBailiwick(self: *Self, domain: []const u8, rr: ResourceRecord, query_zone: []const u8) !void {
+        if (cache_protection.checkBailiwick(domain, query_zone) == .out_of_bailiwick) {
+            return;
+        }
+        try self.put(domain, rr);
     }
 
     /// Get cached records for a domain and type
@@ -281,4 +309,55 @@ test "Cache clear" {
 
     cache.clear();
     try std.testing.expectEqual(@as(usize, 0), cache.count);
+}
+
+test "Cache TTL clamping" {
+    const allocator = std.testing.allocator;
+    var cache = Cache.initWithConfig(allocator, .{
+        .max_entries = 10,
+        .protection = .{
+            .max_positive_ttl_s = 60,
+            .min_ttl_s = 0,
+        },
+    });
+    defer cache.deinit();
+
+    const rdata = [_]u8{ 1, 2, 3, 4 };
+    const rr = ResourceRecord{
+        .name = undefined,
+        .rtype = .a,
+        .class = .in,
+        .ttl = 3600,
+        .rdlength = 4,
+        .rdata = &rdata,
+        .wire_length = 0,
+    };
+
+    try cache.put("example.com", rr);
+    const entries_opt = cache.get("example.com", .a, .in);
+    try std.testing.expect(entries_opt != null);
+    try std.testing.expectEqual(@as(u32, 60), entries_opt.?[0].original_ttl);
+}
+
+test "Cache bailiwick validation" {
+    const allocator = std.testing.allocator;
+    var cache = Cache.init(allocator, 10);
+    defer cache.deinit();
+
+    const rdata = [_]u8{ 5, 6, 7, 8 };
+    const rr = ResourceRecord{
+        .name = undefined,
+        .rtype = .a,
+        .class = .in,
+        .ttl = 300,
+        .rdlength = 4,
+        .rdata = &rdata,
+        .wire_length = 0,
+    };
+
+    try cache.putWithBailiwick("evil.com", rr, "example.com");
+    try std.testing.expect(cache.get("evil.com", .a, .in) == null);
+
+    try cache.putWithBailiwick("www.example.com", rr, "example.com");
+    try std.testing.expect(cache.get("www.example.com", .a, .in) != null);
 }

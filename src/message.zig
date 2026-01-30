@@ -282,11 +282,11 @@ pub const MessageBuilder = struct {
 };
 
 /// Build a simple DNS query message
-pub fn buildQuery(allocator: std.mem.Allocator, id: u16, domain: []const u8, qtype: Type, rd: bool) ![]u8 {
+pub fn buildQuery(allocator: std.mem.Allocator, id: u16, domain: []const u8, qtype: Type, qclass: Class, rd: bool) ![]u8 {
     var builder = try MessageBuilder.initQuery(allocator, id, rd);
     errdefer builder.deinit();
 
-    try builder.addQuestion(domain, qtype, .in);
+    try builder.addQuestion(domain, qtype, qclass);
 
     return builder.finish();
 }
@@ -371,7 +371,7 @@ test "Message.parse response with answer" {
 
 test "buildQuery" {
     const allocator = std.testing.allocator;
-    const query = try buildQuery(allocator, 0x1234, "example.com", .a, true);
+    const query = try buildQuery(allocator, 0x1234, "example.com", .a, .in, true);
     defer allocator.free(query);
 
     const msg = try Message.parse(query);
