@@ -196,8 +196,8 @@ pub fn filterAnswerSection(
     query_zone: []const u8,
     config: CacheProtectionConfig,
 ) ![]RecordInfo {
-    var result = std.ArrayList(RecordInfo).init(allocator);
-    errdefer result.deinit();
+    var result: std.ArrayList(RecordInfo) = .{};
+    errdefer result.deinit(allocator);
 
     for (records) |record| {
         const bailiwick = checkBailiwick(record.name, query_zone);
@@ -206,7 +206,7 @@ pub fn filterAnswerSection(
             .in_bailiwick => {
                 var clamped = record;
                 clamped.ttl = clampTtl(record.ttl, config, false);
-                try result.append(clamped);
+                try result.append(allocator, clamped);
             },
             .out_of_bailiwick => {
                 // Skip out-of-bailiwick records in strict mode
@@ -214,7 +214,7 @@ pub fn filterAnswerSection(
                     // In non-strict mode, still clamp TTL heavily
                     var clamped = record;
                     clamped.ttl = @min(300, record.ttl); // Max 5 minutes
-                    try result.append(clamped);
+                    try result.append(allocator, clamped);
                 }
             },
         }

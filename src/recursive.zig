@@ -176,9 +176,9 @@ pub const RecursiveResolver = struct {
             .depth = 0,
             .query_count = 0,
             .current_zone = ".",
-            .cname_chain = std.ArrayList([]const u8).init(self.allocator),
+            .cname_chain = .{},
         };
-        defer state.cname_chain.deinit();
+        defer state.cname_chain.deinit(self.allocator);
 
         return self.resolveIterative(&state);
     }
@@ -257,7 +257,7 @@ pub const RecursiveResolver = struct {
                                 const target_str = try cname_target.toString(self.allocator, response);
                                 defer self.allocator.free(target_str);
 
-                                try state.cname_chain.append(try self.allocator.dupe(u8, target_str));
+                                try state.cname_chain.append(self.allocator, try self.allocator.dupe(u8, target_str));
 
                                 if (state.cname_chain.items.len > 8) {
                                     return error.CnameLoopDetected;
@@ -293,18 +293,16 @@ pub const RecursiveResolver = struct {
                             const new_zone = try self.allocator.dupe(u8, ref.zone);
 
                             // Get addresses for NS servers
-                            var new_servers = std.ArrayList(ServerAddress).init(self.allocator);
-                            defer new_servers.deinit();
+                            var new_servers: std.ArrayList(ServerAddress) = .{};
+                            defer new_servers.deinit(self.allocator);
 
                             for (ref.servers) |ns| {
                                 if (ns.address) |addr| {
-                                    try new_servers.append(addr);
+                                    try new_servers.append(self.allocator, addr);
                                 } else {
                                     // Need to resolve NS hostname (glue missing)
-                                    const ns_result = self.resolveNsAddress(ns.name) catch continue;
-                                    if (ns_result) |addr| {
-                                        try new_servers.append(addr);
-                                    }
+                                    const ns_result = self.resolveNsAddress(ns.name) orelse continue;
+                                    try new_servers.append(self.allocator, ns_result);
                                 }
                             }
 
@@ -494,8 +492,8 @@ pub const RecursiveResolver = struct {
 
     /// Extract referral information from a response
     fn extractReferral(self: *Self, response: []const u8, msg: Message) !?Referral {
-        var ns_names = std.ArrayList([]const u8).init(self.allocator);
-        defer ns_names.deinit();
+        var ns_names: std.ArrayList([]const u8) = .{};
+        defer ns_names.deinit(self.allocator);
 
         var zone_name: ?[]const u8 = null;
 
@@ -509,7 +507,7 @@ pub const RecursiveResolver = struct {
 
                 const ns_name = try rr.parseName(response);
                 const ns_str = try ns_name.toString(self.allocator, response);
-                try ns_names.append(ns_str);
+                try ns_names.append(self.allocator, ns_str);
             }
         }
 
@@ -555,7 +553,7 @@ pub const RecursiveResolver = struct {
     }
 
     /// Resolve NS address when glue is missing
-    fn resolveNsAddress(self: *Self, ns_name: []const u8) !?ServerAddress {
+    fn resolveNsAddress(self: *Self, ns_name: []const u8) ?ServerAddress {
         // Recursive call to resolve the NS hostname
         const result = self.resolve(ns_name, .a) catch return null;
         defer if (result.answer) |a| self.allocator.free(a);

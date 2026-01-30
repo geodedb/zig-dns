@@ -161,7 +161,7 @@ pub fn main() !void {
             std.debug.print("      [{d}] Type: {s}, Class: {s}, TTL: {d}s\n", .{
                 count,
                 @tagName(rr.rtype),
-                @tagName(rr.rclass),
+                @tagName(rr.class),
                 rr.ttl,
             });
 
@@ -253,7 +253,10 @@ pub fn main() !void {
             var resolver = dns.stub.StubResolver.init(allocator, .{
                 .servers = servers,
                 .timeout_ms = 3000,
-            });
+            }) catch |err| {
+                std.debug.print("    Failed to initialize resolver: {}\n", .{err});
+                return;
+            };
             defer resolver.deinit();
 
             std.debug.print("    Querying for github.com A record...\n", .{});

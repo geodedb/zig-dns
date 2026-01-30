@@ -177,9 +177,8 @@ pub const StubResolver = struct {
         for (self.config.servers) |server| {
             var attempt: u8 = 0;
             while (attempt < self.config.retries) : (attempt += 1) {
-                const response = self.sendQuery(query, server) catch |err| {
-                    // Log error and try next attempt/server
-                    _ = err;
+                const response = self.sendQuery(query, server) catch {
+                    // Error occurred, try next attempt/server
                     continue;
                 };
 
@@ -300,7 +299,7 @@ pub const StubResolver = struct {
 
 fn connectWithTimeout(sock: std.posix.socket_t, address: std.net.Address, timeout_ms: u32) !void {
     std.posix.connect(sock, &address.any, address.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock, error.InProgress => {},
+        error.WouldBlock => {},
         else => return err,
     };
 
