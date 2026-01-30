@@ -38,18 +38,22 @@ stages:
   - sbom
   - release
 
-# SEC-GAP-058: Pin Docker images by digest (CWE-829)
-# Image digests should be verified and updated regularly
-# To find digest: docker pull ziglang/zig:0.15.1 && docker inspect --format='{{.RepoDigests}}' ziglang/zig:0.15.1
-# Example pinned format: ziglang/zig:0.15.1@sha256:abc123...
+# Zig installation script (reusable)
+# SHA256 hash from https://ziglang.org/download/index.json
+.install-zig: &install-zig
+  - apt-get update && apt-get install -y curl xz-utils
+  - curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o zig.tar.xz
+  - echo '02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239  zig.tar.xz' | sha256sum -c -
+  - tar -xf zig.tar.xz
+  - export PATH="$PWD/zig-x86_64-linux-0.15.2:$PATH"
+  - zig version
 
 build:
   stage: build
-  # TODO: Replace with pinned digest - ziglang/zig@sha256:<digest>
-  # Current tag-based image (not pinned, security risk)
-  image: ziglang/zig:0.15.1
+  image: debian:bookworm-slim@sha256:56ff6d36d4eb3db13a741b342ec466f121480b5edded42e4b7ee850ce7a418ee
+  before_script:
+    - *install-zig
   script:
-    - zig version
     - zig build
   artifacts:
     when: always
@@ -59,9 +63,10 @@ build:
 
 test:
   stage: test
-  # TODO: Replace with pinned digest - ziglang/zig@sha256:<digest>
-  # Current tag-based image (not pinned, security risk)
-  image: ziglang/zig:0.15.1
+  image: debian:bookworm-slim@sha256:56ff6d36d4eb3db13a741b342ec466f121480b5edded42e4b7ee850ce7a418ee
+  before_script:
+    - *install-zig
   script:
-    - zig version
     - zig build test --summary all
+  needs:
+    - build
