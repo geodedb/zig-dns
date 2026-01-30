@@ -262,11 +262,11 @@ pub const Client = struct {
     pub fn lookupMX(self: *Self, domain: []const u8) ![]MXRecord {
         const response = switch (self.config.mode) {
             .stub => try self.stub.?.resolve(domain, .mx),
-            .recursive => {
+            .recursive => blk: {
                 const result = try self.recursive.?.resolve(domain, .mx);
                 if (result.answer) |answer| {
                     defer self.allocator.free(answer);
-                    return Message.parse(answer) catch return error.ParseError;
+                    break :blk try Message.parse(answer);
                 }
                 return error.NoAnswer;
             },
