@@ -88,12 +88,16 @@ pub const StubResolver = struct {
 
     const Self = @This();
 
+    /// Error returned when secure entropy is unavailable
+    pub const InitError = error{EntropyUnavailable};
+
     /// Create a new stub resolver
-    pub fn init(allocator: std.mem.Allocator, config: StubConfig) Self {
-        // Use random starting ID
+    /// Returns error.EntropyUnavailable if secure random is not available
+    pub fn init(allocator: std.mem.Allocator, config: StubConfig) InitError!Self {
+        // Use cryptographically secure random starting ID - fail if unavailable
         var seed: u64 = undefined;
         std.posix.getrandom(std.mem.asBytes(&seed)) catch {
-            seed = @bitCast(std.time.milliTimestamp());
+            return error.EntropyUnavailable;
         };
         var rng = std.Random.DefaultPrng.init(seed);
 
@@ -303,7 +307,7 @@ pub fn getSystemServers(allocator: std.mem.Allocator) ![]ServerAddress {
 
 test "StubResolver.nextId" {
     var servers = [_]ServerAddress{};
-    var resolver = StubResolver.init(std.testing.allocator, .{ .servers = &servers });
+    var resolver = try StubResolver.init(std.testing.allocator, .{ .servers = &servers });
     defer resolver.deinit();
 
     const id1 = resolver.nextId();

@@ -176,14 +176,22 @@ pub const FailoverManager = struct {
         circuit_breaker_trips: u64 = 0,
     };
 
-    pub fn init(allocator: std.mem.Allocator, config: FailoverConfig) Self {
+    /// Error returned when secure entropy is unavailable
+    pub const InitError = error{EntropyUnavailable};
+
+    pub fn init(allocator: std.mem.Allocator, config: FailoverConfig) InitError!Self {
+        // Use secure random for server selection
+        var seed: u64 = undefined;
+        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+            return error.EntropyUnavailable;
+        };
         return Self{
             .allocator = allocator,
             .config = config,
             .servers = .empty,
             .rr_index = 0,
             .weighted_accumulator = 0,
-            .rng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp())),
+            .rng = std.Random.DefaultPrng.init(seed),
             .stats = .{},
             .mutex = .{},
         };
@@ -474,7 +482,7 @@ test "ServerState record failure and circuit breaker" {
 
 test "FailoverManager init/deinit" {
     const allocator = std.testing.allocator;
-    var manager = FailoverManager.init(allocator, .{});
+    var manager = try FailoverManager.init(allocator, .{});
     defer manager.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), manager.servers.items.len);
@@ -482,7 +490,7 @@ test "FailoverManager init/deinit" {
 
 test "FailoverManager add/remove server" {
     const allocator = std.testing.allocator;
-    var manager = FailoverManager.init(allocator, .{});
+    var manager = try FailoverManager.init(allocator, .{});
     defer manager.deinit();
 
     try manager.addServer(.{ .address = "8.8.8.8" });
@@ -497,7 +505,7 @@ test "FailoverManager add/remove server" {
 
 test "FailoverManager round robin selection" {
     const allocator = std.testing.allocator;
-    var manager = FailoverManager.init(allocator, .{ .strategy = .round_robin });
+    var manager = try FailoverManager.init(allocator, .{ .strategy = .round_robin });
     defer manager.deinit();
 
     try manager.addServer(.{ .address = "server1" });
@@ -522,7 +530,7 @@ test "FailoverManager round robin selection" {
 
 test "FailoverManager statistics" {
     const allocator = std.testing.allocator;
-    var manager = FailoverManager.init(allocator, .{});
+    var manager = try FailoverManager.init(allocator, .{});
     defer manager.deinit();
 
     try manager.addServer(.{ .address = "test" });

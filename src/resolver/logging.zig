@@ -142,13 +142,21 @@ pub const DnsLogger = struct {
         flush_count: u64 = 0,
     };
 
-    pub fn init(allocator: std.mem.Allocator, config: LogConfig) Self {
+    /// Error returned when secure entropy is unavailable
+    pub const InitError = error{EntropyUnavailable};
+
+    pub fn init(allocator: std.mem.Allocator, config: LogConfig) InitError!Self {
+        // Use secure random for sampling decisions
+        var seed: u64 = undefined;
+        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+            return error.EntropyUnavailable;
+        };
         return Self{
             .allocator = allocator,
             .config = config,
             .buffer = .empty,
             .stats = .{},
-            .rng = std.Random.DefaultPrng.init(@intCast(std.time.milliTimestamp())),
+            .rng = std.Random.DefaultPrng.init(seed),
         };
     }
 
@@ -391,7 +399,7 @@ test "LogLevel toString" {
 test "DnsLogger init/deinit" {
     const allocator = std.testing.allocator;
 
-    var logger = DnsLogger.init(allocator, .{});
+    var logger = try DnsLogger.init(allocator, .{});
     defer logger.deinit();
 
     try std.testing.expectEqual(@as(u64, 0), logger.stats.total_entries);
@@ -400,7 +408,7 @@ test "DnsLogger init/deinit" {
 test "DnsLogger log query text format" {
     const allocator = std.testing.allocator;
 
-    var logger = DnsLogger.init(allocator, .{ .format = .text });
+    var logger = try DnsLogger.init(allocator, .{ .format = .text });
     defer logger.deinit();
 
     const entry = queryEntry(1234, "example.com", "A");
@@ -415,7 +423,7 @@ test "DnsLogger log query text format" {
 test "DnsLogger log query JSON format" {
     const allocator = std.testing.allocator;
 
-    var logger = DnsLogger.init(allocator, .{ .format = .json });
+    var logger = try DnsLogger.init(allocator, .{ .format = .json });
     defer logger.deinit();
 
     const entry = queryEntry(5678, "test.example.com", "AAAA");
@@ -430,7 +438,7 @@ test "DnsLogger log query JSON format" {
 test "DnsLogger log response" {
     const allocator = std.testing.allocator;
 
-    var logger = DnsLogger.init(allocator, .{ .format = .text });
+    var logger = try DnsLogger.init(allocator, .{ .format = .text });
     defer logger.deinit();
 
     const query = queryEntry(1111, "api.example.com", "A");
@@ -446,7 +454,7 @@ test "DnsLogger log response" {
 test "DnsLogger level filtering" {
     const allocator = std.testing.allocator;
 
-    var logger = DnsLogger.init(allocator, .{ .min_level = .warning });
+    var logger = try DnsLogger.init(allocator, .{ .min_level = .warning });
     defer logger.deinit();
 
     // Debug should be filtered out
@@ -461,7 +469,7 @@ test "DnsLogger level filtering" {
 test "DnsLogger statistics" {
     const allocator = std.testing.allocator;
 
-    var logger = DnsLogger.init(allocator, .{});
+    var logger = try DnsLogger.init(allocator, .{});
     defer logger.deinit();
 
     try logger.log(.info, "test1", .{});

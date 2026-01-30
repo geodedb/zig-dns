@@ -204,9 +204,12 @@ pub const StubResolver = struct {
         return self.metrics.snapshot();
     }
 
-    fn selectChannel(self: *Self) Channel {
+    /// Error returned when no channels are configured
+    pub const SelectChannelError = error{NoChannelsConfigured};
+
+    fn selectChannel(self: *Self) SelectChannelError!Channel {
         if (self.options.channels.len == 0) {
-            @panic("No channels configured");
+            return error.NoChannelsConfigured;
         }
 
         const idx = if (self.options.rotate) blk: {
@@ -218,9 +221,20 @@ pub const StubResolver = struct {
         return self.options.channels[idx];
     }
 
+    /// Error for entropy unavailability
+    pub const EntropyError = error{EntropyUnavailable};
+
+    fn getSecureRandomId() EntropyError!u16 {
+        var seed: u64 = undefined;
+        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+            return error.EntropyUnavailable;
+        };
+        var prng = std.Random.DefaultPrng.init(seed);
+        return prng.random().int(u16);
+    }
+
     fn buildQuery(self: *Self, qname: []const u8, qtype: Type) ![]u8 {
-        var prng = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
-        const id = prng.random().int(u16);
+        const id = try getSecureRandomId();
 
         // Build basic query
         const query = try message.buildQuery(self.allocator, id, try types.Name.init(qname), qtype, true);
@@ -250,8 +264,7 @@ pub const StubResolver = struct {
     }
 
     fn buildQueryNoEdns(self: *Self, qname: []const u8, qtype: Type) ![]u8 {
-        var prng = std.Random.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
-        const id = prng.random().int(u16);
+        const id = try getSecureRandomId();
         return message.buildQuery(self.allocator, id, try types.Name.init(qname), qtype, true);
     }
 };

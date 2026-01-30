@@ -296,15 +296,35 @@ pub const RpzManager = struct {
 };
 
 /// Match a domain against a pattern (supports wildcards)
+/// Wildcard matching validates domain boundaries to prevent bypasses:
+/// - Pattern `*.example.com` matches `www.example.com` but NOT `fakeexample.com`
+/// - Pattern `*example.com` (no dot) also validates boundary at the match point
 fn matchPattern(domain: []const u8, pattern: []const u8) bool {
     // Handle wildcard prefix
     if (pattern.len > 0 and pattern[0] == '*') {
         const suffix = pattern[1..];
         if (suffix.len == 0) return true; // Match everything
 
-        // Suffix match
+        // Suffix match with domain boundary validation
         if (domain.len < suffix.len) return false;
-        return std.ascii.eqlIgnoreCase(domain[domain.len - suffix.len ..], suffix);
+
+        // Check the suffix matches
+        if (!std.ascii.eqlIgnoreCase(domain[domain.len - suffix.len ..], suffix)) {
+            return false;
+        }
+
+        // Validate domain boundary to prevent bypass:
+        // - If suffix starts with '.', boundary is implicit
+        // - If domain is exactly the suffix length, it's an exact match
+        // - Otherwise, the character before the suffix in domain must be '.'
+        if (suffix.len > 0 and suffix[0] == '.') {
+            return true; // Boundary is implicit in pattern
+        }
+        if (domain.len == suffix.len) {
+            return true; // Exact match
+        }
+        // Check that there's a domain boundary before the suffix
+        return domain[domain.len - suffix.len - 1] == '.';
     }
 
     // Exact match (case insensitive)

@@ -256,6 +256,8 @@ pub const Sig0Record = struct {
 /// SIG(0) Context for signing and verification
 pub const Sig0Context = struct {
     allocator: std.mem.Allocator,
+    /// Signature validity period in seconds (default: 300 = 5 minutes)
+    validity_seconds: u32 = 300,
 
     const Self = @This();
 
@@ -263,10 +265,18 @@ pub const Sig0Context = struct {
         return Self{ .allocator = allocator };
     }
 
+    /// Initialize with custom validity period
+    pub fn initWithValidity(allocator: std.mem.Allocator, validity_seconds: u32) Self {
+        return Self{
+            .allocator = allocator,
+            .validity_seconds = validity_seconds,
+        };
+    }
+
     /// Sign a DNS message with SIG(0)
     pub fn sign(self: *Self, message: []const u8, key_pair: *const Sig0KeyPair) ![]u8 {
         const now: u32 = @intCast(@as(u64, @bitCast(std.time.timestamp())));
-        const expiration = now + 300; // 5 minutes validity
+        const expiration = now + self.validity_seconds;
 
         // Build SIG(0) RDATA without signature
         var sig_rdata: std.ArrayList(u8) = .empty;
@@ -584,6 +594,11 @@ pub fn calculateKeyTag(algorithm: Algorithm, public_key: []const u8) u16 {
 
 // Helper functions
 
+/// Maximum compression pointer hops to prevent infinite loops (RFC 1035)
+const max_compression_hops: u8 = 16;
+/// Maximum DNS name length per RFC 1035 Section 2.3.4
+const max_name_length: usize = 255;
+
 fn parseName(allocator: std.mem.Allocator, data: []const u8, start: usize, full_msg: []const u8) !struct { name: []const u8, offset: usize } {
     var name: std.ArrayList(u8) = .empty;
     errdefer name.deinit(allocator);
@@ -591,6 +606,8 @@ fn parseName(allocator: std.mem.Allocator, data: []const u8, start: usize, full_
     var offset = start;
     var followed_ptr = false;
     var final_offset = start;
+    var pointer_hops: u8 = 0;
+    var total_name_len: usize = 0;
     _ = full_msg;
 
     while (offset < data.len) {
@@ -602,6 +619,11 @@ fn parseName(allocator: std.mem.Allocator, data: []const u8, start: usize, full_
         }
 
         if (len & 0xC0 == 0xC0) {
+            // Compression pointer - check for loop
+            pointer_hops += 1;
+            if (pointer_hops > max_compression_hops) {
+                return error.CompressionLoopDetected;
+            }
             if (offset + 1 >= data.len) return error.InvalidName;
             const ptr = (@as(u16, len & 0x3F) << 8) | data[offset + 1];
             if (!followed_ptr) final_offset = offset + 2;
@@ -611,6 +633,12 @@ fn parseName(allocator: std.mem.Allocator, data: []const u8, start: usize, full_
         }
 
         if (offset + 1 + len > data.len) return error.InvalidName;
+
+        // Check max name length (length byte + label)
+        total_name_len += 1 + len;
+        if (total_name_len > max_name_length) {
+            return error.NameTooLong;
+        }
 
         if (name.items.len > 0) {
             try name.append(allocator, '.');
@@ -695,6 +723,15 @@ test "calculateKeyTag" {
     const pub_key = [_]u8{0} ** 32;
     const tag = calculateKeyTag(.ed25519, &pub_key);
     try std.testing.expect(tag > 0);
+}
+
+test "Sig0Context.initWithValidity" {
+    const allocator = std.testing.allocator;
+    const ctx = Sig0Context.initWithValidity(allocator, 600);
+    try std.testing.expectEqual(@as(u32, 600), ctx.validity_seconds);
+
+    const default_ctx = Sig0Context.init(allocator);
+    try std.testing.expectEqual(@as(u32, 300), default_ctx.validity_seconds);
 }
 
 test "Sig0Context sign and verify" {

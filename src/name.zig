@@ -17,6 +17,10 @@ pub const max_label_length = 63;
 /// Compression pointer marker (RFC 1035 Section 4.1.4)
 const compression_marker: u8 = 0xC0;
 
+/// Maximum number of compression pointer hops allowed (prevents infinite loops)
+/// DNS names can have at most 127 labels, so 16 pointer hops is generous
+const max_compression_hops: u8 = 16;
+
 /// DNS Name representation
 /// Handles both uncompressed and compressed (pointer) formats
 pub const Name = struct {
@@ -33,6 +37,10 @@ pub const Name = struct {
 
     /// Parse a DNS name from wire format
     /// Handles compression pointers (RFC 1035 Section 4.1.4)
+    ///
+    /// SECURITY: Limits compression pointer hops to prevent infinite loops
+    /// from maliciously crafted packets with circular pointers (CWE-835).
+    /// SECURITY: Enforces max_name_length (255 bytes) per RFC 1035 (CWE-130).
     pub fn parse(data: []const u8, offset: usize) !Self {
         if (offset >= data.len) {
             return error.InvalidOffset;
@@ -42,6 +50,8 @@ pub const Name = struct {
         var wire_len: usize = 0;
         var compressed = false;
         var first_pointer_pos: ?usize = null;
+        var pointer_hops: u8 = 0;
+        var total_name_len: usize = 0; // Track decompressed name length
 
         // Follow the name, handling compression
         while (pos < data.len) {
@@ -52,6 +62,7 @@ pub const Name = struct {
                 if (first_pointer_pos == null) {
                     wire_len += 1; // Include the null terminator
                 }
+                total_name_len += 1; // Count the root label
                 break;
             }
 
@@ -65,6 +76,12 @@ pub const Name = struct {
                 if (first_pointer_pos == null) {
                     first_pointer_pos = pos;
                     wire_len += 2; // Pointer is 2 bytes
+                }
+
+                // SECURITY: Limit pointer hops to prevent infinite loops (CWE-835)
+                pointer_hops += 1;
+                if (pointer_hops > max_compression_hops) {
+                    return error.CompressionLoopDetected;
                 }
 
                 // Calculate pointer offset
@@ -84,6 +101,12 @@ pub const Name = struct {
 
             if (pos + 1 + label_len > data.len) {
                 return error.UnexpectedEnd;
+            }
+
+            // SECURITY: Enforce max name length (RFC 1035 Section 2.3.4, CWE-130)
+            total_name_len += 1 + label_len; // Length byte + label data
+            if (total_name_len > max_name_length) {
+                return error.NameTooLong;
             }
 
             if (first_pointer_pos == null) {
@@ -551,6 +574,129 @@ test "Name.parse with compression" {
     defer allocator.free(str);
 
     try std.testing.expectEqualStrings("www.example.com", str);
+}
+
+test "Name.parse rejects compression pointer loops" {
+    // SECURITY TEST: Verify that circular compression pointers are detected
+    // and cause an error rather than an infinite loop (CWE-835)
+
+    // Test 1: Forward pointer detection
+    // Construct a packet where offset 0 points forward to offset 4
+    const forward_ptr = [_]u8{
+        // Offset 0: pointer to offset 4 (forward)
+        0xC0, 0x04,
+        // Padding
+        0x00, 0x00,
+        // Offset 4: a valid name
+        3, 'f', 'o', 'o', 0,
+    };
+
+    // This should detect the forward pointer and error
+    const result = Name.parse(&forward_ptr, 0);
+    try std.testing.expectError(error.ForwardPointer, result);
+
+    // Test 2: Deep pointer chain exceeding max_compression_hops
+    // Build a chain: each offset points to 2 bytes earlier, creating a long chain
+    // Structure: offset 0 has "a" label, then each subsequent offset is a pointer
+    var deep_chain: [100]u8 = undefined;
+
+    // Offset 0-1: short label "a"
+    deep_chain[0] = 1; // label length
+    deep_chain[1] = 'a';
+    // Offset 2: null terminator for the base name
+    deep_chain[2] = 0;
+
+    // Now create a chain of pointers, each pointing back to offset 0
+    // Offset 3+: pointers to offset 0 (which has the actual name)
+    // But we need a CHAIN - each pointer points to the previous pointer
+    // offset 3: pointer to 0
+    // offset 5: pointer to 3
+    // offset 7: pointer to 5
+    // etc. But all backward pointers go to 0 for simplicity
+
+    // Actually, to create a long CHAIN we need each entry to point to a PREVIOUS
+    // pointer entry. Let's build it properly:
+    // Offset 3-4: pointer to offset 0 (starts the chain)
+    deep_chain[3] = 0xC0;
+    deep_chain[4] = 0x00;
+
+    // Offsets 5-6, 7-8, etc.: each points to offset 3 to create a very long chain
+    // But that won't work because 5 -> 3 -> 0 is only 2 hops
+    // We need to interleave names and pointers
+
+    // Better approach: make offset N point to offset N-3 (building backward chain)
+    // Starting from high offset, going down
+    // Let's create: 48->45->42->...->6->3->0 (16+ hops)
+
+    // Fill with pointer chain: each offset i points to offset i-3
+    var offset: usize = 6;
+    while (offset < 60) : (offset += 3) {
+        const target = offset - 3;
+        deep_chain[offset] = 0xC0 | @as(u8, @intCast(target >> 8));
+        deep_chain[offset + 1] = @as(u8, @intCast(target & 0xFF));
+        deep_chain[offset + 2] = 0; // Padding
+    }
+
+    // Parse from offset 57 (will follow: 57->54->51->48->45->42->39->36->33->30->27->24->21->18->15->12->9->6->3->0)
+    // That's 19 hops, which exceeds max_compression_hops (16)
+    const chain_result = Name.parse(&deep_chain, 57);
+    try std.testing.expectError(error.CompressionLoopDetected, chain_result);
+}
+
+test "Name.parse enforces max name length" {
+    // SECURITY TEST: Verify that names exceeding 255 bytes are rejected (CWE-130)
+
+    // Build a name that's exactly at the limit (255 bytes)
+    // Use labels of length 63 (max label size): 63*4 = 252, plus 4 length bytes = 256
+    // That's too long, so use 63 + 63 + 63 + 62 = 251 + 4 length bytes + 1 null = 256
+    // Actually: each label needs length byte + data, so 4 labels of 63 = 4*(1+63) = 256
+    // Let's make it simpler: many small labels to exceed 255
+
+    // Create a name with labels that total > 255 bytes
+    // Each label: 1 byte length + N bytes data
+    // To hit 256+, we need lots of small labels
+    // 64 labels of 3 chars each: 64 * (1 + 3) = 256 bytes + 1 null = 257 (too long)
+
+    var oversized_name: [512]u8 = undefined;
+    var pos: usize = 0;
+
+    // Create many small labels to exceed max_name_length
+    var label_count: usize = 0;
+    while (pos + 4 < 512 and label_count < 80) : (label_count += 1) {
+        oversized_name[pos] = 3; // Label length
+        oversized_name[pos + 1] = 'a';
+        oversized_name[pos + 2] = 'b';
+        oversized_name[pos + 3] = 'c';
+        pos += 4;
+    }
+    oversized_name[pos] = 0; // null terminator
+
+    // Name with 80 labels of "abc" = 80 * 4 = 320 bytes (way over 255)
+    const result = Name.parse(&oversized_name, 0);
+    try std.testing.expectError(error.NameTooLong, result);
+
+    // Verify a name at exactly 255 bytes is accepted
+    // 255 bytes = root label (1) + data (254)
+    // Let's use: 4 labels of 63 chars = 4 * (1+63) = 256 - but that's with null = 257
+    // Actually: 3 labels of 63 + 1 label of 62 = 3*64 + 63 = 255 (including null)
+    // Let's simplify: just verify a reasonably long name works
+    var long_valid: [300]u8 = undefined;
+    pos = 0;
+    label_count = 0;
+    while (label_count < 50) : (label_count += 1) {
+        // 50 labels of 4 chars = 50 * 5 = 250 bytes + 1 null = 251 (valid)
+        long_valid[pos] = 4;
+        long_valid[pos + 1] = 't';
+        long_valid[pos + 2] = 'e';
+        long_valid[pos + 3] = 's';
+        long_valid[pos + 4] = 't';
+        pos += 5;
+    }
+    long_valid[pos] = 0;
+
+    // This should succeed (251 bytes)
+    const valid_result = try Name.parse(&long_valid, 0);
+    try std.testing.expect(valid_result.wire_length > 0);
 }
 
 // ============================================================

@@ -83,12 +83,20 @@ pub const Backoff = struct {
 
     const Self = @This();
 
-    pub fn init(config: Config) Self {
+    /// Error returned when secure entropy is unavailable
+    pub const InitError = error{EntropyUnavailable};
+
+    pub fn init(config: Config) InitError!Self {
+        // Use secure random for jitter calculations
+        var seed: u64 = undefined;
+        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+            return error.EntropyUnavailable;
+        };
         return Self{
             .config = config,
             .attempt = 0,
             .last_delay_ms = config.base_delay_ms,
-            .prng = std.Random.DefaultPrng.init(@intCast(@as(u64, @bitCast(std.time.timestamp())))),
+            .prng = std.Random.DefaultPrng.init(seed),
         };
     }
 
@@ -203,9 +211,9 @@ pub fn RetryExecutor(comptime Context: type, comptime ErrorSet: type) type {
 
         const Self = @This();
 
-        pub fn init(config: Config, context: Context) Self {
+        pub fn init(config: Config, context: Context) Backoff.InitError!Self {
             return Self{
-                .backoff = Backoff.init(config),
+                .backoff = try Backoff.init(config),
                 .on_retry = null,
                 .context = context,
             };
@@ -267,12 +275,13 @@ pub fn RetryExecutor(comptime Context: type, comptime ErrorSet: type) type {
 }
 
 /// Simple retry function for one-off retries
+/// Returns error.EntropyUnavailable if secure random is not available
 pub fn retry(
     comptime func: anytype,
     args: anytype,
     config: Config,
-) @typeInfo(@TypeOf(func)).@"fn".return_type.? {
-    var backoff = Backoff.init(config);
+) Backoff.InitError!@typeInfo(@TypeOf(func)).@"fn".return_type.? {
+    var backoff = try Backoff.init(config);
 
     while (true) {
         return @call(.auto, func, args) catch |err| {

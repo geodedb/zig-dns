@@ -120,21 +120,37 @@ pub const RecursiveResolver = struct {
 
     const Self = @This();
 
+    /// Error type for resolver initialization failures
+    pub const InitError = error{
+        /// Failed to obtain cryptographically secure entropy from the OS.
+        /// This is required for secure transaction ID generation and 0x20 randomization.
+        EntropyUnavailable,
+        OutOfMemory,
+    };
+
     /// Create a new recursive resolver
-    pub fn init(allocator: std.mem.Allocator, config: RecursiveConfig) !Self {
+    ///
+    /// SECURITY: Requires OS entropy for secure transaction ID generation.
+    /// Fails if cryptographically secure random numbers are unavailable,
+    /// as predictable IDs enable DNS cache poisoning attacks.
+    pub fn init(allocator: std.mem.Allocator, config: RecursiveConfig) InitError!Self {
         // Initialize root servers
         const root_ips = RootServers.all();
         var root_servers = try allocator.alloc(ServerAddress, root_ips.len);
         errdefer allocator.free(root_servers);
 
         for (root_ips, 0..) |ip, i| {
-            root_servers[i] = try ServerAddress.fromIpv4(ip, types_mod.dns_port);
+            root_servers[i] = ServerAddress.fromIpv4(ip, types_mod.dns_port) catch
+                return error.OutOfMemory;
         }
 
-        // Initialize PRNG for 0x20 case randomization
+        // Initialize PRNG for 0x20 case randomization and transaction IDs
+        // SECURITY: Fail-fast if entropy is unavailable - do NOT fall back to timestamps
+        // Predictable seeds enable transaction ID prediction attacks (RFC 5452, CWE-330)
         var seed: u64 = undefined;
         std.posix.getrandom(std.mem.asBytes(&seed)) catch {
-            seed = @bitCast(std.time.milliTimestamp());
+            allocator.free(root_servers);
+            return error.EntropyUnavailable;
         };
 
         return Self{

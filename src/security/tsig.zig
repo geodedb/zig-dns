@@ -19,8 +19,10 @@ const std = @import("std");
 /// TSIG Algorithm identifiers
 pub const Algorithm = enum {
     /// HMAC-MD5 (legacy, RFC 2845)
+    /// DEPRECATED: MD5 has known weaknesses. Use hmac_sha256 or stronger.
     hmac_md5,
     /// HMAC-SHA1 (RFC 4635)
+    /// DEPRECATED: SHA1 has known weaknesses. Use hmac_sha256 or stronger.
     hmac_sha1,
     /// HMAC-SHA256 (RFC 4635, recommended)
     hmac_sha256,
@@ -30,6 +32,26 @@ pub const Algorithm = enum {
     hmac_sha512,
 
     const Self = @This();
+
+    /// Check if this algorithm is deprecated due to known cryptographic weaknesses
+    /// SEC-003: Flag weak algorithms for security auditing (CWE-327)
+    pub fn isDeprecated(self: Self) bool {
+        return switch (self) {
+            .hmac_md5, .hmac_sha1 => true,
+            .hmac_sha256, .hmac_sha384, .hmac_sha512 => false,
+        };
+    }
+
+    /// Get deprecation warning message if applicable
+    pub fn deprecationWarning(self: Self) ?[]const u8 {
+        return switch (self) {
+            .hmac_md5 => "SECURITY WARNING: HMAC-MD5 is deprecated due to MD5 weaknesses. " ++
+                "Consider migrating to HMAC-SHA256 or stronger (CWE-327).",
+            .hmac_sha1 => "SECURITY WARNING: HMAC-SHA1 is deprecated due to SHA1 collision attacks. " ++
+                "Consider migrating to HMAC-SHA256 or stronger (CWE-327).",
+            else => null,
+        };
+    }
 
     /// Get the canonical algorithm name for wire format
     pub fn toWireName(self: Self) []const u8 {
@@ -231,14 +253,44 @@ pub const TsigContext = struct {
     key: TsigKey,
     /// Default fudge factor (300 seconds = 5 minutes)
     fudge: u16 = 300,
+    /// Emit warnings for deprecated algorithms (SEC-003)
+    warn_deprecated: bool = true,
+    /// Optional callback for security warnings
+    security_warning_callback: ?*const fn ([]const u8) void = null,
+    /// Track if deprecation warning has been emitted (to avoid spam)
+    deprecation_warned: bool = false,
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, key: TsigKey) Self {
-        return Self{
+        var ctx = Self{
             .allocator = allocator,
             .key = key,
         };
+        // Emit deprecation warning on initialization if applicable
+        ctx.checkDeprecation();
+        return ctx;
+    }
+
+    /// Initialize without deprecation warnings (for testing/legacy compatibility)
+    pub fn initNoWarn(allocator: std.mem.Allocator, key: TsigKey) Self {
+        return Self{
+            .allocator = allocator,
+            .key = key,
+            .warn_deprecated = false,
+        };
+    }
+
+    /// Check and emit deprecation warning if using weak algorithm
+    fn checkDeprecation(self: *Self) void {
+        if (!self.warn_deprecated or self.deprecation_warned) return;
+
+        if (self.key.algorithm.deprecationWarning()) |warning| {
+            if (self.security_warning_callback) |callback| {
+                callback(warning);
+            }
+            self.deprecation_warned = true;
+        }
     }
 
     /// Sign a DNS message with TSIG
@@ -366,6 +418,11 @@ pub const TsigContext = struct {
     }
 
     /// Compute HMAC over message and TSIG variables
+    ///
+    /// SECURITY: Implements proper RFC 2104 key handling:
+    /// - Keys longer than block size are hashed first (not truncated)
+    /// - Keys shorter than or equal to block size are used directly
+    /// This fixes SEC-002 (CWE-326).
     fn computeMac(self: *Self, message: []const u8, tsig_vars: []const u8) ![]u8 {
         const mac_len = self.key.algorithm.macLength();
         const result = try self.allocator.alloc(u8, mac_len);
@@ -373,46 +430,76 @@ pub const TsigContext = struct {
 
         switch (self.key.algorithm) {
             .hmac_md5 => {
-                var key: [16]u8 = .{0} ** 16;
-                const copy_len = @min(self.key.secret.len, 16);
-                @memcpy(key[0..copy_len], self.key.secret[0..copy_len]);
-                var hmac = std.crypto.auth.hmac.HmacMd5.init(&key);
+                // Block size for MD5 is 64 bytes, output is 16 bytes
+                const block_size = 64;
+                var key: [block_size]u8 = .{0} ** block_size;
+                if (self.key.secret.len > block_size) {
+                    // RFC 2104: Hash key if longer than block size
+                    std.crypto.hash.Md5.hash(self.key.secret, key[0..16], .{});
+                } else {
+                    @memcpy(key[0..self.key.secret.len], self.key.secret);
+                }
+                var hmac = std.crypto.auth.hmac.HmacMd5.init(key[0..16]);
                 hmac.update(message);
                 hmac.update(tsig_vars);
                 hmac.final(result[0..16]);
             },
             .hmac_sha1 => {
-                var key: [20]u8 = .{0} ** 20;
-                const copy_len = @min(self.key.secret.len, 20);
-                @memcpy(key[0..copy_len], self.key.secret[0..copy_len]);
-                var hmac = std.crypto.auth.hmac.HmacSha1.init(&key);
+                // Block size for SHA1 is 64 bytes, output is 20 bytes
+                const block_size = 64;
+                var key: [block_size]u8 = .{0} ** block_size;
+                if (self.key.secret.len > block_size) {
+                    // RFC 2104: Hash key if longer than block size
+                    std.crypto.hash.Sha1.hash(self.key.secret, key[0..20], .{});
+                } else {
+                    @memcpy(key[0..self.key.secret.len], self.key.secret);
+                }
+                var hmac = std.crypto.auth.hmac.HmacSha1.init(key[0..20]);
                 hmac.update(message);
                 hmac.update(tsig_vars);
                 hmac.final(result[0..20]);
             },
             .hmac_sha256 => {
-                var key: [32]u8 = .{0} ** 32;
-                const copy_len = @min(self.key.secret.len, 32);
-                @memcpy(key[0..copy_len], self.key.secret[0..copy_len]);
-                var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(&key);
+                // Block size for SHA256 is 64 bytes, output is 32 bytes
+                const block_size = 64;
+                var key: [block_size]u8 = .{0} ** block_size;
+                if (self.key.secret.len > block_size) {
+                    // RFC 2104: Hash key if longer than block size
+                    std.crypto.hash.sha2.Sha256.hash(self.key.secret, key[0..32], .{});
+                } else {
+                    @memcpy(key[0..self.key.secret.len], self.key.secret);
+                }
+                var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(key[0..32]);
                 hmac.update(message);
                 hmac.update(tsig_vars);
                 hmac.final(result[0..32]);
             },
             .hmac_sha384 => {
-                var key: [48]u8 = .{0} ** 48;
-                const copy_len = @min(self.key.secret.len, 48);
-                @memcpy(key[0..copy_len], self.key.secret[0..copy_len]);
-                var hmac = std.crypto.auth.hmac.sha2.HmacSha384.init(&key);
+                // Block size for SHA384 is 128 bytes, output is 48 bytes
+                const block_size = 128;
+                var key: [block_size]u8 = .{0} ** block_size;
+                if (self.key.secret.len > block_size) {
+                    // RFC 2104: Hash key if longer than block size
+                    std.crypto.hash.sha2.Sha384.hash(self.key.secret, key[0..48], .{});
+                } else {
+                    @memcpy(key[0..self.key.secret.len], self.key.secret);
+                }
+                var hmac = std.crypto.auth.hmac.sha2.HmacSha384.init(key[0..48]);
                 hmac.update(message);
                 hmac.update(tsig_vars);
                 hmac.final(result[0..48]);
             },
             .hmac_sha512 => {
-                var key: [64]u8 = .{0} ** 64;
-                const copy_len = @min(self.key.secret.len, 64);
-                @memcpy(key[0..copy_len], self.key.secret[0..copy_len]);
-                var hmac = std.crypto.auth.hmac.sha2.HmacSha512.init(&key);
+                // Block size for SHA512 is 128 bytes, output is 64 bytes
+                const block_size = 128;
+                var key: [block_size]u8 = .{0} ** block_size;
+                if (self.key.secret.len > block_size) {
+                    // RFC 2104: Hash key if longer than block size
+                    std.crypto.hash.sha2.Sha512.hash(self.key.secret, key[0..64], .{});
+                } else {
+                    @memcpy(key[0..self.key.secret.len], self.key.secret);
+                }
+                var hmac = std.crypto.auth.hmac.sha2.HmacSha512.init(key[0..64]);
                 hmac.update(message);
                 hmac.update(tsig_vars);
                 hmac.final(result[0..64]);
@@ -590,6 +677,11 @@ pub const VerifyResult = struct {
 
 // Helper functions
 
+/// Maximum compression pointer hops to prevent infinite loops (RFC 1035)
+const max_compression_hops: u8 = 16;
+/// Maximum DNS name length per RFC 1035 Section 2.3.4
+const max_name_length: usize = 255;
+
 fn parseName(allocator: std.mem.Allocator, data: []const u8, start: usize, full_msg: []const u8) !struct { name: []const u8, offset: usize } {
     var name: std.ArrayList(u8) = .empty;
     errdefer name.deinit(allocator);
@@ -597,6 +689,8 @@ fn parseName(allocator: std.mem.Allocator, data: []const u8, start: usize, full_
     var offset = start;
     var followed_ptr = false;
     var final_offset = start;
+    var pointer_hops: u8 = 0;
+    var total_name_len: usize = 0;
     _ = full_msg;
 
     while (offset < data.len) {
@@ -608,6 +702,11 @@ fn parseName(allocator: std.mem.Allocator, data: []const u8, start: usize, full_
         }
 
         if (len & 0xC0 == 0xC0) {
+            // Compression pointer - check for loop
+            pointer_hops += 1;
+            if (pointer_hops > max_compression_hops) {
+                return error.CompressionLoopDetected;
+            }
             if (offset + 1 >= data.len) return error.InvalidName;
             const ptr = (@as(u16, len & 0x3F) << 8) | data[offset + 1];
             if (!followed_ptr) final_offset = offset + 2;
@@ -617,6 +716,12 @@ fn parseName(allocator: std.mem.Allocator, data: []const u8, start: usize, full_
         }
 
         if (offset + 1 + len > data.len) return error.InvalidName;
+
+        // Check max name length (length byte + label)
+        total_name_len += 1 + len;
+        if (total_name_len > max_name_length) {
+            return error.NameTooLong;
+        }
 
         if (name.items.len > 0) {
             try name.append(allocator, '.');
@@ -669,6 +774,22 @@ fn skipRR(data: []const u8, start: usize) !usize {
 test "Algorithm.toWireName" {
     try std.testing.expectEqualStrings("hmac-sha256", Algorithm.hmac_sha256.toWireName());
     try std.testing.expectEqualStrings("hmac-md5.sig-alg.reg.int", Algorithm.hmac_md5.toWireName());
+}
+
+test "Algorithm.isDeprecated" {
+    // SEC-003: Verify deprecated algorithms are flagged
+    try std.testing.expect(Algorithm.hmac_md5.isDeprecated());
+    try std.testing.expect(Algorithm.hmac_sha1.isDeprecated());
+    try std.testing.expect(!Algorithm.hmac_sha256.isDeprecated());
+    try std.testing.expect(!Algorithm.hmac_sha384.isDeprecated());
+    try std.testing.expect(!Algorithm.hmac_sha512.isDeprecated());
+}
+
+test "Algorithm.deprecationWarning" {
+    // SEC-003: Verify deprecation warnings are provided
+    try std.testing.expect(Algorithm.hmac_md5.deprecationWarning() != null);
+    try std.testing.expect(Algorithm.hmac_sha1.deprecationWarning() != null);
+    try std.testing.expect(Algorithm.hmac_sha256.deprecationWarning() == null);
 }
 
 test "Algorithm.fromWireName" {

@@ -38,6 +38,20 @@ pub const ZoneTransferConfig = struct {
     verify_serial: bool = true,
     /// TSIG key for authenticated transfers (optional)
     tsig_key: ?TsigKey = null,
+
+    // SECURITY: Authentication enforcement options (SEC-001)
+
+    /// If true, zone transfers without TSIG authentication will fail.
+    /// RECOMMENDED: Set to true in production environments.
+    require_auth: bool = false,
+
+    /// If true, log a warning when performing unauthenticated zone transfers.
+    /// Default true to alert operators of potential security risks.
+    warn_unauthenticated: bool = true,
+
+    /// Optional callback for security warnings.
+    /// Called when unauthenticated transfers are attempted (if warn_unauthenticated is true).
+    security_warning_callback: ?*const fn ([]const u8) void = null,
 };
 
 /// TSIG key for authenticated zone transfers
@@ -203,7 +217,34 @@ pub const ZoneTransferClient = struct {
 
     /// Perform AXFR (full zone transfer)
     /// RFC 5936: Returns all records in the zone
+    ///
+    /// SECURITY: Zone transfers can expose sensitive DNS data. Consider:
+    /// - Using TSIG authentication (set tsig_key in config)
+    /// - Setting require_auth=true to enforce authentication
     pub fn axfr(self: *Self, zone_name: []const u8, server_addr: []const u8, port: u16) !TransferResult {
+        // SECURITY: Check authentication requirements (SEC-001)
+        if (self.config.tsig_key == null) {
+            if (self.config.require_auth) {
+                return TransferResult{
+                    .success = false,
+                    .zone = null,
+                    .record_count = 0,
+                    .message_count = 0,
+                    .duration_ms = 0,
+                    .error_message = "SECURITY: Zone transfer requires authentication but no TSIG key configured",
+                };
+            }
+            if (self.config.warn_unauthenticated) {
+                const warning = "SECURITY WARNING: Performing unauthenticated AXFR zone transfer. " ++
+                    "Consider configuring TSIG authentication for zone transfers. " ++
+                    "Set require_auth=true to enforce authentication. (CWE-306)";
+                if (self.config.security_warning_callback) |callback| {
+                    callback(warning);
+                }
+                // Note: In production, this would also log via std.log or similar
+            }
+        }
+
         const start_time = std.time.milliTimestamp();
         var zone = Zone.init(self.allocator, zone_name);
         errdefer zone.deinit();
@@ -286,7 +327,32 @@ pub const ZoneTransferClient = struct {
 
     /// Perform IXFR (incremental zone transfer)
     /// RFC 1995: Returns only changes since the specified serial
+    ///
+    /// SECURITY: Zone transfers can expose sensitive DNS data. Consider:
+    /// - Using TSIG authentication (set tsig_key in config)
+    /// - Setting require_auth=true to enforce authentication
     pub fn ixfr(self: *Self, zone_name: []const u8, current_serial: u32, server_addr: []const u8, port: u16) !IxfrResult {
+        // SECURITY: Check authentication requirements (SEC-001)
+        if (self.config.tsig_key == null) {
+            if (self.config.require_auth) {
+                return IxfrResult{
+                    .success = false,
+                    .is_full_zone = false,
+                    .changeset = null,
+                    .new_serial = current_serial,
+                    .duration_ms = 0,
+                };
+            }
+            if (self.config.warn_unauthenticated) {
+                const warning = "SECURITY WARNING: Performing unauthenticated IXFR zone transfer. " ++
+                    "Consider configuring TSIG authentication for zone transfers. " ++
+                    "Set require_auth=true to enforce authentication. (CWE-306)";
+                if (self.config.security_warning_callback) |callback| {
+                    callback(warning);
+                }
+            }
+        }
+
         const start_time = std.time.milliTimestamp();
 
         // Connect via TCP
@@ -343,14 +409,17 @@ pub const ZoneTransferClient = struct {
     }
 
     /// Build AXFR/IXFR query message
+    ///
+    /// SECURITY: Requires OS entropy for secure transaction ID generation.
     fn buildTransferQuery(self: *Self, zone_name: []const u8, transfer_type: TransferType) ![]u8 {
         var buffer: std.ArrayList(u8) = .empty;
         errdefer buffer.deinit(self.allocator);
 
         // Generate random ID
+        // SECURITY: Fail-fast if entropy unavailable - predictable IDs enable cache poisoning
         var seed: u64 = undefined;
         std.posix.getrandom(std.mem.asBytes(&seed)) catch {
-            seed = @bitCast(std.time.milliTimestamp());
+            return error.EntropyUnavailable;
         };
         var prng = std.Random.DefaultPrng.init(seed);
         const id = prng.random().int(u16);
@@ -372,14 +441,17 @@ pub const ZoneTransferClient = struct {
     }
 
     /// Build IXFR query with authority section containing our SOA
+    ///
+    /// SECURITY: Requires OS entropy for secure transaction ID generation.
     fn buildIxfrQuery(self: *Self, zone_name: []const u8, current_serial: u32) ![]u8 {
         var buffer: std.ArrayList(u8) = .empty;
         errdefer buffer.deinit(self.allocator);
 
         // Generate random ID
+        // SECURITY: Fail-fast if entropy unavailable - predictable IDs enable cache poisoning
         var seed: u64 = undefined;
         std.posix.getrandom(std.mem.asBytes(&seed)) catch {
-            seed = @bitCast(std.time.milliTimestamp());
+            return error.EntropyUnavailable;
         };
         var prng = std.Random.DefaultPrng.init(seed);
         const id = prng.random().int(u16);
@@ -546,6 +618,11 @@ pub const ZoneTransferClient = struct {
         new_offset: usize,
     };
 
+    /// Maximum compression pointer hops to prevent infinite loops (RFC 1035)
+    const max_compression_hops: u8 = 16;
+    /// Maximum DNS name length per RFC 1035 Section 2.3.4
+    const max_name_length: usize = 255;
+
     fn parseName(self: *Self, data: []const u8, start_offset: usize) !NameResult {
         var name: std.ArrayList(u8) = .empty;
         errdefer name.deinit(self.allocator);
@@ -553,6 +630,8 @@ pub const ZoneTransferClient = struct {
         var offset = start_offset;
         var followed_pointer = false;
         var final_offset = start_offset;
+        var pointer_hops: u8 = 0;
+        var total_name_len: usize = 0;
 
         while (offset < data.len) {
             const len = data[offset];
@@ -563,7 +642,11 @@ pub const ZoneTransferClient = struct {
             }
 
             if (len & 0xC0 == 0xC0) {
-                // Compression pointer
+                // Compression pointer - check for loop
+                pointer_hops += 1;
+                if (pointer_hops > max_compression_hops) {
+                    return error.CompressionLoopDetected;
+                }
                 if (offset + 1 >= data.len) return error.InvalidName;
                 const pointer = (@as(u16, len & 0x3F) << 8) | data[offset + 1];
                 if (!followed_pointer) final_offset = offset + 2;
@@ -573,6 +656,12 @@ pub const ZoneTransferClient = struct {
             }
 
             if (offset + 1 + len > data.len) return error.InvalidName;
+
+            // Check max name length (length byte + label)
+            total_name_len += 1 + len;
+            if (total_name_len > max_name_length) {
+                return error.NameTooLong;
+            }
 
             if (name.items.len > 0) {
                 try name.append(self.allocator, '.');
@@ -754,6 +843,31 @@ test "ZoneTransferConfig defaults" {
     try std.testing.expectEqual(@as(usize, 100000), config.max_records);
     try std.testing.expectEqual(@as(u32, 300000), config.timeout_ms);
     try std.testing.expect(config.verify_serial);
+    // Security defaults
+    try std.testing.expect(!config.require_auth); // Default false for backward compat
+    try std.testing.expect(config.warn_unauthenticated); // Default true for security
+    try std.testing.expect(config.tsig_key == null);
+}
+
+test "ZoneTransferConfig authentication enforcement" {
+    // Test that require_auth can be configured
+    const strict_config = ZoneTransferConfig{
+        .require_auth = true,
+        .warn_unauthenticated = true,
+    };
+    try std.testing.expect(strict_config.require_auth);
+    try std.testing.expect(strict_config.tsig_key == null);
+
+    // Test with TSIG key configured
+    const auth_config = ZoneTransferConfig{
+        .tsig_key = TsigKey{
+            .name = "transfer-key",
+            .algorithm = "hmac-sha256",
+            .secret = "secret",
+        },
+        .require_auth = true,
+    };
+    try std.testing.expect(auth_config.tsig_key != null);
 }
 
 test "IxfrChangeset basic" {

@@ -21,8 +21,6 @@ include:
   # SBOM generation and scanning
   - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.7.1
   - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.7.1
-    inputs:
-      allow_failure: true
 
   # Release creation
   - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.7.1

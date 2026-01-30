@@ -105,7 +105,7 @@ pub const Client = struct {
                     self.servers_owned = true;
                 }
 
-                self.stub = StubResolver.init(allocator, .{
+                self.stub = try StubResolver.init(allocator, .{
                     .servers = self.server_addresses,
                     .timeout_ms = config.timeout_ms,
                 });

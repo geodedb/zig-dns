@@ -9,8 +9,40 @@
 //! - RRSIG signature validation
 //! - Chain-of-trust validation from root to leaf
 //!
-//! Note: RSA signature verification requires an external crypto library.
-//! This module provides Ed25519 and ECDSA P-256/P-384 support via std.crypto.
+//! ## Supported Algorithms
+//!
+//! | Algorithm       | Status    | Notes                                    |
+//! |-----------------|-----------|------------------------------------------|
+//! | Ed25519 (15)    | Supported | Recommended for new deployments          |
+//! | ECDSA P-256 (13)| Supported | RFC 6605, widely supported               |
+//! | ECDSA P-384 (14)| Supported | RFC 6605, high security                  |
+//! | RSA-SHA256 (8)  | **NOT SUPPORTED** | See limitation below          |
+//! | RSA-SHA512 (10) | **NOT SUPPORTED** | See limitation below          |
+//! | RSA-SHA1 (5)    | **NOT SUPPORTED** | See limitation below          |
+//!
+//! ## IMPORTANT: RSA Algorithm Limitation (SEC-004)
+//!
+//! **RSA signature verification is NOT implemented.** This is a significant
+//! limitation because RSA-SHA256 (algorithm 8) is currently the most widely
+//! deployed DNSSEC algorithm. As of 2024, approximately 70-80% of DNSSEC-signed
+//! zones use RSA algorithms.
+//!
+//! **Impact:** This library cannot validate DNSSEC signatures for:
+//! - Most TLD zones (.com, .net, .org, etc.)
+//! - The root zone (uses RSA-SHA256)
+//! - Legacy zones not yet migrated to ECDSA/Ed25519
+//!
+//! **Workarounds:**
+//! 1. Use a full resolver (like Unbound or BIND) for DNSSEC validation
+//! 2. Integrate an external RSA crypto library (not included due to Zig's
+//!    goal of minimal C dependencies)
+//! 3. Limit validation to zones known to use ECDSA/Ed25519
+//!
+//! **Future:** RSA support may be added via optional external crypto bindings
+//! or when Zig's standard library includes RSA primitives.
+//!
+//! For zones using unsupported algorithms, `verifySignature` returns
+//! `error.UnsupportedAlgorithm`.
 
 const std = @import("std");
 const record = @import("record");
@@ -412,8 +444,11 @@ pub const Validator = struct {
             .ecdsap256sha256 => return verifyEcdsaP256(public_key, message, signature),
             .ecdsap384sha384 => return verifyEcdsaP384(public_key, message, signature),
             .rsasha256, .rsasha512, .rsasha1 => {
-                // RSA signature verification requires external crypto library
-                // std.crypto doesn't include RSA
+                // SEC-004: RSA signature verification is NOT IMPLEMENTED
+                // Zig's std.crypto does not include RSA primitives.
+                // See module documentation for details on this limitation.
+                // Most DNSSEC-signed zones (including root and major TLDs) use
+                // RSA-SHA256, so this is a significant limitation.
                 return error.UnsupportedAlgorithm;
             },
             else => return error.UnsupportedAlgorithm,

@@ -9,6 +9,68 @@
 //! This module provides DoT transport with pluggable TLS backends.
 //! Since Zig's standard library doesn't include TLS, implementations
 //! must provide their own TLS backend (e.g., BoringSSL, mbedTLS, bearssl).
+//!
+//! ## Security Requirements for TLS Backends (SEC-011)
+//!
+//! Implementers of `TlsBackend` MUST ensure the following security properties:
+//!
+//! ### TLS Version Requirements
+//! - **Minimum**: TLS 1.2 (RFC 8310 compliance)
+//! - **Recommended**: TLS 1.3 for improved security and performance
+//! - MUST NOT support SSL 3.0, TLS 1.0, or TLS 1.1
+//!
+//! ### Certificate Validation (RFC 8310 Strict Profile)
+//! - MUST validate server certificate against trusted CA bundle
+//! - MUST verify Subject Alternative Name (SAN) matches server hostname
+//! - MUST check certificate expiration
+//! - SHOULD check certificate revocation (OCSP stapling preferred)
+//! - MUST fail connection if certificate validation fails
+//!
+//! ### SPKI Pinning (Optional, Recommended)
+//! For high-security deployments, implement SPKI (Subject Public Key Info) pinning:
+//! - Pin the server's public key or intermediate CA public key
+//! - Reject connections if pin doesn't match
+//! - Support pin backup keys for rotation
+//!
+//! ### Cipher Suite Requirements
+//! **Required (MUST support at least one):**
+//! - TLS_AES_256_GCM_SHA384 (TLS 1.3)
+//! - TLS_AES_128_GCM_SHA256 (TLS 1.3)
+//! - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 (TLS 1.2)
+//! - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 (TLS 1.2)
+//!
+//! **Prohibited (MUST NOT support):**
+//! - Any cipher suite using RC4, 3DES, MD5, or SHA1 for MAC
+//! - Export cipher suites
+//! - NULL cipher suites
+//! - Anonymous key exchange
+//!
+//! ### SNI (Server Name Indication)
+//! - MUST send SNI extension with server hostname
+//! - SNI enables servers to select correct certificate
+//!
+//! ### Example Backend Configuration
+//!
+//! **BoringSSL Example:**
+//! ```c
+//! SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+//! SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+//! SSL_CTX_set_default_verify_paths(ctx);
+//! SSL_set_tlsext_host_name(ssl, hostname);
+//! ```
+//!
+//! **mbedTLS Example:**
+//! ```c
+//! mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+//! mbedtls_ssl_conf_min_version(&conf, MBEDTLS_SSL_MAJOR_VERSION_3,
+//!                                      MBEDTLS_SSL_MINOR_VERSION_3);
+//! mbedtls_ssl_set_hostname(&ssl, hostname);
+//! ```
+//!
+//! **WARNING**: Backends that disable certificate validation, use
+//! opportunistic encryption, or permit downgrade attacks will
+//! compromise the confidentiality of DNS queries and may enable
+//! man-in-the-middle attacks, defeating the purpose of DoT.
 
 const std = @import("std");
 const channel = @import("channel");

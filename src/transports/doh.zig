@@ -8,6 +8,48 @@
 //! This module provides DoH transport with a pluggable HTTP backend interface.
 //! Since Zig's standard library doesn't include HTTP/2 support, implementations
 //! must provide their own HTTP backend (e.g., curl, nghttp2, or custom HTTP/2).
+//!
+//! ## Security Requirements for HTTP Backends (SEC-011)
+//!
+//! Implementers of `HttpBackend` MUST ensure the following security properties:
+//!
+//! ### TLS Requirements
+//! - **Minimum TLS Version**: TLS 1.2 required, TLS 1.3 strongly recommended
+//! - **Certificate Validation**: MUST validate server certificates against trusted CAs
+//! - **Hostname Verification**: MUST verify server hostname matches certificate
+//! - **Certificate Pinning**: RECOMMENDED for high-security deployments
+//!
+//! ### Cipher Suite Requirements
+//! - MUST support AEAD cipher suites (AES-GCM, ChaCha20-Poly1305)
+//! - SHOULD disable weak/legacy ciphers (RC4, 3DES, MD5-based MACs)
+//! - RECOMMENDED cipher suites:
+//!   - TLS_AES_256_GCM_SHA384 (TLS 1.3)
+//!   - TLS_CHACHA20_POLY1305_SHA256 (TLS 1.3)
+//!   - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 (TLS 1.2)
+//!
+//! ### HTTP/2 Security
+//! - MUST implement HTTP/2 per RFC 7540
+//! - SHOULD implement HSTS validation
+//! - MUST NOT follow redirects to non-HTTPS URLs
+//!
+//! ### Example Backend Configuration (curl)
+//! ```c
+//! curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+//! curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+//! curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+//! curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
+//! ```
+//!
+//! ### Security Validation
+//! Backend implementations should validate:
+//! - Certificate chain up to trusted root
+//! - Certificate revocation (OCSP/CRL when available)
+//! - Certificate expiration dates
+//! - Subject Alternative Name (SAN) matches
+//!
+//! **WARNING**: Backends that disable certificate validation or use
+//! insecure TLS configurations will compromise the security benefits
+//! of DoH and may enable man-in-the-middle attacks.
 
 const std = @import("std");
 const channel = @import("channel");
