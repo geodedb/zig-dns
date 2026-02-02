@@ -12,9 +12,20 @@ pub fn build(b: *std.Build) void {
     // ========================================================================
 
     const feature_doq = b.option(bool, "feature_doq", "Enable DNS over QUIC support") orelse false;
+    const enable_spice = b.option(bool, "spice", "Enable spice-based parallelism") orelse true;
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "feature_doq", feature_doq);
+    build_options.addOption(bool, "enable_spice", enable_spice);
+
+    // Get spice dependency if enabled
+    const spice_mod: ?*std.Build.Module = if (enable_spice) blk: {
+        const spice_dep = b.dependency("spice", .{
+            .target = target,
+            .optimize = optimize,
+        });
+        break :blk spice_dep.module("spice");
+    } else null;
 
     // ========================================================================
     // Define all DNS modules
@@ -414,6 +425,21 @@ pub fn build(b: *std.Build) void {
     //        const message = dns.message;
     //        const resolver = dns.client;
 
+    // Parallel module for spice-based parallelism
+    const parallel_mod = b.addModule("parallel", .{
+        .root_source_file = b.path("src/parallel.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "build_options", .module = build_options.createModule() },
+            .{ .name = "record", .module = record_mod },
+            .{ .name = "message", .module = message_mod },
+        },
+    });
+    if (spice_mod) |sm| {
+        parallel_mod.addImport("spice", sm);
+    }
+
     const dns_mod = b.addModule("dns", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
@@ -429,6 +455,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "stub", .module = stub_mod },
             .{ .name = "recursive", .module = recursive_mod },
             .{ .name = "client", .module = client_mod },
+            .{ .name = "parallel", .module = parallel_mod },
         },
     });
 

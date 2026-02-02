@@ -25,6 +25,10 @@
             .url = "https://gitlab.com/devnw/zig/cli/-/archive/v0.1.0/cli-v0.1.0.tar.gz",
             .hash = "cli-0.1.0-0aso9F-vBAAoH-0L84gQXM4-y2NC_HzjU3KLsGEfBea3",
         },
+        .spice = .{
+            .url = "https://gitlab.com/devnw/zig/spice/-/archive/main/spice-main.tar.gz",
+            .hash = "spice-0.0.0-HnDb57y0AABlp7AaQKAkMShWpww-Tl_8QM7T-1Lx3auu",
+        },
     },
 
     // Specifies the set of files and directories that are included in this
