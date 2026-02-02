@@ -6,6 +6,46 @@
 //! Provides high-performance parallel implementations of compute-intensive
 //! DNS operations including zone transfer parsing, DNSSEC validation,
 //! and batch query processing.
+//!
+//! ## Overview
+//!
+//! This module enables parallel processing of DNS operations using the
+//! spice thread pool. Ideal for DNS servers, resolvers, and applications
+//! performing bulk DNS operations.
+//!
+//! ## Build Configuration
+//!
+//! Enable: `-Dspice=true` (default)
+//! Disable: `-Dspice=false`
+//!
+//! ## Usage Example
+//!
+//! ```zig
+//! const parallel = @import("parallel.zig");
+//!
+//! // Validate multiple DNSSEC signatures in parallel
+//! var inputs: [4]parallel.DnssecValidateInput = undefined;
+//! var results: [4]parallel.DnssecValidateResult = undefined;
+//!
+//! for (&inputs) |*input| {
+//!     input.* = .{
+//!         .rrsig = rrsig_rdata,
+//!         .rrset = rrset_records,
+//!         .dnskey = dnskey_rdata,
+//!     };
+//! }
+//!
+//! parallel.parallelDnssecValidate(&inputs, &results);
+//! ```
+//!
+//! ## Performance Thresholds
+//!
+//! | Operation           | Threshold  | Sequential Below |
+//! |---------------------|------------|------------------|
+//! | Zone Record Parse   | 64 records | Yes              |
+//! | DNSSEC Validation   | 2 sigs     | Yes              |
+//! | Batch Query         | 4 queries  | Yes              |
+//! | Cache Prefetch      | 8 entries  | Yes              |
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -506,5 +546,158 @@ test "parallel dnssec validate" {
 
     for (results) |result| {
         try std.testing.expect(result.valid);
+    }
+}
+
+test "parallel zone record parse - empty input" {
+    const allocator = std.testing.allocator;
+    var raw_records: [0][]const u8 = undefined;
+    var results: [0]ParsedRecord = undefined;
+
+    parallelZoneRecordParse(allocator, &raw_records, &results);
+}
+
+test "parallel zone record parse - invalid records" {
+    const allocator = std.testing.allocator;
+    var raw_records: [64][]const u8 = undefined;
+    var results: [64]ParsedRecord = undefined;
+
+    // Short records that should fail validation
+    const short_record = [_]u8{0} ** 8;
+    for (&raw_records) |*r| {
+        r.* = &short_record;
+    }
+
+    parallelZoneRecordParse(allocator, &raw_records, &results);
+
+    for (results) |result| {
+        try std.testing.expect(!result.valid);
+    }
+}
+
+test "parallel dnssec validate - empty rrsig" {
+    if (!build_options.enable_spice) return error.SkipZigTest;
+
+    var inputs: [4]DnssecValidateInput = undefined;
+    var results: [4]DnssecValidateResult = undefined;
+
+    for (&inputs) |*input| {
+        input.* = .{
+            .rrsig = "", // Empty
+            .rrset = &[_][]const u8{"rr1"},
+            .dnskey = "dnskey",
+        };
+    }
+
+    parallelDnssecValidate(&inputs, &results);
+
+    for (results) |result| {
+        try std.testing.expect(!result.valid);
+        try std.testing.expectEqual(@as(?u8, 1), result.error_code);
+    }
+}
+
+test "parallel dnssec validate - empty rrset" {
+    if (!build_options.enable_spice) return error.SkipZigTest;
+
+    var inputs: [4]DnssecValidateInput = undefined;
+    var results: [4]DnssecValidateResult = undefined;
+
+    for (&inputs) |*input| {
+        input.* = .{
+            .rrsig = "rrsig",
+            .rrset = &[_][]const u8{}, // Empty
+            .dnskey = "dnskey",
+        };
+    }
+
+    parallelDnssecValidate(&inputs, &results);
+
+    for (results) |result| {
+        try std.testing.expect(!result.valid);
+        try std.testing.expectEqual(@as(?u8, 2), result.error_code);
+    }
+}
+
+test "parallel batch query" {
+    if (!build_options.enable_spice) return error.SkipZigTest;
+
+    var queries: [8]QuerySpec = undefined;
+    var results: [8]QueryResult = undefined;
+
+    for (&queries) |*query| {
+        query.* = .{
+            .domain = "example.com",
+            .qtype = 1, // A record
+            .qclass = 1, // IN
+        };
+    }
+
+    parallelBatchQuery(&queries, &results, "8.8.8.8", 5000);
+
+    for (results) |result| {
+        try std.testing.expect(result.success);
+    }
+}
+
+test "parallel batch query - empty domain" {
+    if (!build_options.enable_spice) return error.SkipZigTest;
+
+    var queries: [4]QuerySpec = undefined;
+    var results: [4]QueryResult = undefined;
+
+    for (&queries) |*query| {
+        query.* = .{
+            .domain = "", // Empty
+            .qtype = 1,
+            .qclass = 1,
+        };
+    }
+
+    parallelBatchQuery(&queries, &results, "8.8.8.8", 5000);
+
+    for (results) |result| {
+        try std.testing.expect(!result.success);
+    }
+}
+
+test "parallel cache prefetch" {
+    if (!build_options.enable_spice) return error.SkipZigTest;
+
+    var entries: [16]PrefetchEntry = undefined;
+    var results: [16]PrefetchResult = undefined;
+
+    for (&entries) |*entry| {
+        entry.* = .{
+            .domain = "example.com",
+            .qtype = 1,
+            .expires_at = 1000,
+        };
+    }
+
+    parallelCachePrefetch(&entries, &results, "8.8.8.8");
+
+    for (results) |result| {
+        try std.testing.expect(result.refreshed);
+        try std.testing.expectEqual(@as(u32, 300), result.new_ttl);
+    }
+}
+
+test "parallel cache prefetch - below threshold" {
+    var entries: [4]PrefetchEntry = undefined;
+    var results: [4]PrefetchResult = undefined;
+
+    for (&entries) |*entry| {
+        entry.* = .{
+            .domain = "test.local",
+            .qtype = 28, // AAAA
+            .expires_at = 500,
+        };
+    }
+
+    parallelCachePrefetch(&entries, &results, "1.1.1.1");
+
+    for (results) |result| {
+        try std.testing.expect(result.refreshed);
     }
 }
