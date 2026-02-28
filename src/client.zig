@@ -184,12 +184,12 @@ pub const Client = struct {
             .recursive => blk: {
                 const result = try self.recursive.?.resolve(hostname, qtype);
                 if (result.answer) |answer| {
-                    defer self.allocator.free(answer);
                     break :blk try Message.parse(answer);
                 }
                 return error.NoAnswer;
             },
         };
+        defer self.allocator.free(response.data);
 
         // Process response
         var cname_chain = try buildCnameChain(self.allocator, response, response.data, hostname);
@@ -265,12 +265,12 @@ pub const Client = struct {
             .recursive => blk: {
                 const result = try self.recursive.?.resolve(domain, .mx);
                 if (result.answer) |answer| {
-                    defer self.allocator.free(answer);
                     break :blk try Message.parse(answer);
                 }
                 return error.NoAnswer;
             },
         };
+        defer self.allocator.free(response.data);
 
         var results: std.ArrayList(MXRecord) = .empty;
         errdefer results.deinit(self.allocator);
