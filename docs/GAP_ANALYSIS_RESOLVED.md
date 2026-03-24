@@ -482,4 +482,101 @@ The following GitLab issues were verified as resolved during the 2026-03-24 full
 
 ---
 
+## Resolved in Commit 6d42d51 (2026-03-24)
+
+The following 15 items were closed by commit `6d42d51` ("fix: close 15 security, performance, and quality gaps").
+
+### GAP-0037: Name.toString() missing compression hop limit [RESOLVED]
+- **Issue:** (not filed -- skip-issues mode)
+- **Category:** Security (Medium)
+- **Resolution:** Added `pointer_hops` counter with `max_compression_hops` check to `toString()`, `labelCount()`, and `parent()` in `src/name.zig`, matching the pattern already used in `toStringBuf()` and `eql()`. `labelCount()` return type changed from `usize` to `error{CompressionLoopDetected}!usize`. Three security tests added.
+- **Evidence:** `src/name.zig:224,236,355,477` -- hop counters; `src/name.zig:1367-1425` -- three GAP-0037 security tests
+- **Resolved date:** 2026-03-24
+
+### SEC-NEW-01: OOB read in extractTsig -- rdlength not validated before slice [RESOLVED]
+- **Category:** Security (High)
+- **Resolution:** Bounds check `if (offset + rdlength > message.len) return error.InvalidMessage;` added before `message[offset .. offset + rdlength]` in extractTsig.
+- **Evidence:** `src/security/tsig.zig:633` -- bounds check; `src/security/tsig.zig:932+` -- test `SEC-NEW-01: extractTsig rejects rdlength exceeding message`
+- **Resolved date:** 2026-03-24
+
+### SEC-NEW-03: skipRR returns offset+10+rdlength without bounds check [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** Bounds check `if (end > data.len) return error.InvalidRR;` added after computing `end = offset + 10 + rdlength`.
+- **Evidence:** `src/security/dns_name.zig:116` -- bounds check; `src/security/dns_name.zig:252-260` -- tests
+- **Resolved date:** 2026-03-24
+
+### SEC-NEW-04: TSIG other_data silently truncated [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** Returns `error.InvalidTsigRecord` when `offset + other_len > rdata.len` instead of silently setting other_data to empty slice.
+- **Evidence:** `src/security/tsig.zig:229` -- explicit error return on truncated other_data
+- **Resolved date:** 2026-03-24
+
+### SEC-NEW-06: Question skip adds +4 without bounds check [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** Bounds check `if (offset + 4 > message.len) return error.InvalidMessage;` added before `offset += 4` in the question-skipping loop of extractTsig.
+- **Evidence:** `src/security/tsig.zig:599` -- bounds check before QTYPE+QCLASS skip
+- **Resolved date:** 2026-03-24
+
+### SEC-NEW-07: skipName compression pointer returns offset+2 without checking offset+1 [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** Bounds check `if (offset + 1 >= data.len) return error.InvalidName;` added before `return offset + 2` in skipName.
+- **Evidence:** `src/security/dns_name.zig:101` -- bounds check; `src/security/dns_name.zig:241+` -- test `SEC-NEW-07: skipName rejects truncated compression pointer`
+- **Resolved date:** 2026-03-24
+
+### SEC-C100: TSIG fudge value attacker-controlled [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** After MAC verification passes, fudge is clamped: `if (tsig.fudge > self.fudge * 2)` returns `bad_time`. This limits attacker-controlled fudge to at most 2x the verifier's configured value.
+- **Evidence:** `src/security/tsig.zig:384-386` -- fudge clamp after MAC verification
+- **Resolved date:** 2026-03-24
+
+### SEC-C101: TSIG time check before MAC creates timing oracle [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** Verification reordered: MAC is computed and verified first (tsig.zig:350-380), then time and fudge are checked (tsig.zig:384-398). Invalid MACs always return `bad_sig` regardless of time status.
+- **Evidence:** `src/security/tsig.zig:350-398` -- MAC-first verification order
+- **Resolved date:** 2026-03-24
+
+### PF-NEW-07: extractReferral zone_name heap alloc via getName [RESOLVED]
+- **Category:** Performance (P2)
+- **Resolution:** Zone name uses `toStringBuf` with `[256]u8` stack buffer for comparisons during iteration; only duped once at end for `Referral` struct.
+- **Evidence:** `src/recursive.zig:581-587` -- `zone_buf` stack buffer + `toStringBuf`
+- **Resolved date:** 2026-03-24
+
+### PF-NEW-08: buildCnameChain heap getName/toString per CNAME record [RESOLVED]
+- **Category:** Performance (P3)
+- **Resolution:** `buildCnameChain` in `client.zig` uses `toStringBuf` with `[256]u8` stack buffers for both owner and target names, then `allocator.dupe` for the mapping arrays.
+- **Evidence:** `src/client.zig:407-428` -- `owner_stack_buf` and `target_stack_buf` stack buffers + `toStringBuf` + `dupe`
+- **Resolved date:** 2026-03-24
+
+### PF-NEW-09: Additional section glue getName heap allocs [RESOLVED]
+- **Category:** Performance (P2)
+- **Resolution:** Glue record name matching uses `toStringBuf` with `[256]u8` stack buffer per additional record. Inline NS name matching replaces separate `GlueRecord` ArrayList.
+- **Evidence:** `src/recursive.zig:614-636` -- `glue_buf` stack buffer + inline matching against `servers` array
+- **Resolved date:** 2026-03-24
+
+### PF-NEW-10: Cache hit path allocPrint [RESOLVED]
+- **Category:** Performance (P2)
+- **Resolution:** Cache hit path in `client.zig resolve()` uses `bufPrint` with `[15]u8` (IPv4) / `[39]u8` (IPv6) stack buffers + `allocator.dupe`, matching the non-cache path pattern.
+- **Evidence:** `src/client.zig:152-169` -- `a_buf` / `aaaa_buf` stack buffers + `bufPrint` + `dupe`
+- **Resolved date:** 2026-03-24
+
+### PF-NEW-12: queryWithRetry double dupe when 0x20 disabled [RESOLVED]
+- **Category:** Performance (P3)
+- **Resolution:** `last_query_name` dupe is now conditional on `self.config.case_randomization`, skipping the redundant dupe when 0x20 is disabled.
+- **Evidence:** `src/recursive.zig:483-488` -- `if (self.config.case_randomization)` guard around `last_query_name` assignment
+- **Resolved date:** 2026-03-24
+
+### QH-NEW-01: Empty stub functions in convenience.zig [RESOLVED]
+- **Category:** Quality / API Contract (High)
+- **Resolution:** `lookupA`, `lookupAAAA`, and `lookup` now return `error.NotImplemented` instead of silently returning empty results. Doc comments direct users to `client.Client` methods for working resolution.
+- **Evidence:** `src/resolver/convenience.zig:196,207,218` -- `return error.NotImplemented`; `src/resolver/convenience.zig:477+` -- test `SimpleResolver lookup stubs return NotImplemented`
+- **Resolved date:** 2026-03-24
+
+### QM-NEW-04: Incorrect dependency claim in lib.zig [RESOLVED]
+- **Category:** Quality / Documentation (Low)
+- **Resolution:** `lib.zig` doc comment updated from `//! - Zero external dependencies` to `//! - Minimal dependencies (optional spice for parallelism)`.
+- **Evidence:** `src/lib.zig:16` -- corrected doc comment
+- **Resolved date:** 2026-03-24
+
+---
+
 Note: GAP-0001 through GAP-0010 issues remain OPEN in the GitLab tracker despite fixes being present in code. See GAP-0015 (#78) for the broader state-conflict tracking.

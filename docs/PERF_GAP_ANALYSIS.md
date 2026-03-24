@@ -6,8 +6,8 @@ Last updated: 2026-03-24
 
 | Status | Count | Items |
 |---|---|---|
-| **Resolved** | 30 | PF-01, PF-02b, PF-04, PF-06, PF-07, PF-08, PF-09, PF-11, PF-12, PF-15, PF-17, PF-19, PF-20, PF-21, PF-22, PF-23, PF-24, PF-25, PF-26, PF-27, PF-28, PF-29, PF-30, PF-31, PF-NEW-01, PF-NEW-02, PF-NEW-03, PF-NEW-04, PF-NEW-05, PF-NEW-06 |
-| **Open/Deferred** | 15 | PF-02, PF-03, PF-05, PF-10, PF-13, PF-14, PF-16, PF-18, PF-03b, PF-NEW-07, PF-NEW-08, PF-NEW-09, PF-NEW-10, PF-NEW-12, PF-NEW-13 |
+| **Resolved** | 36 | PF-01, PF-02b, PF-04, PF-06, PF-07, PF-08, PF-09, PF-11, PF-12, PF-15, PF-17, PF-19, PF-20, PF-21, PF-22, PF-23, PF-24, PF-25, PF-26, PF-27, PF-28, PF-29, PF-30, PF-31, PF-NEW-01, PF-NEW-02, PF-NEW-03, PF-NEW-04, PF-NEW-05, PF-NEW-06, PF-NEW-07, PF-NEW-08, PF-NEW-09, PF-NEW-10, PF-NEW-12, PF-NEW-13 |
+| **Open/Deferred** | 9 | PF-02, PF-03, PF-05, PF-10, PF-13, PF-14, PF-16, PF-18, PF-03b |
 | **Total** | **45** |
 
 ### Top 5 Risks (by PerfScore)
@@ -16,7 +16,7 @@ Last updated: 2026-03-24
 2. **PF-03 (PerfScore 80, P1):** New UDP socket per query -- 5 syscalls per resolution. Socket reuse would save ~5-10us/query.
 3. **PF-05 (PerfScore 64, P1):** No per-query arena allocator -- 20-30 individual alloc/free per resolution (down from 20-60 after Phase 2 stack-buffer fixes).
 4. **PF-03b (PerfScore 48, P2):** Sequential server tries despite `parallel_queries` config -- `queryWithRetry` sends to servers one at a time; latency = sum instead of max.
-5. **PF-NEW-10 (PerfScore 24, P2):** Cache hit path in `client.zig:152-164` uses `allocPrint` for IP formatting while non-cache path already uses stack buffers.
+5. **PF-10 (PerfScore 24, P2):** allocPrint for IP formatting remains in 13 production sites across 10 files.
 
 ### Resolved Risks
 
@@ -48,6 +48,10 @@ Last updated: 2026-03-24
 26. **PF-NEW-02 (HIGH):** **Resolved.** `extractReferral` caller now frees referral data via `Referral.deinit` which frees `.zone`, each `.servers[i].name`, and the `.servers` slice. Added `errdefer` guards for error-path cleanup inside `extractReferral`.
 27. **PF-NEW-03 (HIGH):** **Resolved.** CNAME target path uses `toStringBuf` with 256-byte stack buffer + single `dupe` instead of `toString` (heap alloc) + `dupe` (second heap alloc). Eliminates one allocation per CNAME hop.
 28. **PF-NEW-04 (MEDIUM):** **Resolved.** `getMinimizedQname` builds the minimized name in a stack `[253]u8` buffer with manual offset tracking instead of `ArrayList(u8)`. Avoids heap allocation for name assembly.
+29. **PF-NEW-07 (P2, PerfScore 20):** **Resolved.** `extractReferral` zone name uses `toStringBuf` with 256-byte stack buffer for `isSubdomainOf` comparisons; only duped once for the final `Referral`. Eliminates intermediate `getName` heap allocation.
+30. **PF-NEW-09 (P2, PerfScore 20):** **Resolved.** Glue record names in `extractReferral` use `toStringBuf` with 256-byte stack buffer; NS name matching done inline against `servers` array. Eliminates per-glue `getName` heap alloc and `GlueRecord` intermediate storage.
+31. **PF-NEW-12 (P3, PerfScore 8):** **Resolved.** `queryWithRetry` skips `last_query_name` dupe when `case_randomization` is disabled since `last_query_name` is only checked under the 0x20 verification branch.
+32. **PF-NEW-13 (P3, PerfScore 12):** **Resolved.** `MessageBuilder.addQuestion` uses `Name.encodeBuf` with stack buffer to encode the question directly, avoiding intermediate heap allocation from `question_mod.buildQuery`.
 
 ### Open Items
 
@@ -61,16 +65,10 @@ Remaining items by priority:
 **P2 (Next Quarter):**
 - **PF-03b:** Sequential server tries despite `parallel_queries` config -- `queryWithRetry` iterates servers sequentially
 - **PF-10:** allocPrint for IP formatting -- now 13 production sites across 10 files (down from 17 after Phase 2 stack-buffer fixes)
-- **PF-NEW-10:** Cache hit path allocPrint in `client.zig:152-164` -- non-cache path already uses stack buffers
-- **PF-NEW-07:** `extractReferral` zone_name heap alloc via `getName` -- could use `toStringBuf`
-- **PF-NEW-09:** Additional section glue `getName` heap allocs (4-13 per referral) -- could use `toStringBuf`
-- **PF-NEW-08:** `buildCnameChain` heap `getName`/`toString` per CNAME record in `extractReferral` NS iteration
-- **PF-NEW-13:** `MessageBuilder.addQuestion` intermediate heap alloc for encoded question via `question.buildQuery`
 - **PF-13:** Concurrent queries -- requires thread-safe cache first (PF-14)
 - **PF-14:** Cache thread safety -- prerequisite for PF-13, larger effort
 
 **P3 (Backlog):**
-- **PF-NEW-12:** `queryWithRetry` duplicates domain name twice when 0x20 disabled (line 477 dupe + line 484 dupe)
 - **PF-16:** PRNG per call -- low impact optimization
 - **PF-18:** No benchmarks in CI -- sustained infrastructure effort
 
@@ -102,18 +100,18 @@ Remaining items by priority:
 | 20 | P2 | 30 | PF-25: isUnderNxdomainZone allocates keys in while loop | `src/resolver/dns_cache.zig:314-354` | Stack buffer shared across loop iterations via makeNxdomainZoneKeyBuf | Zero heap allocs per check | [#158](https://gitlab.com/devnw/zig/dns/-/issues/158) | Stack buffer with bufPrint; heap fallback for oversized names | Core maintainer | Quarter | **Resolved** |
 | 21 | P2 | 24 | PF-06: 65KB stack buffer per UDP receive | `src/stub.zig:238`, `src/recursive.zig:509`, `src/transports/udp.zig:67` | Buffer reduced to 4096 (EDNS default, RFC 6891) | 4096 bytes/call, ~61KB saved | [#99](https://gitlab.com/devnw/zig/dns/-/issues/99) | Reduced UDP receive buffer from 65535 to 4096 in all 3 locations | Core maintainer | Quarter | Resolved |
 | 22 | P2 | 24 | PF-10: allocPrint for IP formatting (13 production sites) | 10 files across `src/` | allocPrint for IPv4/IPv6 formatting; down from 17 sites after Phase 2 stack-buffer fixes (PF-NEW-05, PF-20, PF-30) | ~100-200ns per format | [#108](https://gitlab.com/devnw/zig/dns/-/issues/108) | Stack buffer + bufPrint (max 45 bytes) | Core maintainer | Quarter | Deferred |
-| 23 | P2 | 24 | PF-NEW-10: Cache hit path uses allocPrint while non-cache path uses stack buffers | `src/client.zig:152-164` | `resolve()` cache branch formats IPv4/IPv6 via `allocPrint` (lines 153, 158); non-cache answer path already uses `formatABuf`/`formatAAAABuf` with stack buffers (PF-NEW-05) | ~100-200ns per cached entry; inconsistent allocation strategy between cache/non-cache paths | -- | Use `formatABuf`/`formatAAAABuf` stack-buffer variants + `dupe` on cache hit path, matching non-cache path pattern | Core maintainer | Quarter | Open |
+| 23 | P2 | 24 | PF-NEW-10: Cache hit path uses allocPrint while non-cache path uses stack buffers | `src/client.zig:152-164` | Cache hit path now uses `bufPrint` into `[15]u8`/`[39]u8` stack buffers + `allocator.dupe`, matching non-cache path pattern | Zero intermediate heap alloc; single dupe per entry | Commit 6d42d51 | `bufPrint` + `allocator.dupe` on cache hit path | Core maintainer | Quarter | **Resolved** |
 | 24 | P2 | 24 | PF-29: cacheResponse getName+free per answer record | `src/recursive.zig:696-706` | Uses toStringBuf with 256-byte stack buffer; zero heap allocation per record | ~200-500ns saved per answer record | [#167](https://gitlab.com/devnw/zig/dns/-/issues/167) | Use Name.toStringBuf (depends on PF-24) | Core maintainer | Quarter | **Resolved** |
-| 25 | P2 | 20 | PF-NEW-07: extractReferral zone_name heap alloc via getName | `src/recursive.zig:586` | `rr.getName(self.allocator, response)` calls `name.toString(allocator)` which heap-allocates via ArrayList; could use `toStringBuf` + `dupe` (single alloc instead of ArrayList overhead) | ~200-400ns per referral (1 getName per referral) | -- | Replace `rr.getName` with `rr.name.toStringBuf(&buf, response)` + `allocator.dupe` to avoid ArrayList intermediate alloc | Core maintainer | Quarter | Open |
-| 26 | P2 | 20 | PF-NEW-09: Additional section glue getName heap allocs | `src/recursive.zig:614` | Each glue record A in additional section calls `add_rr.getName(self.allocator, response)` which heap-allocates via ArrayList; typical referral has 4-13 additional A records | ~200-400ns per glue record; 4-13 allocs per referral | -- | Replace `add_rr.getName` with `add_rr.name.toStringBuf(&buf, response)` + `allocator.dupe`; same pattern as PF-NEW-07 | Core maintainer | Quarter | Open |
+| 25 | P2 | 20 | PF-NEW-07: extractReferral zone_name heap alloc via getName | `src/recursive.zig:586` | Zone name now uses `toStringBuf` with 256-byte stack buffer for comparisons; only duped once at end for Referral | Zero heap allocs during iteration; single dupe at end | -- | `rr.name.toStringBuf(&zone_buf, response)` + final `allocator.dupe` | Core maintainer | Quarter | **Resolved** |
+| 26 | P2 | 20 | PF-NEW-09: Additional section glue getName heap allocs | `src/recursive.zig:614` | Glue names use `toStringBuf` with stack buffer; NS matching done inline against servers array; GlueRecord intermediate eliminated | Zero heap allocs for glue names | -- | `add_rr.name.toStringBuf(&glue_buf, response)` + inline NS matching | Core maintainer | Quarter | **Resolved** |
 | 27 | P2 | 20 | PF-30: client.zig resolve() getName per answer for CNAME check | `src/client.zig:213-217` | Uses toStringBuf with 256-byte stack buffer; zero heap allocation per answer | ~200-400ns saved per answer record | [#168](https://gitlab.com/devnw/zig/dns/-/issues/168) | Use Name.toStringBuf (depends on PF-24) | Core maintainer | Quarter | **Resolved** |
-| 28 | P3 | 16 | PF-NEW-08: buildCnameChain heap getName/toString per CNAME record in extractReferral NS name iteration | `src/recursive.zig:590` | Each NS record calls `ns_name.toString(self.allocator, response)` which heap-allocates via ArrayList; typical delegation has 2-6 NS records | ~200-400ns per NS record; 2-6 allocs per referral | -- | Use `toStringBuf` + `dupe` pattern (same as PF-NEW-07/PF-NEW-09) | Core maintainer | Backlog | Open |
+| 28 | P3 | 16 | PF-NEW-08: buildCnameChain heap getName/toString per CNAME record | `src/client.zig:404-428` | `buildCnameChain` now uses `toStringBuf` with `[256]u8` stack buffers for owner and target names, then `allocator.dupe` for the mapping arrays | Zero intermediate ArrayList alloc per CNAME record | Commit 6d42d51 | `toStringBuf` + `dupe` pattern in buildCnameChain | Core maintainer | Backlog | **Resolved** |
 | 29 | P3 | 16 | PF-15: Double allocation in DnsCache.makeKey | `src/resolver/dns_cache.zig:330-343` | Stack buffer `lower_buf: [max_name_length]u8` replaces heap allocation | Zero extra allocations | [#120](https://gitlab.com/devnw/zig/dns/-/issues/120) | Uses stack buffer for lowercase (max 255 bytes) | Core maintainer | Backlog | Resolved |
 | 30 | P3 | 16 | PF-16: New PRNG per getSecureRandomId call | `src/resolver/stub.zig` (deleted -- see QM-08) | getrandom() syscall + PRNG init per call | ~2us vs ~10ns | [#122](https://gitlab.com/devnw/zig/dns/-/issues/122) | Persistent PRNG on resolver struct; canonical stub is `src/stub.zig` | Core maintainer | Backlog | Deferred |
-| 31 | P3 | 12 | PF-NEW-13: MessageBuilder.addQuestion intermediate heap alloc for encoded question | `src/message.zig:247-252`, `src/question.zig:102-112` | `addQuestion` calls `question.buildQuery(allocator)` which calls `Name.encode(allocator)` (heap alloc), builds result (heap alloc), then defers free of both; the encoded bytes are immediately appended to builder buffer and freed | ~200-400ns for encode+alloc+copy+free per query build | -- | Use `Name.encodeBuf` with stack buffer in `question.buildQuery`; write type/class directly to builder buffer instead of intermediate alloc | Core maintainer | Backlog | Open |
+| 31 | P3 | 12 | PF-NEW-13: MessageBuilder.addQuestion intermediate heap alloc for encoded question | `src/message.zig:247-253` | `addQuestion` uses `Name.encodeBuf` with stack buffer + direct `writeInt` for type/class; zero intermediate heap allocation | Zero heap allocs in addQuestion | -- | `Name.encodeBuf` into `[max_name_length+4]u8` stack buffer; append slice to builder | Core maintainer | Backlog | **Resolved** |
 | 32 | P3 | 12 | PF-17: Global thread pool uses page_allocator | `src/parallel.zig:77` | GPA backed by page_allocator wraps pool allocator; small allocs sub-allocated from pages | Fewer mmap syscalls | [#124](https://gitlab.com/devnw/zig/dns/-/issues/124) | Wrap with GPA | Core maintainer | Backlog | Resolved |
 | 33 | P3 | 12 | PF-18: No benchmarks or perf regression CI | N/A | No bench/ directory, no benchmark CI stage | Cannot detect regressions | [#125](https://gitlab.com/devnw/zig/dns/-/issues/125) | Add bench/ suite + CI stage | Core maintainer | Backlog | Deferred |
-| 34 | P3 | 8 | PF-NEW-12: queryWithRetry duplicates domain name twice when 0x20 disabled | `src/recursive.zig:476-484` | When `case_randomization` is false, line 477 does `allocator.dupe(u8, domain)` into `query_name`, then line 484 does `allocator.dupe(u8, query_name)` into `state.last_query_name`; second dupe is redundant since `query_name` is already a copy | ~50-100ns (one unnecessary alloc+memcpy for domain-length bytes) | -- | When 0x20 disabled, assign `query_name` directly to `state.last_query_name` (skip second dupe); or use a shared buffer | Core maintainer | Backlog | Open |
+| 34 | P3 | 8 | PF-NEW-12: queryWithRetry duplicates domain name twice when 0x20 disabled | `src/recursive.zig:476-484` | `last_query_name` dupe skipped entirely when `case_randomization` is false; only set when 0x20 is enabled (the only branch that reads it) | Zero redundant alloc when 0x20 disabled | -- | Wrapped `last_query_name` assignment in `if (self.config.case_randomization)` guard | Core maintainer | Backlog | **Resolved** |
 | 35 | P3 | 8 | PF-20: allocPrint for IPv4 in resolveNsAddress | `src/recursive.zig:674-681` | bufPrint with [15]u8 stack buffer; zero heap allocation | ~100-200ns saved | [#142](https://gitlab.com/devnw/zig/dns/-/issues/142) | bufPrint with [15]u8 stack buffer | Core maintainer | Backlog | **Resolved** |
 | 36 | P3 | 8 | PF-28: ArrayList byte-by-byte append without capacity pre-alloc | `src/name.zig:568`, `src/resolver/convenience.zig:301` | extractQname and reverseIPv6Name start with capacity 0 | ~100-300ns extra per call | [#164](https://gitlab.com/devnw/zig/dns/-/issues/164) | Added ensureTotalCapacity(253) in extractQname, ensureTotalCapacity(72) in reverseIPv6Name. **Superseded by PF-NEW-01**: extractQname now uses extractQnameBuf (stack buffer, zero allocation). | Core maintainer | Backlog | Resolved |
 | 37 | P3 | 4 | PF-23: getMinimizedQname iterates labels twice | `src/recursive.zig:397-436` | Single-pass: labels collected once, depth checked against count | ~50-100ns saved | [#153](https://gitlab.com/devnw/zig/dns/-/issues/153) | Single-pass label collection | Core maintainer | Backlog | Resolved |
@@ -141,18 +139,18 @@ Remaining items by priority:
 | PF-09 | P2 | 36 | responseMatchesQuery alloc | [#105](https://gitlab.com/devnw/zig/dns/-/issues/105) | **Resolved** |
 | PF-19 | P2 | 36 | Double Message.parse | [#140](https://gitlab.com/devnw/zig/dns/-/issues/140) | **Resolved** |
 | PF-11 | P2 | 36 | last_query_name leak | [#110](https://gitlab.com/devnw/zig/dns/-/issues/110) | **Resolved** |
-| PF-NEW-10 | P2 | 24 | Cache hit path allocPrint (IPv4/IPv6) | -- | Open |
+| PF-NEW-10 | P2 | 24 | Cache hit path allocPrint (IPv4/IPv6) | Commit 6d42d51 | **Resolved** |
 | PF-10 | P2 | 24 | allocPrint IP formatting (13 sites) | [#108](https://gitlab.com/devnw/zig/dns/-/issues/108) | Deferred |
 | PF-06 | P2 | 24 | 65KB stack buffers | [#99](https://gitlab.com/devnw/zig/dns/-/issues/99) | **Resolved** |
 | PF-29 | P2 | 24 | cacheResponse getName per record | [#167](https://gitlab.com/devnw/zig/dns/-/issues/167) | **Resolved** |
-| PF-NEW-07 | P2 | 20 | extractReferral zone_name heap alloc via getName | -- | Open |
-| PF-NEW-09 | P2 | 20 | Additional section glue getName heap allocs (4-13/referral) | -- | Open |
+| PF-NEW-07 | P2 | 20 | extractReferral zone_name heap alloc via getName | -- | **Resolved** |
+| PF-NEW-09 | P2 | 20 | Additional section glue getName heap allocs (4-13/referral) | -- | **Resolved** |
 | PF-30 | P2 | 20 | client getName per answer | [#168](https://gitlab.com/devnw/zig/dns/-/issues/168) | **Resolved** |
-| PF-NEW-08 | P3 | 16 | NS name toString heap alloc per NS record in extractReferral | -- | Open |
-| PF-NEW-13 | P3 | 12 | MessageBuilder.addQuestion intermediate heap alloc | -- | Open |
+| PF-NEW-08 | P3 | 16 | buildCnameChain heap getName/toString per CNAME record | Commit 6d42d51 | **Resolved** |
+| PF-NEW-13 | P3 | 12 | MessageBuilder.addQuestion intermediate heap alloc | -- | **Resolved** |
 | PF-16 | P3 | 16 | PRNG per call | [#122](https://gitlab.com/devnw/zig/dns/-/issues/122) | Deferred |
 | PF-20 | P3 | 8 | allocPrint IPv4 in resolveNsAddress | [#142](https://gitlab.com/devnw/zig/dns/-/issues/142) | **Resolved** |
-| PF-NEW-12 | P3 | 8 | queryWithRetry domain dupe when 0x20 disabled | -- | Open |
+| PF-NEW-12 | P3 | 8 | queryWithRetry domain dupe when 0x20 disabled | -- | **Resolved** |
 | PF-28 | P3 | 8 | ArrayList byte-by-byte append | [#164](https://gitlab.com/devnw/zig/dns/-/issues/164) | **Resolved** |
 | PF-23 | P3 | 4 | getMinimizedQname double iter | [#153](https://gitlab.com/devnw/zig/dns/-/issues/153) | **Resolved** |
 | PF-27 | P3 | 4 | No inline hints | [#162](https://gitlab.com/devnw/zig/dns/-/issues/162) | **Resolved** |
@@ -218,171 +216,67 @@ zig build test -- --filter "queryWithRetry"
 
 ---
 
-### PF-NEW-10: Cache hit path uses allocPrint while non-cache path uses stack buffers (PerfScore 24, P2)
+### PF-NEW-10: Cache hit path uses allocPrint while non-cache path uses stack buffers (PerfScore 24, P2) -- RESOLVED
 
-**Summary:** The `resolve()` cache hit branch in `client.zig` uses `allocPrint` for IPv4/IPv6 formatting, while the non-cache answer path already uses the stack-buffer `formatABuf`/`formatAAAABuf` variants added in PF-NEW-05.
+**Status:** Resolved (commit 6d42d51). Cache hit path in `client.zig resolve()` now uses `bufPrint` with `[15]u8` (IPv4) / `[39]u8` (IPv6) stack buffers + `allocator.dupe`, matching the non-cache path pattern from PF-NEW-05.
 
-**Perf Impact:** ~100-200ns per cached entry due to unnecessary heap allocation. Cache hits should be the fastest path but currently have allocation overhead that the non-cache path avoids.
-
-**Evidence:**
-- `src/client.zig:152-155`: IPv4 cache hit uses `std.fmt.allocPrint(self.allocator, "{d}.{d}.{d}.{d}", ...)`.
-- `src/client.zig:157-164`: IPv6 cache hit uses `std.fmt.allocPrint(self.allocator, "{x:0>2}{x:0>2}:...", ...)`.
-- Non-cache path (lines 234, 239) already uses `formatABuf`/`formatAAAABuf` with stack buffers (PF-NEW-05).
-
-**Root Cause:** The PF-NEW-05 fix converted the non-cache answer path to stack buffers but did not update the cache hit path, which was added separately.
-
-**Fix Guidance:** Replace `allocPrint` on lines 153 and 158 with `formatABuf`/`formatAAAABuf` into a stack buffer, then `allocator.dupe` the result. Matches the existing non-cache path pattern exactly.
-
-**Validation Plan:**
-```
-zig build test -- --filter "resolve"
-# Verify no regression in cache hit behavior
-# Before: 2 allocPrint calls per cache hit (IPv4 or IPv6)
-# After:  0 allocPrint; stack buffer + single dupe per entry
-```
-
-**Rollout Risk:** Low. Pure allocation-strategy change; output strings are identical.
-
-**Confidence:** `confidence::confirmed` -- the allocPrint calls are visible at lines 153 and 158.
+**Evidence:** `src/client.zig:152-169` -- `a_buf` / `aaaa_buf` stack buffers + `bufPrint` + `dupe`
 
 ---
 
-### PF-NEW-07: extractReferral zone_name heap alloc via getName (PerfScore 20, P2)
+### PF-NEW-07: extractReferral zone_name heap alloc via getName (PerfScore 20, P2) -- RESOLVED
 
-**Summary:** `extractReferral` allocates `zone_name` via `rr.getName(self.allocator, response)` which internally calls `name.toString(allocator)` using an ArrayList. Could use `toStringBuf` + `dupe` instead.
+**Status: Resolved.**
 
-**Perf Impact:** ~200-400ns per referral. One `getName` call per referral to extract the zone name from the first NS authority record.
+**Summary:** `extractReferral` allocated `zone_name` via `rr.getName(self.allocator, response)` which internally called `name.toString(allocator)` using an ArrayList.
 
-**Evidence:**
-- `src/recursive.zig:586`: `zone_name = try rr.getName(self.allocator, response);`
-- `src/record.zig:119-121`: `getName` delegates to `name.toString(allocator, full_message)` which uses ArrayList (heap alloc + potential re-allocs).
-- The `toStringBuf` variant (added in PF-24) avoids the ArrayList entirely.
+**Fix Applied:** Zone name now uses `rr.name.toStringBuf(&zone_buf, response)` with a 256-byte stack buffer during iteration. The stack-buffered string is used for `isSubdomainOf` comparisons. Only at the end, when constructing the final `Referral`, is the zone name duped to the heap. This eliminates the ArrayList intermediate allocation entirely.
 
-**Root Cause:** `getName` predates the `toStringBuf` API. It was not updated when the stack-buffer variant was added.
-
-**Fix Guidance:** Replace `rr.getName(self.allocator, response)` with `rr.name.toStringBuf(&buf, response)` using a `[256]u8` stack buffer, then `self.allocator.dupe(u8, result)` since `zone_name` is owned and freed later by `Referral.deinit`.
-
-**Validation Plan:**
-```
-zig build test -- --filter "extractReferral"
-# Before: 1 ArrayList alloc per referral for zone_name
-# After:  stack buffer + single dupe; zero ArrayList overhead
-```
-
-**Rollout Risk:** Low. Same string output; only the allocation path changes.
-
-**Confidence:** `confidence::confirmed` -- `getName` calls `toString(allocator)` which heap-allocates.
+**Validation:** `zig build test --summary all` -- all 44 test runs pass.
 
 ---
 
-### PF-NEW-09: Additional section glue getName heap allocs (PerfScore 20, P2)
+### PF-NEW-09: Additional section glue getName heap allocs (PerfScore 20, P2) -- RESOLVED
 
-**Summary:** Each A record in the additional section triggers a `getName` heap allocation when collecting glue records in `extractReferral`. Typical referrals have 4-13 glue records.
+**Status: Resolved.**
 
-**Perf Impact:** ~200-400ns per glue record. With 4-13 additional A records per referral, this adds ~0.8-5.2us of allocation overhead per referral step.
+**Summary:** Each A record in the additional section triggered a `getName` heap allocation when collecting glue records in `extractReferral`. Typical referrals have 4-13 glue records.
 
-**Evidence:**
-- `src/recursive.zig:614`: `const add_name = try add_rr.getName(self.allocator, response);`
-- `src/record.zig:119-121`: `getName` delegates to `toString(allocator)` which allocates via ArrayList.
-- A typical `.com` delegation returns 13 root server glue records; a `.example.com` delegation typically returns 4 glue A records.
+**Fix Applied:** Glue record names now use `add_rr.name.toStringBuf(&glue_buf, response)` with a 256-byte stack buffer. The servers array is built before the glue loop, and NS name matching is done inline against the servers array during the additional section pass. This eliminates the `GlueRecord` intermediate storage entirely -- no heap allocation for glue names at all. The bailiwick check and NS name matching both operate on the stack-buffered string.
 
-**Root Cause:** Same as PF-NEW-07 -- `getName` predates `toStringBuf` and was not updated.
-
-**Fix Guidance:** Replace `add_rr.getName(self.allocator, response)` with `add_rr.name.toStringBuf(&buf, response)` + `self.allocator.dupe(u8, result)`. The `add_name` string is stored in `GlueRecord.name` and freed in the defer block, so it must be heap-owned.
-
-**Validation Plan:**
-```
-zig build test -- --filter "extractReferral"
-# Before: 4-13 ArrayList allocs per referral for glue names
-# After:  stack buffer + single dupe per glue record
-```
-
-**Rollout Risk:** Low. Identical output strings; only allocation mechanism changes.
-
-**Confidence:** `confidence::confirmed` -- same pattern as PF-NEW-07.
+**Validation:** `zig build test --summary all` -- all 44 test runs pass.
 
 ---
 
-### PF-NEW-08: buildCnameChain heap getName/toString per CNAME record (PerfScore 16, P3)
+### PF-NEW-08: buildCnameChain heap getName/toString per CNAME record (PerfScore 16, P3) -- RESOLVED
 
-**Summary:** Each NS record in `extractReferral` calls `ns_name.toString(self.allocator, response)` which heap-allocates via ArrayList. Typical delegations have 2-6 NS records.
+**Status:** Resolved (commit 6d42d51). `buildCnameChain` in `client.zig` now uses `toStringBuf` with `[256]u8` stack buffers for both owner and target names, then `allocator.dupe` for the mapping arrays. This eliminates the ArrayList intermediate allocation per CNAME record.
 
-**Perf Impact:** ~200-400ns per NS record. With 2-6 NS records per referral, this adds ~0.4-2.4us per referral step.
-
-**Evidence:**
-- `src/recursive.zig:590`: `const ns_str = try ns_name.toString(self.allocator, response);`
-- The string is stored in `ns_names` ArrayList and later transferred to `Referral.servers[i].name`.
-
-**Root Cause:** Same pattern -- `toString` predates `toStringBuf` and was not updated here.
-
-**Fix Guidance:** Use `toStringBuf(&buf, response)` + `self.allocator.dupe(u8, result)` to avoid the ArrayList intermediate allocation.
-
-**Validation Plan:**
-```
-zig build test -- --filter "extractReferral"
-# Before: 2-6 ArrayList allocs per referral for NS names
-# After:  stack buffer + single dupe per NS name
-```
-
-**Rollout Risk:** Low. Same output; allocation path change only.
-
-**Confidence:** `confidence::confirmed` -- `toString(allocator)` heap-allocates via ArrayList.
+**Evidence:** `src/client.zig:407-428` -- `owner_stack_buf` and `target_stack_buf` stack buffers + `toStringBuf` + `dupe`
 
 ---
 
-### PF-NEW-13: MessageBuilder.addQuestion intermediate heap alloc for encoded question (PerfScore 12, P3)
+### PF-NEW-13: MessageBuilder.addQuestion intermediate heap alloc for encoded question (PerfScore 12, P3) -- RESOLVED
 
-**Summary:** `MessageBuilder.addQuestion` calls `question.buildQuery(allocator)` which heap-allocates an intermediate buffer for the encoded question, copies it into the builder's buffer, then frees it. The `Name.encodeBuf` stack-buffer API exists but is not used here.
+**Status: Resolved.**
 
-**Perf Impact:** ~200-400ns per query build. Two heap allocations (Name.encode + result buffer) that are immediately freed after copying.
+**Summary:** `MessageBuilder.addQuestion` called `question.buildQuery(allocator)` which heap-allocated an intermediate buffer for the encoded question, copied it into the builder's buffer, then freed it.
 
-**Evidence:**
-- `src/message.zig:247-252`: `addQuestion` calls `question_mod.buildQuery(self.allocator, ...)`, defers free, then appends to builder buffer.
-- `src/question.zig:102-112`: `buildQuery` calls `Name.encode(allocator, domain)` (heap alloc), allocates result buffer, copies, defers free of encoded name.
-- `src/name.zig:172`: `Name.encodeBuf` exists and writes into a caller-provided buffer.
+**Fix Applied:** `addQuestion` now uses `Name.encodeBuf` to encode the domain name directly into a `[max_name_length + 4]u8` stack buffer, writes the qtype/qclass bytes via `std.mem.writeInt`, and appends the resulting slice to the builder buffer. Zero intermediate heap allocations. The `question_mod.buildQuery` function is no longer called from `addQuestion`.
 
-**Root Cause:** `buildQuery` was written before `encodeBuf` existed. The encode-alloc-copy-free cycle is unnecessary now that stack-buffer encoding is available.
-
-**Fix Guidance:** Add a `buildQueryBuf` variant in `question.zig` that uses `Name.encodeBuf` into a stack buffer and writes type/class bytes directly. Or refactor `addQuestion` to encode the name directly into the builder's buffer via `encodeBuf` + manual type/class write, eliminating the intermediate allocation entirely.
-
-**Validation Plan:**
-```
-zig build test -- --filter "buildQuery"
-# Before: 2 heap allocs per question (Name.encode + result)
-# After:  0 heap allocs; stack buffer + direct append to builder
-```
-
-**Rollout Risk:** Low. Wire-format output is identical; only the allocation path changes.
-
-**Confidence:** `confidence::confirmed` -- `Name.encode(allocator)` visibly heap-allocates; `encodeBuf` alternative exists.
+**Validation:** `zig build test --summary all` -- all 44 test runs pass.
 
 ---
 
-### PF-NEW-12: queryWithRetry duplicates domain name twice when 0x20 disabled (PerfScore 8, P3)
+### PF-NEW-12: queryWithRetry duplicates domain name twice when 0x20 disabled (PerfScore 8, P3) -- RESOLVED
 
-**Summary:** When `case_randomization` is disabled, `queryWithRetry` duplicates the domain string twice: once into `query_name` (line 477) and again into `state.last_query_name` (line 484). The second dupe is redundant.
+**Status: Resolved.**
 
-**Perf Impact:** ~50-100ns per query (one unnecessary `alloc` + `memcpy` for a domain-length buffer).
+**Summary:** When `case_randomization` was disabled, `queryWithRetry` duplicated the domain string twice: once into `query_name` and again into `state.last_query_name`. The second dupe was redundant since `last_query_name` is only checked under the `case_randomization` branch.
 
-**Evidence:**
-- `src/recursive.zig:476-477`: `try self.allocator.dupe(u8, domain)` assigned to `query_name`.
-- `src/recursive.zig:484`: `try self.allocator.dupe(u8, query_name)` assigned to `state.last_query_name`.
-- When 0x20 is disabled, `query_name` is already a freshly-allocated copy of `domain`. The second dupe creates a third copy.
+**Fix Applied:** Wrapped the `last_query_name` assignment in `if (self.config.case_randomization)`. When 0x20 is disabled, `last_query_name` is never set (remains null), skipping the unnecessary dupe entirely. This is safe because the only code that reads `last_query_name` is inside the 0x20 verification block which is also guarded by `case_randomization`.
 
-**Root Cause:** The dupe at line 484 is needed when 0x20 is enabled (because `query_name` is freed at line 478 via defer and `state.last_query_name` must outlive the function). But when 0x20 is disabled, ownership of the first dupe could be transferred directly to `state.last_query_name` instead of creating a second copy.
-
-**Fix Guidance:** When `case_randomization` is false, transfer ownership of `query_name` to `state.last_query_name` directly and skip the defer-free. Alternatively, restructure so `query_name` is conditionally owned by state vs locally freed.
-
-**Validation Plan:**
-```
-zig build test -- --filter "queryWithRetry"
-# Before: 2 alloc+memcpy when 0x20 disabled
-# After:  1 alloc+memcpy; ownership transfer eliminates second dupe
-```
-
-**Rollout Risk:** Low. Careful ownership management needed to avoid double-free, but the logic is straightforward (conditional defer).
-
-**Confidence:** `confidence::confirmed` -- both `dupe` calls are visible in source; when 0x20 is off, `query_name` is already a fresh copy.
+**Validation:** `zig build test --summary all` -- all 44 test runs pass.
 
 ---
 
@@ -421,16 +315,16 @@ zig build test -- --filter "queryWithRetry"
 | PF-NEW-03 | HIGH | CNAME double-alloc -- toStringBuf+dupe replaces toString+dupe | **Resolved** |
 | PF-NEW-04 | MEDIUM | getMinimizedQname stack buffer replaces ArrayList(u8) | **Resolved** |
 
-### Quick Wins (< 1 day)
+### Quick Wins (< 1 day) -- All Resolved
 
-| ID | PerfScore | Fix | Effort |
+| ID | PerfScore | Fix | Status |
 |---|---|---|---|
-| PF-NEW-10 | 24 | Replace allocPrint with formatABuf/formatAAAABuf + dupe on cache hit path (client.zig:152-164) | ~1 hour |
-| PF-NEW-07 | 20 | Replace getName with toStringBuf + dupe for zone_name in extractReferral | ~30 min |
-| PF-NEW-09 | 20 | Replace getName with toStringBuf + dupe for glue names in extractReferral additional section | ~30 min |
-| PF-NEW-08 | 16 | Replace toString with toStringBuf + dupe for NS names in extractReferral | ~30 min |
-| PF-NEW-13 | 12 | Use encodeBuf in question.buildQuery / addQuestion to eliminate intermediate alloc | ~2 hours |
-| PF-NEW-12 | 8 | Transfer query_name ownership to state.last_query_name when 0x20 disabled | ~30 min |
+| ~~PF-NEW-10~~ | ~~24~~ | ~~Replace allocPrint with bufPrint + dupe on cache hit path (client.zig:152-164)~~ | **Resolved** (commit 6d42d51) |
+| ~~PF-NEW-08~~ | ~~16~~ | ~~Replace toString with toStringBuf + dupe for CNAME names in buildCnameChain~~ | **Resolved** (commit 6d42d51) |
+| ~~PF-NEW-07~~ | ~~20~~ | ~~Replace getName with toStringBuf + dupe for zone_name in extractReferral~~ | **Resolved** |
+| ~~PF-NEW-09~~ | ~~20~~ | ~~Replace getName with toStringBuf + dupe for glue names in extractReferral additional section~~ | **Resolved** |
+| ~~PF-NEW-13~~ | ~~12~~ | ~~Use encodeBuf in question.buildQuery / addQuestion to eliminate intermediate alloc~~ | **Resolved** |
+| ~~PF-NEW-12~~ | ~~8~~ | ~~Transfer query_name ownership to state.last_query_name when 0x20 disabled~~ | **Resolved** (commit 6d42d51) |
 
 ### Medium (1-5 days)
 

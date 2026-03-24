@@ -7,23 +7,23 @@ Last updated: 2026-03-24
 | Severity | Open | Resolved/Closed | Total |
 |----------|------|-----------------|-------|
 | Critical | 0 | 4 | 4 |
-| High | 4 | 9 | 13 |
+| High | 3 | 10 | 13 |
 | Medium | 5 | 10 | 15 |
-| Low | 3 | 8 | 11 |
-| **Total** | **12** | **31** | **43** |
+| Low | 2 | 9 | 11 |
+| **Total** | **10** | **33** | **43** |
 
 ### Top 10 Active Risks
 
 1. **QC-NEW-03** (PriorityScore 64) -- sendQuery() triple duplication across stub.zig, recursive.zig, udp.zig (~150 lines copied verbatim).
 2. **QH-05** (PriorityScore 64) -- Zero fuzz testing for security-critical DNS wire parsers. Deferred from Phase 2.
-3. **QH-NEW-01** (PriorityScore 48) -- convenience.zig lookup functions (lookupA, lookupAAAA, lookup) are empty stubs returning empty results.
-4. **QH-NEW-02** (PriorityScore 48) -- resolveIterative has zero direct test coverage (219 lines, most complex function in the resolver).
-5. **QM-NEW-02** (PriorityScore 36) -- ResolveResult defined twice with incompatible shapes (client.zig vs recursive.zig).
-6. **QM-NEW-03** (PriorityScore 36) -- Cache only formats A/AAAA on cache hit; silently returns empty for MX, SRV, TXT, etc.
-7. **QM-03** (PriorityScore 36) -- resolveIterative is 219 lines with 9 levels of nesting (grew from 208 lines).
-8. **QM-NEW-05** (PriorityScore 24) -- resolveNsAddress swallows all errors as null (OOM becomes silent skip).
-9. **QM-NEW-01** (PriorityScore 24) -- Duplicate QueryType enum in convenience.zig mirrors types.Type.
-10. **QL-03** (PriorityScore 16) -- 12 source files exceed 800-line threshold (was 9; added connection_pool.zig, parallel.zig, enhanced_metrics.zig).
+3. **QH-NEW-02** (PriorityScore 48) -- resolveIterative has zero direct test coverage (219 lines, most complex function in the resolver).
+4. **QM-NEW-02** (PriorityScore 36) -- ResolveResult defined twice with incompatible shapes (client.zig vs recursive.zig).
+5. **QM-NEW-03** (PriorityScore 36) -- Cache only formats A/AAAA on cache hit; silently returns empty for MX, SRV, TXT, etc.
+6. **QM-03** (PriorityScore 36) -- resolveIterative is 219 lines with 9 levels of nesting (grew from 208 lines). Deferred.
+7. **QM-NEW-05** (PriorityScore 24) -- resolveNsAddress swallows all errors as null (OOM becomes silent skip).
+8. **QM-NEW-01** (PriorityScore 24) -- Duplicate QueryType enum in convenience.zig mirrors types.Type.
+9. **QL-03** (PriorityScore 16) -- 12 source files exceed 800-line threshold (was 9). Deferred.
+10. **QL-09** (PriorityScore 16) -- 41 functions exceed 50-line threshold (was 30).
 
 ## Stack-Ranked Findings
 
@@ -43,7 +43,7 @@ Last updated: 2026-03-24
 | 12 | QH-06 | High | 48 | maintainability | Missing `error.InProgress` in stub.zig connectWithTimeout | stub.zig | `stub.zig:294-297` -- handles `error.WouldBlock` and `error.ConnectionPending` | [#160](https://gitlab.com/devnw/zig/dns/-/issues/160) | Added `error.ConnectionPending` to switch (Zig maps EALREADY to ConnectionPending) | Resolver maintainer | S | **Resolved** |
 | 13 | QM-07 | **Resolved** | 48 | maintainability | ~~3x duplicate I/O helpers: connectWithTimeout, writeAllWithTimeout, readWithTimeout, readExactWithTimeout~~ | stub.zig, tcp.zig, connection_pool.zig | Extracted shared `src/transports/io.zig`; all 3 files now import and use canonical implementations; also fixed incorrect `error.InProgress`/`error.IsConnected` catch arms (not valid in Zig 0.15.2 ConnectError) | [#170](https://gitlab.com/devnw/zig/dns/-/issues/170) | Resolved: shared io.zig module with 4 tests | Transport maintainer | M | **Resolved** |
 | 14 | QM-11 | Medium | 48 | perf | PooledTcpTransport.query calls connect on every query despite connection pooling | connection_pool.zig | `connection_pool.zig:537` -- `connectWithTimeout()` called unconditionally; `IsConnected` handled but wastes syscall | [#180](https://gitlab.com/devnw/zig/dns/-/issues/180) | Track connected state in PooledConnection or connect in acquire() | Transport maintainer | S | **Resolved** |
-| 15 | QH-NEW-01 | High | 48 | api-contract | convenience.zig lookup functions (lookupA, lookupAAAA, lookup) are empty stubs returning empty results; `_ = hostname` discards input | convenience.zig | `src/resolver/convenience.zig:194-254` -- lookupA/lookupAAAA increment stats then return empty LookupResult with `_ = hostname`; lookup delegates to empty stubs | -- | Wire lookupA/lookupAAAA to StubResolver or RecursiveResolver; parse A/AAAA records from response into LookupResult.addresses | Convenience module maintainer | M | Open |
+| 15 | QH-NEW-01 | High | 48 | api-contract | convenience.zig lookup functions (lookupA, lookupAAAA, lookup) were empty stubs returning empty results | convenience.zig | `src/resolver/convenience.zig:194-226` -- lookupA/lookupAAAA/lookup now return `error.NotImplemented` instead of silently empty results; test `SimpleResolver lookup stubs return NotImplemented` added | Commit 6d42d51 | Returns `error.NotImplemented` so callers get explicit signal instead of silent empty results | Convenience module maintainer | S | **Resolved** |
 | 16 | QH-NEW-02 | High | 48 | tests | resolveIterative has zero direct test coverage; 219 lines, deepest nesting, most complex control flow in recursive resolver | recursive.zig | `src/recursive.zig:188-406` (219 lines) -- no test matches pattern `test.*resolveIterative` | -- | Add integration tests: CNAME following, referral handling, QNAME minimization, max-depth, NXDOMAIN | Resolver maintainer | L | Open |
 | 17 | QH-03 | High | 48 | api-contract | `IPv4.format()` returns `[15]u8` with undefined trailing bytes | convenience.zig | `src/resolver/convenience.zig:34-43` | [#92](https://gitlab.com/devnw/zig/dns/-/issues/92) | Return struct with buf+len, or zero-fill buffer | Convenience module maintainer | S | Closed |
 | 18 | QM-01 | **Resolved** | 36 | maintainability | ~~`parseName()` copy-pasted ~52 identical lines in tsig.zig and sig0.zig~~ | tsig.zig, sig0.zig | Extracted shared `src/security/dns_name.zig` | [#102](https://gitlab.com/devnw/zig/dns/-/issues/102) | Resolved by extracting shared dns_name module | Security module maintainer | S | Resolved |
@@ -65,7 +65,7 @@ Last updated: 2026-03-24
 | 34 | QL-03 | Low | 16 | readability | 12 source files exceed 800-line threshold (was 9). New: `connection_pool.zig` (1070), `parallel.zig` (881), `enhanced_metrics.zig` (879). Largest: `record.zig` (1927) | Multiple files | `record.zig:1927`, `recursive.zig:1426`, `name.zig:1345`, `connection_pool.zig:1070`, `edns.zig:973`, `tsig.zig:916`, `zone_transfer.zig:894`, `dnssec.zig:889`, `parallel.zig:881`, `enhanced_metrics.zig:879`, `zone_file.zig:863`, `sig0.zig:814` | [#126](https://gitlab.com/devnw/zig/dns/-/issues/126) | Split large files by responsibility domain | Project maintainer | L | Deferred |
 | 35 | QL-09 | Low | 16 | readability | 41 functions exceed 50-line threshold (was 30); resolveIterative at 219 lines | Multiple files | `recursive.zig:188+` (219 lines), record.zig, edns.zig, zone_transfer.zig parsers | [#185](https://gitlab.com/devnw/zig/dns/-/issues/185) | Decompose long functions; add lint gate | Project maintainer | L | Open |
 | 36 | QL-NEW-01 | **Resolved** | 8 | cleanup | Duplicated testSocketPair helper identical to io.zig:118-126 | connection_pool.zig | `connection_pool.zig:665-673` -- copy-paste of `io.zig:118-126` | -- | Make io.zig testSocketPair public; replace duplicate with const alias | Any contributor | S | **Resolved** |
-| 37 | QM-NEW-04 | Low | 16 | docs | lib.zig and CHANGELOG.md claim "Zero external dependencies" but build.zig.zon declares `spice` dependency (parallelism library) | lib.zig, CHANGELOG.md | `src/lib.zig:16` -- `//! - Zero external dependencies`; `build.zig.zon:28-30` -- `.spice = .{ .url = "https://gitlab.com/devnw/zig/spice/..." }` | -- | Update doc comment to "Minimal dependencies (spice for parallelism)" or similar | Documentation maintainer | S | Open |
+| 37 | QM-NEW-04 | Low | 16 | docs | lib.zig claimed "Zero external dependencies" but build.zig.zon declares `spice` dependency | lib.zig | `src/lib.zig:16` -- updated from `//! - Zero external dependencies` to `//! - Minimal dependencies (optional spice for parallelism)` | Commit 6d42d51 | Updated doc comment to accurately reflect spice dependency | Documentation maintainer | S | **Resolved** |
 | 38 | QL-04 | **Resolved** | 16 | docs | ~~No doc comment on rdata-offset invariant~~ | record.zig | Doc comments added | [#127](https://gitlab.com/devnw/zig/dns/-/issues/127) | Resolved | Any contributor | S | Resolved |
 | 39 | QL-05 | **Resolved** | 16 | tests | ~~Mutable statics in MockTlsBackend~~ | dot.zig | `write_buffer` and `write_len` moved from struct-level statics to per-instance fields | [#181](https://gitlab.com/devnw/zig/dns/-/issues/181) | Moved to per-instance state | Any contributor | S | Resolved |
 | 40 | QL-06 | **Resolved** | 12 | readability | ~~Magic number 6 for SOA record type in zone_transfer.zig~~ | zone_transfer.zig | All 5 instances of `rtype == 6` replaced with `soa_rtype` named constant | [#182](https://gitlab.com/devnw/zig/dns/-/issues/182) | Added `const soa_rtype: u16 = 6` and replaced all magic number usages | Any contributor | S | **Resolved** |
@@ -98,7 +98,7 @@ Last updated: 2026-03-24
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
 | QC-01 | Critical | 60 | SVCB hint parsers return dangling pointers | [#83](https://gitlab.com/devnw/zig/dns/-/issues/83) | **Closed** |
-| QH-NEW-01 | High | 48 | convenience.zig lookupA/lookupAAAA/lookup are empty stubs returning empty results | -- | Open |
+| QH-NEW-01 | High | 48 | convenience.zig lookupA/lookupAAAA/lookup now return error.NotImplemented | Commit 6d42d51 | **Resolved** |
 | QH-03 | High | 48 | IPv4.format() undefined trailing bytes | [#92](https://gitlab.com/devnw/zig/dns/-/issues/92) | **Closed** |
 | QM-NEW-03 | Medium | 36 | Cache only formats A/AAAA on cache hit; other types silently empty | -- | Open |
 
@@ -144,7 +144,7 @@ Last updated: 2026-03-24
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
 | QM-06 | **Resolved** | 24 | ~~ARCHITECTURE.md missing 60% of modules~~ | [#119](https://gitlab.com/devnw/zig/dns/-/issues/119) | **Resolved** |
-| QM-NEW-04 | Low | 16 | lib.zig claims "Zero external dependencies" but spice exists | -- | Open |
+| QM-NEW-04 | Low | 16 | lib.zig updated: "Minimal dependencies (optional spice for parallelism)" | Commit 6d42d51 | **Resolved** |
 | QL-04 | **Resolved** | 16 | ~~No doc comment on rdata-offset invariant~~ | [#127](https://gitlab.com/devnw/zig/dns/-/issues/127) | **Resolved** |
 | QL-08 | **Resolved** | 12 | ~~ARCHITECTURE.md references deleted/dead files~~ | [#184](https://gitlab.com/devnw/zig/dns/-/issues/184) | **Resolved** |
 
@@ -166,12 +166,13 @@ Last updated: 2026-03-24
 |----|---------------|---------|--------|--------|
 | QM-NEW-01 | 24 | Remove duplicate QueryType; import types.Type | S | Open |
 | QM-NEW-05 | 24 | Propagate OOM from resolveNsAddress instead of swallowing | S | Open |
-| QM-NEW-04 | 16 | Fix "Zero external dependencies" claim in lib.zig / CHANGELOG.md | S | Open |
 
 ### Completed Quick Wins
 
 | ID | PriorityScore | Finding | Status |
 |----|---------------|---------|--------|
+| QH-NEW-01 | 48 | convenience.zig stubs return error.NotImplemented | **Resolved** (commit 6d42d51) |
+| QM-NEW-04 | 16 | lib.zig "Zero external dependencies" claim fixed | **Resolved** (commit 6d42d51) |
 | QC-02 | 60 | ConnectionPool.acquire mutex race | **Resolved** |
 | QC-04 | 60 | PipelinedBatch.execute infinite loop | **Resolved** |
 | QM-11 | 48 | Track connected state in PooledConnection | **Resolved** |
@@ -202,7 +203,6 @@ Last updated: 2026-03-24
 | ID | PriorityScore | Finding | Effort | Status |
 |----|---------------|---------|--------|--------|
 | QC-NEW-03 | 64 | Extract shared sendUdpQuery() from 3 files (~150 lines) | M | Open |
-| QH-NEW-01 | 48 | Wire convenience.zig lookupA/lookupAAAA to real resolver | M | Open |
 | QH-NEW-02 | 48 | Add integration tests for resolveIterative (219 lines, 0 coverage) | L | Open |
 | QM-NEW-02 | 36 | Unify or rename duplicate ResolveResult types | S | Open |
 | QM-NEW-03 | 36 | Add cache formatting for MX, SRV, TXT, NS, PTR record types | M | Open |
