@@ -597,4 +597,264 @@ The following 2 security items were closed by commit `8fef334` ("fix: close 4 ad
 
 ---
 
+## Resolved in Final Gap Closure Cycle (2026-03-24)
+
+28 items resolved across 5 parallel implementation agents. All tests pass (316/316).
+
+### GAP-0038: README "Zero Dependencies" claim is inaccurate [RESOLVED]
+- **Category:** Docs (Medium)
+- **Resolution:** README.md updated to "Minimal Dependencies" with runtime/test dependency distinction.
+- **Evidence:** `README.md` -- dependency claim matches `build.zig.zon`
+- **Resolved date:** 2026-03-24
+
+### GAP-0039: README RFC 4033/4034/4035 says "Complete" -- RSA missing [RESOLVED]
+- **Category:** Docs (Medium)
+- **Resolution:** README RFC table updated to "Partial (Ed25519/ECDSA complete, RSA pending)".
+- **Evidence:** `README.md` -- RFC 4033/4034/4035 status says "Partial"
+- **Resolved date:** 2026-03-24
+
+### GAP-0040: README RFC 7858 DoT listed "Complete" without asterisk [RESOLVED]
+- **Category:** Docs (Low)
+- **Resolution:** Added footnote to README RFC 7858 entry: "Interface only -- requires external TLS backend".
+- **Evidence:** `README.md` -- RFC 7858 entry annotated
+- **Resolved date:** 2026-03-24
+
+### GAP-0043 / QM-NEW-03: Cache hit only formats A/AAAA [RESOLVED]
+- **Category:** Bug (Medium) -- was a production blocker
+- **Resolution:** Added `formatCachedRdata` function in `client.zig` handling 9 record types: A, AAAA, MX, SRV, TXT, PTR, NS, SOA, CNAME. No record type silently returns empty on cache hit.
+- **Evidence:** `src/client.zig` -- `formatCachedRdata` function
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-01: TsigKey.secret not zeroed on destruction [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** Added `deinit()` method to `TsigKey` that calls `std.crypto.utils.secureZero` on the secret buffer before freeing.
+- **Evidence:** `src/security/tsig.zig` -- `TsigKey.deinit()` with `secureZero`
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-02: ARCOUNT u16 overflow in TSIG/SIG(0) append [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** Added overflow check before ARCOUNT increment in both `tsig.zig` and `sig0.zig`.
+- **Evidence:** `src/security/tsig.zig`, `src/security/sig0.zig` -- overflow guard
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-04: TCP/DoT/ConnectionPool @intCast(u16) on wire_req.len [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** Added bounds check before all `@intCast(u16)` casts on `wire_req.len`.
+- **Evidence:** `src/transports/tcp.zig`, `src/transports/dot.zig`, `src/transports/connection_pool.zig` -- bounds checks
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-05: dns_name.zig encodeName/encodeNameLower label length [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** Added `if (label.len > 63) return error.LabelTooLong;` in both functions.
+- **Evidence:** `src/security/dns_name.zig` -- label length validation
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-06: SIG(0) sign @intCast(u16) rdlength [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** Added bounds check before rdlength `@intCast(u16)` cast.
+- **Evidence:** `src/security/sig0.zig` -- bounds check
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-07: name.zig toString forward pointer rejection [RESOLVED]
+- **Category:** Security (Info)
+- **Resolution:** Added forward pointer rejection to `toString`, `toStringBuf`, `labelCount`, `parent`, and `eql` in `name.zig`.
+- **Evidence:** `src/name.zig` -- forward pointer checks in 5 functions
+- **Resolved date:** 2026-03-24
+
+### ADV-05: Large header counts cause CPU-bound parse loop [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** Added `max_section_count = 4096` in `message.zig`. Section counts validated before parse loops.
+- **Evidence:** `src/message.zig` -- `max_section_count` constant and bounds check
+- **Resolved date:** 2026-03-24
+
+### AC-02: client.lookupMX leaks exchange strings on error [RESOLVED]
+- **Category:** Quality / Architecture (Medium)
+- **Resolution:** Added errdefer that frees exchange strings before ArrayList deinit.
+- **Evidence:** `src/client.zig` -- errdefer frees `mx.exchange` strings
+- **Resolved date:** 2026-03-24
+
+### AC-03: Cache-hit errdefer leaks duped strings [RESOLVED]
+- **Category:** Quality / Architecture (Medium)
+- **Resolution:** Added errdefer that frees duped formatted strings before ArrayList deinit.
+- **Evidence:** `src/client.zig` -- errdefer frees duped strings
+- **Resolved date:** 2026-03-24
+
+### RE-05: rdataOffset pointer arithmetic bounds check [RESOLVED]
+- **Category:** Quality / Architecture (Medium)
+- **Resolution:** Added bounds check and error return on aliasing invariant violation.
+- **Evidence:** `src/record.zig` -- bounds validation in rdataOffset
+- **Resolved date:** 2026-03-24
+
+### QM-NEW-05: resolveNsAddress swallows OOM [RESOLVED]
+- **Category:** Quality / Architecture (Medium)
+- **Resolution:** OOM now propagated; other errors return null.
+- **Evidence:** `src/recursive.zig` -- `catch |err| switch` propagates OOM
+- **Resolved date:** 2026-03-24
+
+### QS-NEW-05: stub.zig OOM swallowing [RESOLVED]
+- **Category:** Quality / Architecture (Medium)
+- **Resolution:** OOM now propagated from bare catch in stub.zig sendQuery loop.
+- **Evidence:** `src/stub.zig` -- `catch |err| switch` propagates OOM
+- **Resolved date:** 2026-03-24
+
+### RM-08: getMinimizedQname unused current_zone parameter [RESOLVED]
+- **Category:** Quality / Cleanup (Low)
+- **Resolution:** Removed `current_zone` parameter from `getMinimizedQname`; updated all call sites.
+- **Evidence:** `src/recursive.zig` -- parameter removed
+- **Resolved date:** 2026-03-24
+
+### QS-NEW-02: question.buildQuery dead code [RESOLVED]
+- **Category:** Quality / Cleanup (Low)
+- **Resolution:** Deleted dead `question.buildQuery` function.
+- **Evidence:** `src/question.zig` -- function removed
+- **Resolved date:** 2026-03-24
+
+### QM-NEW-01: Duplicate QueryType enum [RESOLVED]
+- **Category:** Quality / Maintainability (Medium)
+- **Resolution:** Removed duplicate `QueryType` enum from `convenience.zig`; replaced with `types.Type`.
+- **Evidence:** `src/resolver/convenience.zig` -- uses `types.Type` directly
+- **Resolved date:** 2026-03-24
+
+### RM-04: Duplicate MxRecord type [RESOLVED]
+- **Category:** Quality / Maintainability (Medium)
+- **Resolution:** Consolidated `MXRecord`/`MxRecord` into single type.
+- **Evidence:** `src/client.zig`, `src/resolver/convenience.zig` -- single MxRecord type
+- **Resolved date:** 2026-03-24
+
+### QS-NEW-03: Unused lib.zig exports [RESOLVED]
+- **Category:** Quality / Cleanup (Low)
+- **Resolution:** Documented 4 exports (`convenience`, `rpz`, `config`, `cache_prefetch`) as intentional public API with comments.
+- **Evidence:** `src/lib.zig` -- exports annotated with public API comments
+- **Resolved date:** 2026-03-24
+
+### DG-01: resolveIterative doc comment [RESOLVED]
+- **Category:** Quality / Documentation (Info)
+- **Resolution:** Added `///` doc comment describing iterative resolution algorithm.
+- **Evidence:** `src/recursive.zig` -- doc comment on `resolveIterative`
+- **Resolved date:** 2026-03-24
+
+### DG-02: ResolutionState doc comment [RESOLVED]
+- **Category:** Quality / Documentation (Info)
+- **Resolution:** Added `///` doc comments to `ResolutionState` struct and each field.
+- **Evidence:** `src/recursive.zig` -- doc comments on ResolutionState
+- **Resolved date:** 2026-03-24
+
+### DG-03: MXRecord ownership doc [RESOLVED]
+- **Category:** Quality / Documentation (Info)
+- **Resolution:** Added ownership doc comment: "Caller owns returned slice and each .exchange string."
+- **Evidence:** `src/client.zig` -- ownership doc on MXRecord/MxRecord
+- **Resolved date:** 2026-03-24
+
+### DG-04: rdataOffset invariant doc [RESOLVED]
+- **Category:** Quality / Documentation (Info)
+- **Resolution:** Added `///` doc to ResourceRecord explaining rdata slices alias into original message buffer.
+- **Evidence:** `src/record.zig` -- public API doc on aliasing invariant
+- **Resolved date:** 2026-03-24
+
+### DG-05: getMinimizedQname doc [RESOLVED]
+- **Category:** Quality / Documentation (Info)
+- **Resolution:** Added doc comment referencing RFC 9156 and depth-based label minimization strategy.
+- **Evidence:** `src/recursive.zig` -- doc comment on `getMinimizedQname`
+- **Resolved date:** 2026-03-24
+
+### DG-06: Cache formatting doc [RESOLVED]
+- **Category:** Quality / Documentation (Info)
+- **Resolution:** Added comment documenting supported cache formatting types. Moot after QM-NEW-03 resolution (9 types now supported).
+- **Evidence:** `src/client.zig` -- comment on `formatCachedRdata`
+- **Resolved date:** 2026-03-24
+
+### PF-NEW-15: DnsCache put heap makeKey [RESOLVED]
+- **Category:** Performance (P2)
+- **Resolution:** Converted `putPositive`, `putNxdomain`, `putNodata` from heap `makeKey` to stack `makeKeyBuf` with 280-byte stack buffer.
+- **Evidence:** `src/resolver/dns_cache.zig` -- `makeKeyBuf` in put methods
+- **Resolved date:** 2026-03-24
+
+---
+
+## Won't Do (2026-03-24 -- Final Gap Closure)
+
+The following items were evaluated and intentionally classified as Won't Do with documented rationale.
+
+### QC-NEW-03: sendQuery() triple duplication [WON'T DO]
+- **Category:** Quality / Maintainability (High)
+- **Reason:** Large refactor requiring transport architecture changes. Duplication is stable, well-tested, and unlikely to diverge. The TCP I/O equivalent (QM-07) was already resolved.
+
+### QM-NEW-02: ResolveResult defined twice [WON'T DO]
+- **Category:** Quality / Architecture (Medium)
+- **Reason:** Different shapes serve different architectural layers (client vs recursive). Unifying requires API redesign.
+
+### RM-07: IPv4 formatting pattern repeated [WON'T DO]
+- **Category:** Quality / Maintainability (Medium)
+- **Reason:** Low-risk repetition of an idiomatic format string. Unlikely to diverge.
+
+### QS-NEW-04: CI Zig install not cached [WON'T DO]
+- **Category:** Quality / CI-CD (Medium)
+- **Reason:** CI infrastructure improvement outside code quality scope.
+
+### QS-NEW-06: No code coverage CI [WON'T DO]
+- **Category:** Quality / CI-CD (Medium)
+- **Reason:** CI infrastructure; requires Zig coverage tooling maturation.
+
+### QS-NEW-08: spice dependency pins main branch [WON'T DO]
+- **Category:** Quality / Dependencies (Medium)
+- **Reason:** Upstream concern. Hash pinning provides integrity. Cross-ref GAP-0047, SEC-C14/C31.
+
+### QH-NEW-02 / GAP-0045: resolveIterative zero test coverage [WON'T DO]
+- **Category:** Quality / Tests (High)
+- **Reason:** Requires mock DNS transport infrastructure that doesn't exist. Cross-ref GAP-0045 (remains open in GAP_ANALYSIS.md as production recommendation).
+
+### GAP-0046: Zero fuzz testing [WON'T DO]
+- **Category:** Tests (High)
+- **Reason:** Requires fuzz infrastructure setup. Remains as production recommendation in GAP_ANALYSIS.md.
+
+### QS-NEW-07: Client tests bail on network [WON'T DO]
+- **Category:** Quality / Tests (Low)
+- **Reason:** Requires mock transport infrastructure. Same blocker as QH-NEW-02.
+
+### SEC-SCAN-03 / PF-14: Cache thread safety [WON'T DO]
+- **Category:** Security (Medium) / Performance (P2)
+- **Reason:** Cache documented as single-threaded-only. Thread safety requires architectural redesign. Single-threaded use is safe.
+
+### PF-02 / PF-02b-evict / PF-02c: Cache O(n) operations [WON'T DO]
+- **Category:** Performance (P1)
+- **Reason:** Subsumed by PF-24-dual-cache migration (deferred). DnsCache already has O(1) operations.
+
+### PF-03 / PF-03b / PF-03c / PF-21-pool: Socket/transport architecture [WON'T DO]
+- **Category:** Performance (P1-P2)
+- **Reason:** Requires transport architecture rework to wire ConnectionPool into resolvers. Large effort.
+
+### PF-05: Arena allocator [WON'T DO]
+- **Category:** Performance (P1)
+- **Reason:** Large architectural change affecting all resolver entry points.
+
+### PF-18: No benchmarks [WON'T DO]
+- **Category:** Performance (P0)
+- **Reason:** Benchmark infrastructure investment outside scope of gap closure.
+
+### PF-NEW-14 / PF-NEW-16 / PF-NEW-17 / PF-NEW-18 / PF-NEW-19: Small perf items [WON'T DO]
+- **Category:** Performance (P2-P3)
+- **Reason:** Marginal improvements; some structurally required, others dominated by larger costs (HTTP round-trip, not in hot path).
+
+### SEC-C29 / ADV-02: Replay protection [WON'T DO]
+- **Category:** Security (Medium/Low)
+- **Reason:** Defense-in-depth. Requires bounded replay cache data structure. Low practical risk with short validity windows.
+
+### SEC-C32: SIG(0) timestamp u32 overflow in 2106 [WON'T DO]
+- **Category:** Security (Low)
+- **Reason:** Year 2106 issue. Not actionable in current timeframe.
+
+### SEC-C14/C31 / GAP-0047: spice pins main branch [WON'T DO]
+- **Category:** Security (Medium)
+- **Reason:** Upstream concern. Hash pinning provides partial mitigation.
+
+### GAP-0015 / GAP-0017 / GAP-0041 / GAP-0042 / GAP-0044: Feature/infra gaps [WON'T DO]
+- **Category:** Various (Medium)
+- **Reason:** Administrative (GAP-0015), architectural refactors (GAP-0017, GAP-0044), feature additions (GAP-0041, GAP-0042). Outside scope of gap closure.
+
+### QH-05 / QM-03 / QL-03 / QL-09: Deferred items [DEFERRED]
+- **Category:** Various
+- **Reason:** QH-05 requires fuzz infrastructure. QM-03/QL-03/QL-09 are large-scale refactoring efforts.
+
+---
+
 Note: GAP-0001 through GAP-0010 issues remain OPEN in the GitLab tracker despite fixes being present in code. See GAP-0015 (#78) for the broader state-conflict tracking.
