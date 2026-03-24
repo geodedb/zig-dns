@@ -266,9 +266,11 @@ pub const RecursiveResolver = struct {
                         while (try ans_iter.next()) |rr| {
                             if (rr.rtype == .cname and state.qtype != .cname) {
                                 // Follow CNAME chain
+                                // Use stack buffer + single dupe instead of toString + dupe
+                                // to avoid an intermediate heap allocation (PF-NEW-03).
                                 const cname_target = try rr.parseName(response);
-                                const target_str = try cname_target.toString(self.allocator, response);
-                                defer self.allocator.free(target_str);
+                                var cname_buf: [256]u8 = undefined;
+                                const target_str = try cname_target.toStringBuf(&cname_buf, response);
 
                                 try state.cname_chain.append(self.allocator, try self.allocator.dupe(u8, target_str));
 
@@ -427,19 +429,25 @@ pub const RecursiveResolver = struct {
             return try self.allocator.dupe(u8, original);
         }
 
-        // Return rightmost (depth+1) labels
+        // Return rightmost (depth+1) labels using a stack buffer (PF-NEW-04).
+        // Max DNS name is 253 chars; stack buffer avoids ArrayList heap overhead.
         const start = count - @min(depth + 1, count);
-        var result: std.ArrayList(u8) = .empty;
-        errdefer result.deinit(self.allocator);
+        var buf: [253]u8 = undefined;
+        var pos: usize = 0;
 
         for (start..count) |i| {
-            if (result.items.len > 0) {
-                try result.append(self.allocator, '.');
+            if (pos > 0) {
+                if (pos >= buf.len) return error.Overflow;
+                buf[pos] = '.';
+                pos += 1;
             }
-            try result.appendSlice(self.allocator, labels[i]);
+            const label = labels[i];
+            if (pos + label.len > buf.len) return error.Overflow;
+            @memcpy(buf[pos..][0..label.len], label);
+            pos += label.len;
         }
 
-        return try result.toOwnedSlice(self.allocator);
+        return try self.allocator.dupe(u8, buf[0..pos]);
     }
 
     /// Result of queryWithRetry: raw response bytes and already-parsed Message.
@@ -1076,6 +1084,38 @@ test "RecursiveResolver.getMinimizedQname" {
     const q3 = try resolver.getMinimizedQname("www.example.com", ".", 10);
     defer allocator.free(q3);
     try std.testing.expectEqualStrings("www.example.com", q3);
+}
+
+test "PF-NEW-04: getMinimizedQname uses stack buffer (no ArrayList)" {
+    // Verifies that getMinimizedQname works with the stack-buffer implementation.
+    // Before the fix, an ArrayList(u8) was used for name assembly, causing heap
+    // allocations for every QNAME minimization step. The stack buffer avoids this.
+    const allocator = std.testing.allocator;
+
+    var resolver = try RecursiveResolver.init(allocator, .{});
+    defer resolver.deinit();
+
+    // Test with a deeper domain (4 labels)
+    const q0 = try resolver.getMinimizedQname("a.b.example.com", ".", 0);
+    defer allocator.free(q0);
+    try std.testing.expectEqualStrings("com", q0);
+
+    const q1 = try resolver.getMinimizedQname("a.b.example.com", ".", 1);
+    defer allocator.free(q1);
+    try std.testing.expectEqualStrings("example.com", q1);
+
+    const q2 = try resolver.getMinimizedQname("a.b.example.com", ".", 2);
+    defer allocator.free(q2);
+    try std.testing.expectEqualStrings("b.example.com", q2);
+
+    const q3 = try resolver.getMinimizedQname("a.b.example.com", ".", 3);
+    defer allocator.free(q3);
+    try std.testing.expectEqualStrings("a.b.example.com", q3);
+
+    // Single label domain
+    const qs = try resolver.getMinimizedQname("localhost", ".", 0);
+    defer allocator.free(qs);
+    try std.testing.expectEqualStrings("localhost", qs);
 }
 
 test "PF-11: ResolutionState.deinit frees last_query_name" {

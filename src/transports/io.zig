@@ -115,7 +115,8 @@ const builtin = @import("builtin");
 
 /// Create a UNIX socketpair for testing. Returns [2]fd_t.
 /// std.posix does not expose socketpair, so we use the Linux syscall directly.
-fn testSocketPair() ![2]std.posix.fd_t {
+/// Public so other transport test modules can reuse it instead of duplicating.
+pub fn testSocketPair() ![2]std.posix.fd_t {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
     const sock_type: i32 = std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK;
     var fds: [2]i32 = undefined;

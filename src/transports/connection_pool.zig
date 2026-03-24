@@ -319,10 +319,10 @@ pub const ConnectionPool = struct {
         // mutex while waiting on the network.
         self.mutex.unlock();
 
-        const fd = self.createConnection(server, timeout_ms) catch |err| {
+        var fd = self.createConnection(server, timeout_ms) catch |err| {
             return err;
         };
-        errdefer std.posix.close(fd);
+        errdefer if (fd != -1) std.posix.close(fd);
 
         // Re-lock to mutate pool state
         self.mutex.lock();
@@ -336,6 +336,7 @@ pub const ConnectionPool = struct {
             // Limit exceeded -- close the fd we just created and try to
             // reuse an existing connection that may have become available.
             std.posix.close(fd);
+            fd = -1; // Prevent errdefer double-close
 
             for (self.connections.items) |*conn| {
                 if (!conn.server.eql(server)) continue;
@@ -753,17 +754,8 @@ pub const PooledTcpTransport = struct {
 // Tests
 // ============================================================================
 
-/// Create a UNIX socketpair for testing. Returns [2]fd_t.
-/// std.posix does not expose socketpair, so we use the Linux syscall directly.
-fn testSocketPair() ![2]std.posix.fd_t {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
-    const sock_type: i32 = std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK;
-    var fds: [2]i32 = undefined;
-    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, sock_type, 0, &fds);
-    const errno = std.posix.errno(rc);
-    if (errno != .SUCCESS) return error.SocketPairFailed;
-    return fds;
-}
+/// Reuse testSocketPair from io.zig to avoid code duplication.
+const testSocketPair = io.testSocketPair;
 
 test "ServerKey equality" {
     const key1 = ServerKey.init("8.8.8.8", 53, .tcp);

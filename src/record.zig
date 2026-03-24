@@ -1196,20 +1196,24 @@ test "ResourceRecord.formatABuf" {
 test "ResourceRecord.formatAAAABuf" {
     const data = [_]u8{
         // Name: ipv6.example.com
-        4, 'i', 'p', 'v', '6',
-        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
-        3, 'c', 'o', 'm', 0,
+        4,    'i',  'p',  'v',  '6',
+        7,    'e',  'x',  'a',  'm',
+        'p',  'l',  'e',  3,    'c',
+        'o',  'm',  0,
         // TYPE: AAAA (28)
-        0x00, 0x1C,
+           0x00, 0x1C,
         // CLASS: IN (1)
         0x00, 0x01,
         // TTL: 600
-        0x00, 0x00, 0x02, 0x58,
+        0x00, 0x00, 0x02,
+        0x58,
         // RDLENGTH: 16
         0x00, 0x10,
         // RDATA: 2606:2800:0220:0001:0248:1893:25c8:1946
-        0x26, 0x06, 0x28, 0x00, 0x02, 0x20, 0x00, 0x01,
-        0x02, 0x48, 0x18, 0x93, 0x25, 0xc8, 0x19, 0x46,
+        0x26, 0x06,
+        0x28, 0x00, 0x02, 0x20, 0x00,
+        0x01, 0x02, 0x48, 0x18, 0x93,
+        0x25, 0xc8, 0x19, 0x46,
     };
 
     const rr = try ResourceRecord.parse(&data, 0);

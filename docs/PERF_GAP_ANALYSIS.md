@@ -6,9 +6,9 @@ Last updated: 2026-03-24
 
 | Status | Count | Items |
 |---|---|---|
-| **Resolved** | 24 | PF-01, PF-02b, PF-04, PF-06, PF-07, PF-08, PF-09, PF-11, PF-12, PF-15, PF-17, PF-19, PF-20, PF-21, PF-22, PF-23, PF-24, PF-25, PF-26, PF-27, PF-28, PF-29, PF-30, PF-31 |
+| **Resolved** | 30 | PF-01, PF-02b, PF-04, PF-06, PF-07, PF-08, PF-09, PF-11, PF-12, PF-15, PF-17, PF-19, PF-20, PF-21, PF-22, PF-23, PF-24, PF-25, PF-26, PF-27, PF-28, PF-29, PF-30, PF-31, PF-NEW-01, PF-NEW-02, PF-NEW-03, PF-NEW-04, PF-NEW-05, PF-NEW-06 |
 | **Open/Deferred** | 8 | PF-02, PF-03, PF-05, PF-10, PF-13, PF-14, PF-16, PF-18 |
-| **Total** | **32** |
+| **Total** | **38** |
 
 ### Top 5 Risks (by PerfScore)
 
@@ -42,6 +42,12 @@ Last updated: 2026-03-24
 20. **PF-29 (PerfScore 24):** **Resolved.** `cacheResponse` uses `toStringBuf` with 256-byte stack buffer for both question name and per-record owner name; zero heap allocation.
 21. **PF-30 (PerfScore 20):** **Resolved.** `client.zig resolve()` uses `toStringBuf` with 256-byte stack buffer for owner name in CNAME chain check; zero heap allocation.
 22. **PF-20 (PerfScore 8):** **Resolved.** `resolveNsAddress` uses `bufPrint` with `[15]u8` stack buffer for IPv4 string formatting; zero heap allocation.
+23. **PF-NEW-01 (HIGH):** **Resolved.** `extractQnameBuf` writes into caller-provided stack buffer; `extractQname` is now a thin wrapper. Recursive resolver 0x20 verification path is zero-allocation.
+24. **PF-NEW-05 (MEDIUM):** **Resolved.** `formatABuf`/`formatAAAABuf` use `bufPrint` into caller-provided buffers; `formatA`/`formatAAAA` are thin wrappers. `client.zig resolve()` uses stack buffers + `dupe`.
+25. **PF-NEW-06 (MEDIUM):** **Resolved.** MX `exchange.toString` in `client.zig lookupMX()` replaced with `toStringBuf` + `dupe`; avoids ArrayList overhead.
+26. **PF-NEW-02 (HIGH):** **Resolved.** `extractReferral` caller now frees referral data via `Referral.deinit` which frees `.zone`, each `.servers[i].name`, and the `.servers` slice. Added `errdefer` guards for error-path cleanup inside `extractReferral`.
+27. **PF-NEW-03 (HIGH):** **Resolved.** CNAME target path uses `toStringBuf` with 256-byte stack buffer + single `dupe` instead of `toString` (heap alloc) + `dupe` (second heap alloc). Eliminates one allocation per CNAME hop.
+28. **PF-NEW-04 (MEDIUM):** **Resolved.** `getMinimizedQname` builds the minimized name in a stack `[253]u8` buffer with manual offset tracking instead of `ArrayList(u8)`. Avoids heap allocation for name assembly.
 
 ### Open Items
 
@@ -109,7 +115,7 @@ Remaining items by priority:
 | 26 | P3 | 12 | PF-17: Global thread pool uses page_allocator | `src/parallel.zig:77` | GPA backed by page_allocator wraps pool allocator; small allocs sub-allocated from pages | Fewer mmap syscalls | [#124](https://gitlab.com/devnw/zig/dns/-/issues/124) | Wrap with GPA | Core maintainer | Backlog | Resolved |
 | 27 | P3 | 12 | PF-18: No benchmarks or perf regression CI | N/A | No bench/ directory, no benchmark CI stage | Cannot detect regressions | [#125](https://gitlab.com/devnw/zig/dns/-/issues/125) | Add bench/ suite + CI stage | Core maintainer | Backlog | Deferred |
 | 28 | P3 | 8 | PF-20: allocPrint for IPv4 in resolveNsAddress | `src/recursive.zig:674-681` | bufPrint with [15]u8 stack buffer; zero heap allocation | ~100-200ns saved | [#142](https://gitlab.com/devnw/zig/dns/-/issues/142) | bufPrint with [15]u8 stack buffer | Core maintainer | Backlog | **Resolved** |
-| 29 | P3 | 8 | PF-28: ArrayList byte-by-byte append without capacity pre-alloc | `src/name.zig:568`, `src/resolver/convenience.zig:301` | extractQname and reverseIPv6Name start with capacity 0 | ~100-300ns extra per call | [#164](https://gitlab.com/devnw/zig/dns/-/issues/164) | Added ensureTotalCapacity(253) in extractQname, ensureTotalCapacity(72) in reverseIPv6Name | Core maintainer | Backlog | Resolved |
+| 29 | P3 | 8 | PF-28: ArrayList byte-by-byte append without capacity pre-alloc | `src/name.zig:568`, `src/resolver/convenience.zig:301` | extractQname and reverseIPv6Name start with capacity 0 | ~100-300ns extra per call | [#164](https://gitlab.com/devnw/zig/dns/-/issues/164) | Added ensureTotalCapacity(253) in extractQname, ensureTotalCapacity(72) in reverseIPv6Name. **Superseded by PF-NEW-01**: extractQname now uses extractQnameBuf (stack buffer, zero allocation). | Core maintainer | Backlog | Resolved |
 | 30 | P3 | 4 | PF-23: getMinimizedQname iterates labels twice | `src/recursive.zig:397-436` | Single-pass: labels collected once, depth checked against count | ~50-100ns saved | [#153](https://gitlab.com/devnw/zig/dns/-/issues/153) | Single-pass label collection | Core maintainer | Backlog | Resolved |
 | 31 | P3 | 4 | PF-26: Expired entry removal re-hashes key | `src/resolver/dns_cache.zig:150-163`, `src/util/lru.zig:63-101` | getWithHandle returns EntryHandle; removeByHandle uses map.removeByPtr | Zero re-hash on expiry removal | [#159](https://gitlab.com/devnw/zig/dns/-/issues/159) | LRU getWithHandle + removeByHandle using HashMap removeByPtr | Core maintainer | Backlog | **Resolved** |
 | 32 | P3 | 4 | PF-27: No inline hints on hot-path functions | `src/name.zig`, `src/cache.zig` | Small leaf functions in tight loops lack inline | ~2-5ns per call (debug builds) | [#162](https://gitlab.com/devnw/zig/dns/-/issues/162) | Added inline to CacheEntry.isExpired, CacheEntry.remainingTtl, verifyCase0x20 | Core maintainer | Backlog | Resolved |
@@ -143,6 +149,9 @@ Remaining items by priority:
 | PF-28 | P3 | 8 | ArrayList byte-by-byte append | [#164](https://gitlab.com/devnw/zig/dns/-/issues/164) | **Resolved** |
 | PF-23 | P3 | 4 | getMinimizedQname double iter | [#153](https://gitlab.com/devnw/zig/dns/-/issues/153) | **Resolved** |
 | PF-27 | P3 | 4 | No inline hints | [#162](https://gitlab.com/devnw/zig/dns/-/issues/162) | **Resolved** |
+| PF-NEW-02 | P1 | 48 | extractReferral memory leak (zone, server names, servers slice) | -- | **Resolved** |
+| PF-NEW-03 | P1 | 36 | CNAME target double-alloc (toString+dupe) | -- | **Resolved** |
+| PF-NEW-04 | P2 | 16 | getMinimizedQname ArrayList heap alloc | -- | **Resolved** |
 
 ### Database / Cache (`area::db`)
 
@@ -200,6 +209,12 @@ Remaining items by priority:
 | PF-29 | 24 | Use toStringBuf in cacheResponse (stack buffer, zero alloc) | **Resolved** |
 | PF-30 | 20 | Use toStringBuf in client resolve (stack buffer, zero alloc) | **Resolved** |
 | PF-20 | 8 | bufPrint with [15]u8 for IPv4 in resolveNsAddress | **Resolved** |
+| PF-NEW-01 | HIGH | extractQnameBuf stack-buffer variant; zero alloc on 0x20 path | **Resolved** |
+| PF-NEW-05 | MEDIUM | formatABuf/formatAAAABuf stack-buffer variants; client.zig uses bufPrint+dupe | **Resolved** |
+| PF-NEW-06 | MEDIUM | MX exchange toStringBuf+dupe in client.zig lookupMX | **Resolved** |
+| PF-NEW-02 | HIGH | extractReferral memory leak -- Referral.deinit frees zone/names/slice | **Resolved** |
+| PF-NEW-03 | HIGH | CNAME double-alloc -- toStringBuf+dupe replaces toString+dupe | **Resolved** |
+| PF-NEW-04 | MEDIUM | getMinimizedQname stack buffer replaces ArrayList(u8) | **Resolved** |
 
 ### Quick Wins (< 1 day)
 

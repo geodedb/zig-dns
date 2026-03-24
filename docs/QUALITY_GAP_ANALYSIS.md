@@ -7,10 +7,10 @@ Last updated: 2026-03-24
 | Severity | Open | Resolved/Closed | Total |
 |----------|------|-----------------|-------|
 | Critical | 0 | 4 | 4 |
-| High | 1 | 8 | 9 |
-| Medium | 1 | 9 | 10 |
-| Low | 2 | 7 | 9 |
-| **Total** | **4** | **28** | **32** |
+| High | 1 | 9 | 10 |
+| Medium | 1 | 10 | 11 |
+| Low | 2 | 8 | 10 |
+| **Total** | **4** | **31** | **35** |
 
 ### Top 4 Active Risks
 
@@ -47,7 +47,10 @@ Last updated: 2026-03-24
 | 22 | QM-02 | **Resolved** | 24 | maintainability | ~~Duplicated root server definitions~~ | recursive.zig | Deleted `src/resolver/recursive.zig` (GAP-0012) | [#106](https://gitlab.com/devnw/zig/dns/-/issues/106) | Resolved | Resolver maintainer | S | Resolved |
 | 23 | QM-04 | **Resolved** | 24 | architecture | ~~18 modules lack API boundary docs~~ | build.zig | Added API boundary comments | [#113](https://gitlab.com/devnw/zig/dns/-/issues/113) | Resolved | Project maintainer | S | Resolved |
 | 24 | QM-06 | **Resolved** | 24 | docs | ~~ARCHITECTURE.md missing 60% of modules~~ | docs/ARCHITECTURE.md | Rewritten with all modules documented | [#119](https://gitlab.com/devnw/zig/dns/-/issues/119) | Resolved | Documentation lead | M | Resolved |
-| 25 | QL-03 | Low | 16 | readability | 9 source files exceed 800-line threshold; `record.zig` at 1763 | Multiple files | `record.zig:1763`, `edns.zig:973`, `dnssec.zig:889`, `zone_transfer.zig:886`, +5 more | [#126](https://gitlab.com/devnw/zig/dns/-/issues/126) | Split large files by responsibility domain | Project maintainer | L | Deferred |
+| 25 | QC-NEW-01 | **Resolved** | 64 | architecture | `acquire()` returns pointer into ArrayList backing array; dangling after realloc/swapRemove | connection_pool.zig | `connection_pool.zig:251,291` -- `&self.connections.items[len-1]` pointer invalidated by concurrent append/cleanup | -- | Return ConnectionHandle (value type with generation-based lookup) instead of pointer | Transport maintainer | M | **Resolved** |
+| 26 | QC-NEW-02 | **Resolved** | 48 | architecture | TOCTOU in connection limit: countServerConnections check races with createConnection | connection_pool.zig | `connection_pool.zig:268-296` -- lock released for blocking connect, re-acquired without re-checking limit | -- | Re-check countServerConnections after re-acquiring mutex; close excess fd and try reuse | Transport maintainer | S | **Resolved** |
+| 27 | QL-NEW-01 | **Resolved** | 8 | cleanup | Duplicated testSocketPair helper identical to io.zig:118-126 | connection_pool.zig | `connection_pool.zig:665-673` -- copy-paste of `io.zig:118-126` | -- | Make io.zig testSocketPair public; replace duplicate with const alias | Any contributor | S | **Resolved** |
+| 28 | QL-03 | Low | 16 | readability | 9 source files exceed 800-line threshold; `record.zig` at 1763 | Multiple files | `record.zig:1763`, `edns.zig:973`, `dnssec.zig:889`, `zone_transfer.zig:886`, +5 more | [#126](https://gitlab.com/devnw/zig/dns/-/issues/126) | Split large files by responsibility domain | Project maintainer | L | Deferred |
 | 26 | QL-09 | Low | 16 | readability | 30 functions exceed 50-line threshold; resolveIterative at 208 lines | Multiple files | `recursive.zig:187+` (208 lines), record.zig, edns.zig, zone_transfer.zig parsers | [#185](https://gitlab.com/devnw/zig/dns/-/issues/185) | Decompose long functions; add lint gate | Project maintainer | L | Open |
 | 27 | QL-04 | **Resolved** | 16 | docs | ~~No doc comment on rdata-offset invariant~~ | record.zig | Doc comments added | [#127](https://gitlab.com/devnw/zig/dns/-/issues/127) | Resolved | Any contributor | S | Resolved |
 | 28 | QL-05 | **Resolved** | 16 | tests | ~~Mutable statics in MockTlsBackend~~ | dot.zig | `write_buffer` and `write_len` moved from struct-level statics to per-instance fields | [#181](https://gitlab.com/devnw/zig/dns/-/issues/181) | Moved to per-instance state | Any contributor | S | Resolved |
@@ -71,6 +74,8 @@ Last updated: 2026-03-24
 | QC-04 | Critical | 60 | Infinite loop in PipelinedBatch.execute | [#156](https://gitlab.com/devnw/zig/dns/-/issues/156) | **Resolved** |
 | QM-09 | **Resolved** | 36 | parallel.zig placeholder implementations | [#177](https://gitlab.com/devnw/zig/dns/-/issues/177) | **Resolved** |
 | QM-04 | Medium | 24 | 18 modules lack API boundary docs | [#113](https://gitlab.com/devnw/zig/dns/-/issues/113) | **Resolved** |
+| QC-NEW-01 | **Resolved** | 64 | acquire() returns dangling pointer into ArrayList | -- | **Resolved** |
+| QC-NEW-02 | **Resolved** | 48 | TOCTOU in connection limit check | -- | **Resolved** |
 
 ### API Contract (2 findings)
 
@@ -129,6 +134,7 @@ Last updated: 2026-03-24
 | QM-10 | **Resolved** | 24 | ~~Duplicate SOA parsing in zone_transfer.zig~~ | [#179](https://gitlab.com/devnw/zig/dns/-/issues/179) | **Resolved** |
 | QL-01 | **Resolved** | 12 | ~~7 identical @intFromPtr blocks~~ | [#121](https://gitlab.com/devnw/zig/dns/-/issues/121) | **Resolved** |
 | QL-02 | Low | 8 | verifyCase0x20 reimplements std.mem.eql | [#123](https://gitlab.com/devnw/zig/dns/-/issues/123) | **Resolved** |
+| QL-NEW-01 | **Resolved** | 8 | Duplicated testSocketPair in connection_pool.zig | -- | **Resolved** |
 
 ## Remediation Roadmap
 
@@ -162,6 +168,9 @@ Last updated: 2026-03-24
 | QL-05 | 16 | Move mock statics to per-instance state | **Resolved** |
 | QL-07 | 32 | zig fmt --check added to CI (explicit script in zig-format override) | **Resolved** |
 | QL-08 | 12 | ARCHITECTURE.md stale references removed | **Resolved** |
+| QC-NEW-01 | 64 | acquire() returns ConnectionHandle instead of dangling pointer | **Resolved** |
+| QC-NEW-02 | 48 | TOCTOU re-check after re-acquiring mutex in acquire() | **Resolved** |
+| QL-NEW-01 | 8 | Deduplicated testSocketPair (import from io.zig) | **Resolved** |
 
 ### Medium Term (1-5 days)
 

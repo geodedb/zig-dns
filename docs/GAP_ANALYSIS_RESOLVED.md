@@ -382,6 +382,20 @@ The following items were resolved by 7 parallel implementation agents during the
 - **Evidence:** `src/name.zig:270` -- `toStringBuf()` method; tests at line 1212+
 - **Resolved date:** 2026-03-24
 
+### GAP-0021: PF-09 status tracking incorrect -- marked Deferred but is Resolved [RESOLVED]
+- **Issue:** [#144](https://gitlab.com/devnw/zig/dns/-/issues/144)
+- **Category:** Docs
+- **Resolution:** PF-09 confirmed as Resolved in PERF_GAP_ANALYSIS.md. `responseMatchesQuery` uses zero-allocation `Name.encodeBuf` + `Name.eql` on the stack. PF-01 (Name.eql) was resolved, unblocking PF-09. Status updated from "Deferred" to "Resolved" in all tracking documents.
+- **Evidence:** `src/recursive.zig:681-685` -- zero-allocation Name comparison; `docs/PERF_GAP_ANALYSIS.md` -- PF-09 status: Resolved
+- **Resolved date:** 2026-03-24
+
+### GAP-0026: Uncommitted gap closure work (27 files, +2137/-1019) [RESOLVED]
+- **Issue:** [#131](https://gitlab.com/devnw/zig/dns/-/issues/131)
+- **Category:** Bug (High)
+- **Resolution:** All gap closure work committed and pushed to remote in logical groups. Critical bug fixes, security hardening, performance optimizations, and documentation updates are now version-controlled.
+- **Evidence:** `git log` -- multiple commits covering GAP-0011 through GAP-0036 resolution work
+- **Resolved date:** 2026-03-24
+
 ---
 
 ## Won't Do (2026-03-24)

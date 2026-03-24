@@ -1,6 +1,6 @@
 # Gap Analysis
 
-Last updated: 2026-03-24 (gap closure complete -- 33 items resolved across 7 agents)
+Last updated: 2026-03-24 (gap closure complete -- 35 items resolved across 7 agents)
 
 > This file contains ONLY open gaps. Resolved and Won't Do items are in [GAP_ANALYSIS_RESOLVED.md](GAP_ANALYSIS_RESOLVED.md).
 
@@ -38,10 +38,6 @@ Last updated: 2026-03-24 (gap closure complete -- 33 items resolved across 7 age
 - **Acceptance criteria:**
   - [ ] Recursive resolver uses transport module abstractions for UDP/TCP queries
   - [ ] Transport-level features apply uniformly to all query paths
-
----
-
----
 
 ---
 
@@ -83,6 +79,8 @@ The following security findings were identified in Phase 3 review. Findings that
 | SEC-C24 (PRNG for TXIDs) | #94 [SEC-C05] -- same root cause | Duplicate -- comment added |
 | SEC-C25 (Key not zeroed) | #104 [SEC-C06] + #111 [SEC-C07] -- same root cause | Duplicate -- comment added |
 | SEC-C31 (spice pins main) | #107 [SEC-C14] -- identical finding | Duplicate -- comment added |
+| SEC-C11 (Thread pool page_allocator) | [#112](https://gitlab.com/devnw/zig/dns/-/issues/112) -- overlaps PF-17 (thread pool GPA wrapper) | Cross-reference -- both resolved |
+| SEC-C12 (IPv4 format undefined trailing bytes) | [#115](https://gitlab.com/devnw/zig/dns/-/issues/115) -- overlaps QH-03 (Formatted struct with len) | Cross-reference -- both resolved |
 
 ### Remediation Roadmap
 
@@ -93,7 +91,7 @@ The following security findings were identified in Phase 3 review. Findings that
 - ~~SEC-C28~~: `require_auth` defaults to `true` -- **Resolved**
 - ~~SEC-C26~~: `writeAll()` / `writeAllWithTimeout()` in 3 files -- **Resolved**
 - ~~SEC-C23~~: HMAC key handling delegated to stdlib (RFC 2104) -- **Resolved**
-- ~~SEC-C02~~: Non-exhaustive enums for sig0/tsig (record.zig TBD) -- **Partially Resolved**
+- ~~SEC-C02~~: Non-exhaustive enums for sig0/tsig/record.zig -- **Resolved** (all enums confirmed non-exhaustive with `_` variant)
 - ~~SEC-C05~~: `std.crypto.random` (OS CSPRNG) for all TXIDs -- **Resolved**
 - ~~SEC-C27~~: `isSubdomainOf()` bailiwick validation -- **Resolved**
 - ~~SEC-C06/C25~~: `secureZero` on key material -- **Resolved**
@@ -110,9 +108,9 @@ The following security findings were identified in Phase 3 review. Findings that
 | Severity | Total | Resolved | Open | Gap-IDs / SEC-IDs |
 |----------|-------|----------|------|-------------------|
 | Critical | 2 | 2 | 0 | GAP-0027/SEC-C26, GAP-0028/SEC-C22 |
-| High | 7 | 7 | 0 | GAP-0026 (pending commit), GAP-0029, GAP-0030, GAP-0033/SEC-C20, GAP-0034/SEC-C21, SEC-C23, SEC-C05/C24 |
+| High | 7 | 7 | 0 | GAP-0026, GAP-0029, GAP-0030, GAP-0033/SEC-C20, GAP-0034/SEC-C21, SEC-C23, SEC-C05/C24 |
 | Medium | 10 | 8 | 2 | **Resolved:** GAP-0031, GAP-0032, GAP-0035, GAP-0036, SEC-C27, SEC-C28, SEC-C30, GAP-0015 (partial). **Open:** SEC-C29, GAP-0017 |
-| Low | 7 | 5 | 2 | **Resolved:** GAP-0022, GAP-0023, GAP-0024, GAP-0025, SEC-C33. **Open:** GAP-0021, SEC-C32 |
+| Low | 7 | 6 | 1 | **Resolved:** GAP-0021, GAP-0022, GAP-0023, GAP-0024, GAP-0025, SEC-C33. **Open:** SEC-C32 |
 
 ## Production Readiness Assessment
 
@@ -122,12 +120,10 @@ The following security findings were identified in Phase 3 review. Findings that
 |-----------------|----------------------|-----------|
 | GAP-0015 | No (partially resolved) | Docs updated; tracker reconciliation is administrative |
 | GAP-0017 | No (partially resolved) | Transports exposed in API; resolver wiring is future refactor |
-| GAP-0021 | No | Status tracking inconsistency only |
-| GAP-0026 | **YES** | Uncommitted work at risk of loss |
 | SEC-C29 | No (defense-in-depth) | Replay requires capture + time window; mitigated by short validity |
 | SEC-C14/C31 | No (mitigated) | Hash pinning provides partial protection |
 | SEC-C32 | No | Year 2106 issue |
 
 ### Production Blockers
 
-Only **GAP-0026** (uncommitted work) blocks production use. All Critical and High severity bugs have been resolved. Once changes are committed and pushed, no remaining open item blocks production deployment.
+No remaining open item blocks production deployment. All Critical and High severity bugs have been resolved. GAP-0021 and GAP-0026 are now resolved.
