@@ -244,11 +244,17 @@ pub const MessageBuilder = struct {
     }
 
     /// Add a question
+    /// PF-NEW-13: Encode directly into a stack buffer using Name.encodeBuf,
+    /// avoiding the intermediate heap allocation from question_mod.buildQuery.
     pub fn addQuestion(self: *Self, domain: []const u8, qtype: Type, qclass: Class) !void {
-        const encoded = try question_mod.buildQuery(self.allocator, domain, qtype, qclass);
-        defer self.allocator.free(encoded);
+        // DNS names are at most 255 bytes in wire format + 4 bytes for qtype/qclass
+        var buf: [name_mod.max_name_length + 4]u8 = undefined;
+        const name = try Name.encodeBuf(domain, buf[0..name_mod.max_name_length]);
+        const name_len = name.wire_length;
+        std.mem.writeInt(u16, buf[name_len..][0..2], qtype.toInt(), .big);
+        std.mem.writeInt(u16, buf[name_len + 2 ..][0..2], qclass.toInt(), .big);
 
-        try self.buffer.appendSlice(self.allocator, encoded);
+        try self.buffer.appendSlice(self.allocator, buf[0 .. name_len + 4]);
         self.questions_written += 1;
     }
 

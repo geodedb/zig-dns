@@ -520,6 +520,8 @@ pub const Sig0Context = struct {
         var i: u16 = 0;
         while (i < qdcount) : (i += 1) {
             offset = try skipName(message, offset);
+            // SECURITY (SEC-NEW-06): Validate room for QTYPE + QCLASS after name
+            if (offset + 4 > message.len) return error.InvalidMessage;
             offset += 4;
         }
 
@@ -551,6 +553,9 @@ pub const Sig0Context = struct {
             offset += 4; // TTL
             const rdlength = std.mem.readInt(u16, message[offset..][0..2], .big);
             offset += 2;
+
+            // SECURITY (SEC-NEW-02): Validate rdlength does not exceed message
+            if (offset + rdlength > message.len) return error.InvalidMessage;
 
             if (rtype == 24) { // SIG
                 // Check if it's SIG(0) - type covered should be 0
@@ -811,4 +816,46 @@ test "SEC-C25: Sig0KeyPair.deinit zeroes private key material (ECDSA P-256)" {
     for (key_ptr) |b| {
         try std.testing.expectEqual(@as(u8, 0), b);
     }
+}
+
+test "SEC-NEW-02: extractSig0 rejects rdlength exceeding message" {
+    const allocator = std.testing.allocator;
+
+    // Build a minimal DNS message with 1 additional record that has a SIG type
+    // but rdlength that extends past the end of the message.
+    var msg: [32]u8 = .{0} ** 32;
+    // ID
+    msg[0] = 0x12;
+    msg[1] = 0x34;
+    // Flags
+    msg[2] = 0x01;
+    msg[3] = 0x00;
+    // QDCOUNT: 0, ANCOUNT: 0, NSCOUNT: 0
+    // ARCOUNT: 1
+    msg[11] = 0x01;
+
+    // Additional section starts at offset 12
+    // RR Name: root (\x00)
+    msg[12] = 0x00;
+    // Type: SIG (24)
+    msg[13] = 0x00;
+    msg[14] = 0x18;
+    // Class: ANY (255)
+    msg[15] = 0x00;
+    msg[16] = 0xFF;
+    // TTL: 0 (bytes 17-20)
+    // rdlength: 0x00FF = 255 (far exceeds remaining message)
+    msg[21] = 0x00;
+    msg[22] = 0xFF;
+
+    // Generate a key pair for the public key needed by verify
+    var key_pair = try Sig0KeyPair.generate(allocator, "test.example.com", .ed25519);
+    defer key_pair.deinit(allocator);
+    const public_key = try Sig0PublicKey.fromDnskey("test.example.com", .ed25519, key_pair.public_key);
+
+    var ctx = Sig0Context.init(allocator);
+
+    // Only provide 28 bytes total -- rdlength claims 255 but only ~5 bytes remain
+    const result = ctx.verify(msg[0..28], &public_key);
+    try std.testing.expectError(error.InvalidMessage, result);
 }

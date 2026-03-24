@@ -164,6 +164,8 @@ pub const OptRecord = struct {
         std.mem.writeInt(u32, buffer[5..9], ttl, .big);
 
         // RDLENGTH
+        // SECURITY (SEC-NEW-05): Validate options length fits in u16 before cast
+        if (self.options.len > std.math.maxInt(u16)) return error.OptionsTooLarge;
         const rdlength: u16 = @intCast(self.options.len);
         std.mem.writeInt(u16, buffer[9..11], rdlength, .big);
 
@@ -233,6 +235,8 @@ pub const OptionIterator = struct {
 
 /// Build an EDNS option
 pub fn buildOption(allocator: std.mem.Allocator, code: OptionCode, data: []const u8) ![]u8 {
+    // SECURITY (SEC-NEW-05): Validate data length fits in u16 before cast
+    if (data.len > std.math.maxInt(u16)) return error.OptionsTooLarge;
     const result = try allocator.alloc(u8, 4 + data.len);
     std.mem.writeInt(u16, result[0..2], code.toInt(), .big);
     std.mem.writeInt(u16, result[2..4], @intCast(data.len), .big);
@@ -315,6 +319,10 @@ pub const ClientSubnet = struct {
         const data = try self.encode(allocator);
         defer allocator.free(data);
 
+        // SECURITY (SEC-NEW-05): Validate data length fits in u16 before cast
+        if (data.len > std.math.maxInt(u16)) {
+            return error.OptionsTooLarge;
+        }
         const result = try allocator.alloc(u8, 4 + data.len);
         std.mem.writeInt(u16, result[0..2], OptionCode.client_subnet.toInt(), .big);
         std.mem.writeInt(u16, result[2..4], @intCast(data.len), .big);
@@ -970,4 +978,37 @@ test "Cookie.computeClientCookie" {
     const different_ip = [_]u8{ 192, 168, 1, 101 };
     const cookie3 = Cookie.computeClientCookie(&different_ip, &server_ip, secret);
     try std.testing.expect(!std.mem.eql(u8, &cookie.client_cookie, &cookie3.client_cookie));
+}
+
+test "SEC-NEW-05: OptRecord.encode rejects options exceeding u16 max" {
+    const allocator = std.testing.allocator;
+
+    // Allocate options larger than u16 max (65535)
+    const big_options = try allocator.alloc(u8, 65536);
+    defer allocator.free(big_options);
+    @memset(big_options, 0);
+
+    const opt = OptRecord{
+        .udp_payload_size = 4096,
+        .extended_rcode = 0,
+        .version = 0,
+        .dnssec_ok = false,
+        .options = big_options,
+    };
+
+    var buffer: [128]u8 = undefined;
+    const result = opt.encode(&buffer);
+    try std.testing.expectError(error.OptionsTooLarge, result);
+}
+
+test "SEC-NEW-05: buildOption rejects data exceeding u16 max" {
+    const allocator = std.testing.allocator;
+
+    // Allocate data larger than u16 max
+    const big_data = try allocator.alloc(u8, 65536);
+    defer allocator.free(big_data);
+    @memset(big_data, 0);
+
+    const result = buildOption(allocator, .cookie, big_data);
+    try std.testing.expectError(error.OptionsTooLarge, result);
 }

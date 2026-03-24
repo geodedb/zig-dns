@@ -633,7 +633,7 @@ pub const RecursiveResolver = struct {
                     }
                 }
 
-                const addr = add_rr.parseA() catch continue;
+                const addr = try add_rr.parseA();
                 var ip_buf: [15]u8 = undefined; // max "255.255.255.255"
                 const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] }) catch continue;
 
