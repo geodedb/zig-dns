@@ -622,19 +622,17 @@ pub inline fn verifyCase0x20(query_name: []const u8, response_name: []const u8) 
     return std.mem.eql(u8, query_name, response_name);
 }
 
-/// Extract the QNAME from a DNS message (for 0x20 verification)
-pub fn extractQname(allocator: std.mem.Allocator, message: []const u8) ![]u8 {
+/// Extract the QNAME from a DNS message into a caller-provided buffer (for 0x20 verification).
+/// Avoids heap allocation -- DNS names are at most 253 chars, so a `[max_name_length]u8`
+/// stack buffer always suffices.  Returns a slice of `buf` containing the dotted QNAME.
+pub fn extractQnameBuf(buf: []u8, message: []const u8) ![]const u8 {
     if (message.len < 12) {
         return error.MessageTooShort;
     }
 
     // Skip header, parse QNAME
     var pos: usize = 12;
-    var result: std.ArrayList(u8) = .empty;
-    defer result.deinit(allocator);
-
-    // Pre-allocate for typical DNS name (max 253 chars in dotted form)
-    try result.ensureTotalCapacity(allocator, max_name_length);
+    var out_pos: usize = 0;
 
     var first = true;
     while (pos < message.len) {
@@ -658,15 +656,28 @@ pub fn extractQname(allocator: std.mem.Allocator, message: []const u8) ![]u8 {
         }
 
         if (!first) {
-            try result.append(allocator, '.');
+            if (out_pos >= buf.len) return error.NameTooLong;
+            buf[out_pos] = '.';
+            out_pos += 1;
         }
         first = false;
 
-        try result.appendSlice(allocator, message[pos + 1 ..][0..len_byte]);
+        if (out_pos + len_byte > buf.len) return error.NameTooLong;
+        @memcpy(buf[out_pos..][0..len_byte], message[pos + 1 ..][0..len_byte]);
+        out_pos += len_byte;
         pos += 1 + len_byte;
     }
 
-    return try result.toOwnedSlice(allocator);
+    return buf[0..out_pos];
+}
+
+/// Extract the QNAME from a DNS message (for 0x20 verification).
+/// Returns heap-allocated string.  Prefer `extractQnameBuf` when a stack
+/// buffer is available to avoid allocation on the hot path.
+pub fn extractQname(allocator: std.mem.Allocator, message: []const u8) ![]u8 {
+    var buf: [max_name_length]u8 = undefined;
+    const result = try extractQnameBuf(&buf, message);
+    return allocator.dupe(u8, result);
 }
 
 test "Name.encode simple domain" {
@@ -1060,6 +1071,40 @@ test "extractQname" {
     defer allocator.free(qname);
 
     try std.testing.expectEqualStrings("ExAmPlE.CoM", qname);
+}
+
+test "extractQnameBuf" {
+    // Build a minimal DNS message with QNAME
+    const message = [_]u8{
+        // Header (12 bytes)
+        0x12, 0x34, // ID
+        0x01, 0x00, // Flags (standard query)
+        0x00, 0x01, // QDCOUNT
+        0x00, 0x00, // ANCOUNT
+        0x00, 0x00, // NSCOUNT
+        0x00, 0x00, // ARCOUNT
+        // Question section
+        7, 'E', 'x', 'A', 'm', 'P', 'l', 'E', // Randomized case
+        3, 'C', 'o', 'M',
+        0, // End of name
+        0x00, 0x01, // QTYPE: A
+        0x00, 0x01, // QCLASS: IN
+    };
+
+    // Stack buffer variant produces the same result without heap allocation
+    var buf: [max_name_length]u8 = undefined;
+    const qname_buf = try extractQnameBuf(&buf, &message);
+    try std.testing.expectEqualStrings("ExAmPlE.CoM", qname_buf);
+
+    // Message too short
+    try std.testing.expectError(error.MessageTooShort, extractQnameBuf(&buf, &[_]u8{ 0, 1, 2 }));
+
+    // Label too long (len_byte > 63)
+    const bad_label = [_]u8{
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // Header
+        64, // label length > max_label_length
+    } ++ [_]u8{0} ** 64;
+    try std.testing.expectError(error.LabelTooLong, extractQnameBuf(&buf, &bad_label));
 }
 
 test "encodeWithCase0x20" {

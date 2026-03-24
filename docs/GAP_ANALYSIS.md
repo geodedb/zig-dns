@@ -41,38 +41,7 @@ Last updated: 2026-03-24 (gap closure complete -- 33 items resolved across 7 age
 
 ---
 
-### GAP-0021: PF-09 status tracking incorrect -- marked Deferred but is Resolved
-- **Issue:** [#144](https://gitlab.com/devnw/zig/dns/-/issues/144)
-- **Category:** Docs
-- **Severity:** Low
-- **Requirement source:** docs/PERF_GAP_ANALYSIS.md; Issue #105; Issue #82 (PF-01)
-- **Current state (evidence):**
-  - PF-01 (Name.eql page_allocator) resolved 2026-03-24
-  - Issue #105 (PF-09) still open with status::triage
-  - PERF_GAP_ANALYSIS.md lists PF-09 as "Deferred -- blocked by PF-01"
-- **Why this is a gap:** PF-09 blocker is resolved but status was not updated.
-- **Impact/Risk:** Status tracking inconsistency; no functional impact.
-- **Recommended fix:** Verify responseMatchesQuery uses allocation-free Name.eql(), then close #105 or update to "Ready".
-- **Acceptance criteria:**
-  - [ ] PF-09 status accurately reflects current state (Resolved or Ready, not Deferred)
-  - [ ] Issue #105 is updated accordingly
-
 ---
-
-### GAP-0026: Uncommitted gap closure work (27 files, +2137/-1019)
-- **Issue:** [#131](https://gitlab.com/devnw/zig/dns/-/issues/131)
-- **Category:** Bug
-- **Severity:** High
-- **Requirement source:** GAP-0011 through GAP-0020 resolution work; general code integrity
-- **Current state (evidence):**
-  - `git status` shows modified/deleted/untracked files spanning all gap closure work
-  - Includes critical bug fixes, security hardening, performance optimizations, doc updates
-- **Why this is a gap:** All gap closure work is uncommitted and at risk of loss.
-- **Impact/Risk:** High; `git checkout .` or disk failure would lose all fixes.
-- **Recommended fix:** Review, stage, commit in logical groups, and push to remote.
-- **Acceptance criteria:**
-  - [ ] All modified files are committed with meaningful commit messages
-  - [ ] Changes are pushed to remote
 
 ---
 
@@ -85,7 +54,7 @@ The following security findings were identified in Phase 3 review. Findings that
 | Rank | Severity | Risk Score | Finding | Component | CWE/OWASP | Evidence | Issue | SLA | Status |
 |------|----------|------------|---------|-----------|-----------|----------|-------|-----|--------|
 | 1 | Critical | 80 | SEC-C22: PipelinedBatch infinite loop on connection close | connection_pool.zig | CWE-835 / A05:2021 | connection_pool.zig:468,490 | [#154](https://gitlab.com/devnw/zig/dns/-/issues/154) (confidential) / GAP-0028 [#133] | 7d | **Resolved** |
-| 2 | High | 64 | SEC-C02: Unchecked @enumFromInt (covers SEC-C20/C21) | record.zig, sig0.zig, tsig.zig + 3 more | CWE-704 / A03:2021 | sig0.zig:217, tsig.zig:217, record.zig:439+ | [#89](https://gitlab.com/devnw/zig/dns/-/issues/89) / GAP-0033 [#134] / GAP-0034 [#135] | 30d | **Resolved** (sig0/tsig; record.zig TBD) |
+| 2 | High | 64 | SEC-C02: Unchecked @enumFromInt (covers SEC-C20/C21) | record.zig, sig0.zig, tsig.zig + 3 more | CWE-704 / A03:2021 | sig0.zig:217, tsig.zig:217, record.zig:439+ | [#89](https://gitlab.com/devnw/zig/dns/-/issues/89) / GAP-0033 [#134] / GAP-0034 [#135] | 30d | **Resolved** |
 | 3 | High | 64 | SEC-C05: Non-CSPRNG for transaction IDs (covers SEC-C24) | recursive.zig | CWE-330 / A02:2021 | recursive.zig:119,448 | [#94](https://gitlab.com/devnw/zig/dns/-/issues/94) | 30d | **Resolved** |
 | 4 | High | 48 | SEC-C23: TSIG HMAC key truncation | tsig.zig | CWE-326 / A02:2021 | tsig.zig:442,457,472,487,502 | [#157](https://gitlab.com/devnw/zig/dns/-/issues/157) (confidential) | 30d | **Resolved** |
 | 5 | High | 48 | SEC-C26: Partial write data loss (3 files) | connection_pool.zig, dot.zig, zone_transfer.zig | CWE-400 / A05:2021 | connection_pool.zig:454, dot.zig:305, zone_transfer.zig:523 | [#161](https://gitlab.com/devnw/zig/dns/-/issues/161) (confidential) / GAP-0027 [#132] | 30d | **Resolved** |

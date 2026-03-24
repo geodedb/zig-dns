@@ -94,6 +94,9 @@ pub const PooledConnection = struct {
     stats: ConnectionStats,
     /// EDNS TCP Keepalive timeout (from server)
     keepalive_timeout_ms: ?u32,
+    /// Unique generation assigned by the pool, used to safely locate
+    /// this entry via ConnectionHandle after ArrayList mutations.
+    generation: u64 = 0,
 
     const Self = @This();
 
@@ -108,6 +111,7 @@ pub const PooledConnection = struct {
             .pending_queries = 0,
             .stats = .{},
             .keepalive_timeout_ms = null,
+            .generation = 0,
         };
     }
 
@@ -207,8 +211,28 @@ pub const ConnectionPool = struct {
     mutex: std.Thread.Mutex,
     /// Pool statistics
     stats: PoolStats,
+    /// Monotonically increasing generation counter.
+    /// Each PooledConnection gets a unique generation at creation time.
+    /// ConnectionHandle stores the generation so that release/markConnected
+    /// can locate the correct entry even after ArrayList reallocation or
+    /// swapRemove reordering.
+    next_generation: u64 = 0,
 
     const Self = @This();
+
+    /// Handle returned by acquire(). Contains a copy of the connection
+    /// data needed for I/O (fd, is_connected) plus a generation token
+    /// for safely locating the entry later. Because it is a value type
+    /// (not a pointer into the ArrayList), it is immune to ArrayList
+    /// reallocation and swapRemove reordering.
+    pub const ConnectionHandle = struct {
+        /// Socket file descriptor (copied at acquire time)
+        fd: std.posix.fd_t,
+        /// Whether the TCP handshake has completed (copied at acquire time)
+        is_connected: bool,
+        /// Unique generation of the PooledConnection (stable identifier)
+        generation: u64,
+    };
 
     pub const PoolStats = struct {
         /// Total connections created
@@ -247,8 +271,22 @@ pub const ConnectionPool = struct {
         self.connections.deinit(self.allocator);
     }
 
-    /// Get or create a connection to the server
-    pub fn acquire(self: *Self, server: ServerKey, timeout_ms: u32) !*PooledConnection {
+    /// Find a PooledConnection by its unique generation. Must be called
+    /// while the mutex is held. Returns null if the connection has been
+    /// removed (e.g. by cleanup).
+    fn findByGeneration(self: *Self, generation: u64) ?*PooledConnection {
+        for (self.connections.items) |*conn| {
+            if (conn.generation == generation) return conn;
+        }
+        return null;
+    }
+
+    /// Get or create a connection to the server.
+    /// Returns a ConnectionHandle (value type) instead of a pointer into
+    /// the ArrayList, preventing dangling-pointer bugs when concurrent
+    /// operations cause the backing array to reallocate or swapRemove to
+    /// reorder entries.
+    pub fn acquire(self: *Self, server: ServerKey, timeout_ms: u32) !ConnectionHandle {
         self.mutex.lock();
 
         const now = std.time.milliTimestamp();
@@ -261,8 +299,13 @@ pub const ConnectionPool = struct {
 
             conn.markActive(now);
             self.stats.connections_reused += 1;
+            const handle = ConnectionHandle{
+                .fd = conn.fd,
+                .is_connected = conn.is_connected,
+                .generation = conn.generation,
+            };
             self.mutex.unlock();
-            return conn;
+            return handle;
         }
 
         // Check if we can create a new connection
@@ -285,22 +328,58 @@ pub const ConnectionPool = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const conn = PooledConnection.init(fd, server, now);
+        // QC-NEW-02 TOCTOU fix: Re-check the connection limit now that
+        // we hold the lock again. Another thread may have created a
+        // connection for the same server while we were unlocked.
+        const recheck_count = self.countServerConnections(server);
+        if (recheck_count >= self.config.max_connections_per_server) {
+            // Limit exceeded -- close the fd we just created and try to
+            // reuse an existing connection that may have become available.
+            std.posix.close(fd);
+
+            for (self.connections.items) |*conn| {
+                if (!conn.server.eql(server)) continue;
+                if (!conn.isHealthy(self.config, now)) continue;
+                if (!conn.canPipeline(self.config)) continue;
+
+                conn.markActive(now);
+                self.stats.connections_reused += 1;
+                return ConnectionHandle{
+                    .fd = conn.fd,
+                    .is_connected = conn.is_connected,
+                    .generation = conn.generation,
+                };
+            }
+            return error.PoolExhausted;
+        }
+
+        const generation = self.next_generation;
+        self.next_generation += 1;
+
+        var conn = PooledConnection.init(fd, server, now);
+        conn.generation = generation;
         try self.connections.append(self.allocator, conn);
 
-        const ptr = &self.connections.items[self.connections.items.len - 1];
-        ptr.markActive(now);
+        // Access via findByGeneration (safe after append) to markActive
+        const pool_conn = self.findByGeneration(generation).?;
+        pool_conn.markActive(now);
         self.stats.connections_created += 1;
         self.stats.active_connections += 1;
 
-        return ptr;
+        return ConnectionHandle{
+            .fd = pool_conn.fd,
+            .is_connected = pool_conn.is_connected,
+            .generation = generation,
+        };
     }
 
-    /// Release a connection back to the pool
-    pub fn release(self: *Self, conn: *PooledConnection, success: bool, bytes_sent: u64, bytes_recv: u64) void {
+    /// Release a connection back to the pool.
+    /// Accepts a ConnectionHandle (value type) instead of a pointer.
+    pub fn release(self: *Self, handle: ConnectionHandle, success: bool, bytes_sent: u64, bytes_recv: u64) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        const conn = self.findByGeneration(handle.generation) orelse return;
         const now = std.time.milliTimestamp();
 
         if (success) {
@@ -315,6 +394,20 @@ pub const ConnectionPool = struct {
             self.stats.connections_errored += 1;
             self.stats.active_connections -|= 1;
         }
+    }
+
+    /// Mark a connection as having completed the TCP handshake.
+    /// Called by callers after a successful connectWithTimeout.
+    pub fn markConnected(self: *Self, handle: *ConnectionHandle) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.findByGeneration(handle.generation)) |conn| {
+            conn.is_connected = true;
+        }
+        // Also update the caller's handle so subsequent reads see the
+        // new value without re-acquiring the lock.
+        handle.is_connected = true;
     }
 
     /// Clean up idle/expired connections
@@ -406,8 +499,8 @@ pub const PipelinedBatch = struct {
     allocator: std.mem.Allocator,
     /// Queries in the batch
     queries: std.ArrayList(Query),
-    /// Connection to use
-    conn: ?*PooledConnection,
+    /// Connection handle to use (value type, not a pointer into the pool)
+    conn: ?ConnectionPool.ConnectionHandle,
 
     pub const Query = struct {
         /// Query ID (from DNS header)
@@ -553,26 +646,26 @@ pub const PooledTcpTransport = struct {
 
     /// Send a single query
     pub fn query(self: *Self, wire_req: []const u8, timeout_ms: u32) ![]u8 {
-        const conn = try self.pool.acquire(self.server_key, timeout_ms);
-        errdefer self.pool.release(conn, false, 0, 0);
+        var handle = try self.pool.acquire(self.server_key, timeout_ms);
+        errdefer self.pool.release(handle, false, 0, 0);
 
         // Only connect if the socket hasn't completed its TCP handshake yet.
         // Reused pooled connections are already connected.
-        if (!conn.is_connected) {
-            try io.connectWithTimeout(conn.fd, self.address, timeout_ms);
-            conn.is_connected = true;
+        if (!handle.is_connected) {
+            try io.connectWithTimeout(handle.fd, self.address, timeout_ms);
+            self.pool.markConnected(&handle);
         }
 
         // Send query with TCP length prefix
         var length_prefix: [2]u8 = undefined;
         std.mem.writeInt(u16, &length_prefix, @intCast(wire_req.len), .big);
 
-        try io.writeAllWithTimeout(conn.fd, &length_prefix, timeout_ms);
-        try io.writeAllWithTimeout(conn.fd, wire_req, timeout_ms);
+        try io.writeAllWithTimeout(handle.fd, &length_prefix, timeout_ms);
+        try io.writeAllWithTimeout(handle.fd, wire_req, timeout_ms);
 
         // Read response length
         var resp_len_buf: [2]u8 = undefined;
-        try io.readExactWithTimeout(conn.fd, &resp_len_buf, timeout_ms);
+        try io.readExactWithTimeout(handle.fd, &resp_len_buf, timeout_ms);
         const resp_len = std.mem.readInt(u16, &resp_len_buf, .big);
         if (resp_len == 0 or resp_len > max_message_size) {
             return error.MessageTooLarge;
@@ -584,24 +677,24 @@ pub const PooledTcpTransport = struct {
 
         var total_read: usize = 0;
         while (total_read < resp_len) {
-            const n = try io.readWithTimeout(conn.fd, response[total_read..], timeout_ms);
+            const n = try io.readWithTimeout(handle.fd, response[total_read..], timeout_ms);
             if (n == 0) return error.ConnectionClosed;
             total_read += n;
         }
 
-        self.pool.release(conn, true, wire_req.len + 2, resp_len + 2);
+        self.pool.release(handle, true, wire_req.len + 2, resp_len + 2);
         return response;
     }
 
     /// Send multiple queries with pipelining
     pub fn queryBatch(self: *Self, queries: []const []const u8, timeout_ms: u32) ![]?[]u8 {
-        const conn = try self.pool.acquire(self.server_key, timeout_ms);
-        errdefer self.pool.release(conn, false, 0, 0);
+        var handle = try self.pool.acquire(self.server_key, timeout_ms);
+        errdefer self.pool.release(handle, false, 0, 0);
 
         // Only connect if the socket hasn't completed its TCP handshake yet.
-        if (!conn.is_connected) {
-            try io.connectWithTimeout(conn.fd, self.address, timeout_ms);
-            conn.is_connected = true;
+        if (!handle.is_connected) {
+            try io.connectWithTimeout(handle.fd, self.address, timeout_ms);
+            self.pool.markConnected(&handle);
         }
 
         var total_sent: u64 = 0;
@@ -612,8 +705,8 @@ pub const PooledTcpTransport = struct {
             var length_prefix: [2]u8 = undefined;
             std.mem.writeInt(u16, &length_prefix, @intCast(q.len), .big);
 
-            try io.writeAllWithTimeout(conn.fd, &length_prefix, timeout_ms);
-            try io.writeAllWithTimeout(conn.fd, q, timeout_ms);
+            try io.writeAllWithTimeout(handle.fd, &length_prefix, timeout_ms);
+            try io.writeAllWithTimeout(handle.fd, q, timeout_ms);
             total_sent += q.len + 2;
         }
 
@@ -630,7 +723,7 @@ pub const PooledTcpTransport = struct {
         for (responses) |*resp| {
             // Read response length
             var resp_len_buf: [2]u8 = undefined;
-            try io.readExactWithTimeout(conn.fd, &resp_len_buf, timeout_ms);
+            try io.readExactWithTimeout(handle.fd, &resp_len_buf, timeout_ms);
             const resp_len = std.mem.readInt(u16, &resp_len_buf, .big);
             if (resp_len == 0 or resp_len > max_message_size) {
                 return error.MessageTooLarge;
@@ -642,7 +735,7 @@ pub const PooledTcpTransport = struct {
 
             var total_read: usize = 0;
             while (total_read < resp_len) {
-                const n = try io.readWithTimeout(conn.fd, response[total_read..], timeout_ms);
+                const n = try io.readWithTimeout(handle.fd, response[total_read..], timeout_ms);
                 if (n == 0) return error.ConnectionClosed;
                 total_read += n;
             }
@@ -651,7 +744,7 @@ pub const PooledTcpTransport = struct {
             total_recv += resp_len + 2;
         }
 
-        self.pool.release(conn, true, total_sent, total_recv);
+        self.pool.release(handle, true, total_sent, total_recv);
         return responses;
     }
 };

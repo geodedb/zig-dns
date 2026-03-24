@@ -247,23 +247,43 @@ pub const ResourceRecord = struct {
         return try strings.toOwnedSlice(allocator);
     }
 
-    /// Format IPv4 address as string
+    /// Format IPv4 address as string (heap-allocated).
+    /// Prefer `formatABuf` when a stack buffer is available.
     pub fn formatA(self: Self, allocator: std.mem.Allocator) ![]u8 {
-        const addr = try self.parseA();
-        return std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}", .{
-            addr[0], addr[1], addr[2], addr[3],
-        });
+        var buf: [15]u8 = undefined; // max "255.255.255.255"
+        const result = try self.formatABuf(&buf);
+        return allocator.dupe(u8, result);
     }
 
-    /// Format IPv6 address as string
+    /// Format IPv4 address into a caller-provided buffer.
+    /// Returns a slice of `buf` containing the dotted-decimal string.
+    /// Buffer must be at least 15 bytes (max IPv4 string "255.255.255.255").
+    pub fn formatABuf(self: Self, buf: []u8) ![]const u8 {
+        const addr = try self.parseA();
+        return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{
+            addr[0], addr[1], addr[2], addr[3],
+        }) catch return error.NameTooLong;
+    }
+
+    /// Format IPv6 address as string (heap-allocated).
+    /// Prefer `formatAAAABuf` when a stack buffer is available.
     pub fn formatAAAA(self: Self, allocator: std.mem.Allocator) ![]u8 {
+        var buf: [39]u8 = undefined; // max "xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx:xxxx"
+        const result = try self.formatAAAABuf(&buf);
+        return allocator.dupe(u8, result);
+    }
+
+    /// Format IPv6 address into a caller-provided buffer.
+    /// Returns a slice of `buf` containing the colon-hex string.
+    /// Buffer must be at least 39 bytes (max IPv6 string length).
+    pub fn formatAAAABuf(self: Self, buf: []u8) ![]const u8 {
         const addr = try self.parseAAAA();
-        return std.fmt.allocPrint(allocator, "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}", .{
+        return std.fmt.bufPrint(buf, "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}", .{
             addr[0],  addr[1],  addr[2],  addr[3],
             addr[4],  addr[5],  addr[6],  addr[7],
             addr[8],  addr[9],  addr[10], addr[11],
             addr[12], addr[13], addr[14], addr[15],
-        });
+        }) catch return error.NameTooLong;
     }
 
     // ============================================================
@@ -1148,6 +1168,60 @@ test "ResourceRecord.formatA" {
     defer allocator.free(formatted);
 
     try std.testing.expectEqualStrings("93.184.216.34", formatted);
+}
+
+test "ResourceRecord.formatABuf" {
+    const data = [_]u8{
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        3, 'c', 'o', 'm', 0,
+        0x00, 0x01, // A
+        0x00, 0x01, // IN
+        0x00, 0x00, 0x01, 0x2C, // TTL
+        0x00, 0x04, // RDLENGTH
+        93, 184, 216, 34, // RDATA
+    };
+
+    const rr = try ResourceRecord.parse(&data, 0);
+
+    // Stack buffer variant avoids heap allocation
+    var buf: [15]u8 = undefined;
+    const result = try rr.formatABuf(&buf);
+    try std.testing.expectEqualStrings("93.184.216.34", result);
+
+    // Result is a slice of the buffer, not heap memory
+    try std.testing.expect(@intFromPtr(result.ptr) >= @intFromPtr(&buf));
+    try std.testing.expect(@intFromPtr(result.ptr) < @intFromPtr(&buf) + buf.len);
+}
+
+test "ResourceRecord.formatAAAABuf" {
+    const data = [_]u8{
+        // Name: ipv6.example.com
+        4, 'i', 'p', 'v', '6',
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        3, 'c', 'o', 'm', 0,
+        // TYPE: AAAA (28)
+        0x00, 0x1C,
+        // CLASS: IN (1)
+        0x00, 0x01,
+        // TTL: 600
+        0x00, 0x00, 0x02, 0x58,
+        // RDLENGTH: 16
+        0x00, 0x10,
+        // RDATA: 2606:2800:0220:0001:0248:1893:25c8:1946
+        0x26, 0x06, 0x28, 0x00, 0x02, 0x20, 0x00, 0x01,
+        0x02, 0x48, 0x18, 0x93, 0x25, 0xc8, 0x19, 0x46,
+    };
+
+    const rr = try ResourceRecord.parse(&data, 0);
+
+    // Stack buffer variant avoids heap allocation
+    var buf: [39]u8 = undefined;
+    const result = try rr.formatAAAABuf(&buf);
+    try std.testing.expectEqualStrings("2606:2800:0220:0001:0248:1893:25c8:1946", result);
+
+    // Result is a slice of the buffer, not heap memory
+    try std.testing.expect(@intFromPtr(result.ptr) >= @intFromPtr(&buf));
+    try std.testing.expect(@intFromPtr(result.ptr) < @intFromPtr(&buf) + buf.len);
 }
 
 test "ResourceRecord.parse AAAA record" {

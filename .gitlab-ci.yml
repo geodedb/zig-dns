@@ -22,6 +22,11 @@ include:
 variables:
   ZIG_VERSION: "0.15.2"
 
+cache:
+  key: "${CI_COMMIT_REF_SLUG}"
+  paths:
+    - .zig-cache/
+
 stages:
   - lint
   - build

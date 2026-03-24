@@ -231,11 +231,15 @@ pub const Client = struct {
 
             if (rr.rtype == qtype) {
                 if (qtype == .a) {
-                    const formatted = try rr.formatA(self.allocator);
-                    try results.append(self.allocator, formatted);
+                    // Use stack buffer to avoid allocPrint overhead (PF-NEW-05)
+                    var a_buf: [15]u8 = undefined;
+                    const formatted = try rr.formatABuf(&a_buf);
+                    try results.append(self.allocator, try self.allocator.dupe(u8, formatted));
                 } else if (qtype == .aaaa) {
-                    const formatted = try rr.formatAAAA(self.allocator);
-                    try results.append(self.allocator, formatted);
+                    // Use stack buffer to avoid allocPrint overhead (PF-NEW-06)
+                    var aaaa_buf: [39]u8 = undefined;
+                    const formatted = try rr.formatAAAABuf(&aaaa_buf);
+                    try results.append(self.allocator, try self.allocator.dupe(u8, formatted));
                 }
             }
         }
@@ -285,7 +289,10 @@ pub const Client = struct {
         while (try ans_iter.next()) |rr| {
             if (rr.rtype == .mx) {
                 const mx_data = try rr.parseMX(response.data);
-                const exchange = try mx_data.exchange.toString(self.allocator, response.data);
+                // Use stack buffer to avoid ArrayList overhead (PF-NEW-05)
+                var mx_buf: [256]u8 = undefined;
+                const exchange_str = try mx_data.exchange.toStringBuf(&mx_buf, response.data);
+                const exchange = try self.allocator.dupe(u8, exchange_str);
                 try results.append(self.allocator, .{
                     .preference = mx_data.preference,
                     .exchange = exchange,

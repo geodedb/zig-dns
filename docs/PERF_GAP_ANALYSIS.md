@@ -6,8 +6,8 @@ Last updated: 2026-03-24
 
 | Status | Count | Items |
 |---|---|---|
-| **Resolved** | 21 | PF-01, PF-02b, PF-04, PF-06, PF-07, PF-08, PF-09, PF-11, PF-12, PF-15, PF-17, PF-19, PF-21, PF-22, PF-23, PF-24, PF-25, PF-26, PF-27, PF-28, PF-31 |
-| **Open/Deferred** | 11 | PF-02, PF-03, PF-05, PF-10, PF-13, PF-14, PF-16, PF-18, PF-20, PF-29, PF-30 |
+| **Resolved** | 24 | PF-01, PF-02b, PF-04, PF-06, PF-07, PF-08, PF-09, PF-11, PF-12, PF-15, PF-17, PF-19, PF-20, PF-21, PF-22, PF-23, PF-24, PF-25, PF-26, PF-27, PF-28, PF-29, PF-30, PF-31 |
+| **Open/Deferred** | 8 | PF-02, PF-03, PF-05, PF-10, PF-13, PF-14, PF-16, PF-18 |
 | **Total** | **32** |
 
 ### Top 5 Risks (by PerfScore)
@@ -39,6 +39,9 @@ Last updated: 2026-03-24
 17. **PF-26 (PerfScore 4):** **Resolved.** LRU `getWithHandle` + `removeByHandle` avoids re-hashing key on expired entry removal.
 18. **PF-31 (PerfScore 40):** **Resolved.** `resolveNsAddress` depth guard with max depth 8; test verifies depth budget enforcement.
 19. **PF-19 (PerfScore 36):** **Resolved.** `queryWithRetry` returns `QueryResult` with pre-parsed `Message`; `responseMatchesQuery` accepts `Message` instead of raw bytes; eliminates redundant `Message.parse` in `resolveIterative`.
+20. **PF-29 (PerfScore 24):** **Resolved.** `cacheResponse` uses `toStringBuf` with 256-byte stack buffer for both question name and per-record owner name; zero heap allocation.
+21. **PF-30 (PerfScore 20):** **Resolved.** `client.zig resolve()` uses `toStringBuf` with 256-byte stack buffer for owner name in CNAME chain check; zero heap allocation.
+22. **PF-20 (PerfScore 8):** **Resolved.** `resolveNsAddress` uses `bufPrint` with `[15]u8` stack buffer for IPv4 string formatting; zero heap allocation.
 
 ### Open Items
 
@@ -60,13 +63,13 @@ Remaining items by priority:
 - **PF-19:** ~~Double Message.parse in recursive~~ **Resolved** -- queryWithRetry returns QueryResult with pre-parsed Message
 - **PF-22:** CachePrefetcher.makeKey double heap allocation -- apply PF-15 pattern
 - **PF-25:** ~~isUnderNxdomainZone allocates keys in while loop~~ **Resolved** -- stack buffer with makeNxdomainZoneKeyBuf
-- **PF-29:** cacheResponse getName+free per answer record -- depends on PF-24
-- **PF-30:** client.zig resolve getName per answer -- depends on PF-24
+- **PF-29:** ~~cacheResponse getName+free per answer record~~ **Resolved** -- toStringBuf with stack buffer
+- **PF-30:** ~~client.zig resolve getName per answer~~ **Resolved** -- toStringBuf with stack buffer
 
 **P3 (Backlog):**
 - **PF-16:** PRNG per call -- low impact optimization
 - **PF-18:** No benchmarks in CI -- sustained infrastructure effort
-- **PF-20:** allocPrint for IPv4 in resolveNsAddress -- subsumed by PF-10
+- **PF-20:** ~~allocPrint for IPv4 in resolveNsAddress~~ **Resolved** -- bufPrint with [15]u8 stack buffer
 - **PF-23:** getMinimizedQname iterates labels twice -- minor, QNAME min off by default
 - **PF-26:** ~~Expired entry removal re-hashes key~~ **Resolved** -- LRU getWithHandle + removeByHandle
 - **PF-27:** ~~No inline hints on hot-path functions~~ **Resolved** -- inline on isExpired, remainingTtl, verifyCase0x20
@@ -99,13 +102,13 @@ Remaining items by priority:
 | 19 | P2 | 30 | PF-25: isUnderNxdomainZone allocates keys in while loop | `src/resolver/dns_cache.zig:314-354` | Stack buffer shared across loop iterations via makeNxdomainZoneKeyBuf | Zero heap allocs per check | [#158](https://gitlab.com/devnw/zig/dns/-/issues/158) | Stack buffer with bufPrint; heap fallback for oversized names | Core maintainer | Quarter | **Resolved** |
 | 20 | P2 | 24 | PF-06: 65KB stack buffer per UDP receive | `src/stub.zig:238`, `src/recursive.zig:509`, `src/transports/udp.zig:67` | Buffer reduced to 4096 (EDNS default, RFC 6891) | 4096 bytes/call, ~61KB saved | [#99](https://gitlab.com/devnw/zig/dns/-/issues/99) | Reduced UDP receive buffer from 65535 to 4096 in all 3 locations | Core maintainer | Quarter | Resolved |
 | 21 | P2 | 24 | PF-10: allocPrint for IP formatting (17 sites) | 12 files across src/ | allocPrint for IPv4/IPv6 formatting | ~100-200ns per format | [#108](https://gitlab.com/devnw/zig/dns/-/issues/108) | Stack buffer + bufPrint (max 45 bytes) | Core maintainer | Quarter | Deferred |
-| 22 | P2 | 24 | PF-29: cacheResponse getName+free per answer record | `src/recursive.zig:646-657` | getName -> toString -> ArrayList per answer record; alloc+free per record | ~200-500ns per answer record | [#167](https://gitlab.com/devnw/zig/dns/-/issues/167) | Use Name.toStringBuf (depends on PF-24) | Core maintainer | Quarter | Open |
-| 23 | P2 | 20 | PF-30: client.zig resolve() getName per answer for CNAME check | `src/client.zig:213-215` | getName -> toString -> ArrayList per answer record | ~200-400ns per answer record | [#168](https://gitlab.com/devnw/zig/dns/-/issues/168) | Use Name.toStringBuf (depends on PF-24) | Core maintainer | Quarter | Open |
+| 22 | P2 | 24 | PF-29: cacheResponse getName+free per answer record | `src/recursive.zig:696-706` | Uses toStringBuf with 256-byte stack buffer; zero heap allocation per record | ~200-500ns saved per answer record | [#167](https://gitlab.com/devnw/zig/dns/-/issues/167) | Use Name.toStringBuf (depends on PF-24) | Core maintainer | Quarter | **Resolved** |
+| 23 | P2 | 20 | PF-30: client.zig resolve() getName per answer for CNAME check | `src/client.zig:213-217` | Uses toStringBuf with 256-byte stack buffer; zero heap allocation per answer | ~200-400ns saved per answer record | [#168](https://gitlab.com/devnw/zig/dns/-/issues/168) | Use Name.toStringBuf (depends on PF-24) | Core maintainer | Quarter | **Resolved** |
 | 24 | P3 | 16 | PF-15: Double allocation in DnsCache.makeKey | `src/resolver/dns_cache.zig:330-343` | Stack buffer `lower_buf: [max_name_length]u8` replaces heap allocation | Zero extra allocations | [#120](https://gitlab.com/devnw/zig/dns/-/issues/120) | Uses stack buffer for lowercase (max 255 bytes) | Core maintainer | Backlog | Resolved |
 | 25 | P3 | 16 | PF-16: New PRNG per getSecureRandomId call | `src/resolver/stub.zig` (deleted -- see QM-08) | getrandom() syscall + PRNG init per call | ~2us vs ~10ns | [#122](https://gitlab.com/devnw/zig/dns/-/issues/122) | Persistent PRNG on resolver struct; canonical stub is `src/stub.zig` | Core maintainer | Backlog | Deferred |
 | 26 | P3 | 12 | PF-17: Global thread pool uses page_allocator | `src/parallel.zig:77` | GPA backed by page_allocator wraps pool allocator; small allocs sub-allocated from pages | Fewer mmap syscalls | [#124](https://gitlab.com/devnw/zig/dns/-/issues/124) | Wrap with GPA | Core maintainer | Backlog | Resolved |
 | 27 | P3 | 12 | PF-18: No benchmarks or perf regression CI | N/A | No bench/ directory, no benchmark CI stage | Cannot detect regressions | [#125](https://gitlab.com/devnw/zig/dns/-/issues/125) | Add bench/ suite + CI stage | Core maintainer | Backlog | Deferred |
-| 28 | P3 | 8 | PF-20: allocPrint for IPv4 in resolveNsAddress | `src/recursive.zig:630-637` | allocPrint for 15-byte IPv4 string; stack buffer suffices | ~100-200ns saved | [#142](https://gitlab.com/devnw/zig/dns/-/issues/142) | bufPrint with [15]u8 stack buffer | Core maintainer | Backlog | Open |
+| 28 | P3 | 8 | PF-20: allocPrint for IPv4 in resolveNsAddress | `src/recursive.zig:674-681` | bufPrint with [15]u8 stack buffer; zero heap allocation | ~100-200ns saved | [#142](https://gitlab.com/devnw/zig/dns/-/issues/142) | bufPrint with [15]u8 stack buffer | Core maintainer | Backlog | **Resolved** |
 | 29 | P3 | 8 | PF-28: ArrayList byte-by-byte append without capacity pre-alloc | `src/name.zig:568`, `src/resolver/convenience.zig:301` | extractQname and reverseIPv6Name start with capacity 0 | ~100-300ns extra per call | [#164](https://gitlab.com/devnw/zig/dns/-/issues/164) | Added ensureTotalCapacity(253) in extractQname, ensureTotalCapacity(72) in reverseIPv6Name | Core maintainer | Backlog | Resolved |
 | 30 | P3 | 4 | PF-23: getMinimizedQname iterates labels twice | `src/recursive.zig:397-436` | Single-pass: labels collected once, depth checked against count | ~50-100ns saved | [#153](https://gitlab.com/devnw/zig/dns/-/issues/153) | Single-pass label collection | Core maintainer | Backlog | Resolved |
 | 31 | P3 | 4 | PF-26: Expired entry removal re-hashes key | `src/resolver/dns_cache.zig:150-163`, `src/util/lru.zig:63-101` | getWithHandle returns EntryHandle; removeByHandle uses map.removeByPtr | Zero re-hash on expiry removal | [#159](https://gitlab.com/devnw/zig/dns/-/issues/159) | LRU getWithHandle + removeByHandle using HashMap removeByPtr | Core maintainer | Backlog | **Resolved** |
@@ -133,10 +136,10 @@ Remaining items by priority:
 | PF-11 | P2 | 36 | last_query_name leak | [#110](https://gitlab.com/devnw/zig/dns/-/issues/110) | **Resolved** |
 | PF-10 | P2 | 24 | allocPrint IP formatting | [#108](https://gitlab.com/devnw/zig/dns/-/issues/108) | Deferred |
 | PF-06 | P2 | 24 | 65KB stack buffers | [#99](https://gitlab.com/devnw/zig/dns/-/issues/99) | **Resolved** |
-| PF-29 | P2 | 24 | cacheResponse getName per record | [#167](https://gitlab.com/devnw/zig/dns/-/issues/167) | Open |
-| PF-30 | P2 | 20 | client getName per answer | [#168](https://gitlab.com/devnw/zig/dns/-/issues/168) | Open |
+| PF-29 | P2 | 24 | cacheResponse getName per record | [#167](https://gitlab.com/devnw/zig/dns/-/issues/167) | **Resolved** |
+| PF-30 | P2 | 20 | client getName per answer | [#168](https://gitlab.com/devnw/zig/dns/-/issues/168) | **Resolved** |
 | PF-16 | P3 | 16 | PRNG per call | [#122](https://gitlab.com/devnw/zig/dns/-/issues/122) | Deferred |
-| PF-20 | P3 | 8 | allocPrint IPv4 in resolveNsAddress | [#142](https://gitlab.com/devnw/zig/dns/-/issues/142) | Open |
+| PF-20 | P3 | 8 | allocPrint IPv4 in resolveNsAddress | [#142](https://gitlab.com/devnw/zig/dns/-/issues/142) | **Resolved** |
 | PF-28 | P3 | 8 | ArrayList byte-by-byte append | [#164](https://gitlab.com/devnw/zig/dns/-/issues/164) | **Resolved** |
 | PF-23 | P3 | 4 | getMinimizedQname double iter | [#153](https://gitlab.com/devnw/zig/dns/-/issues/153) | **Resolved** |
 | PF-27 | P3 | 4 | No inline hints | [#162](https://gitlab.com/devnw/zig/dns/-/issues/162) | **Resolved** |
@@ -194,19 +197,18 @@ Remaining items by priority:
 | PF-26 | 4 | LRU getWithHandle + removeByHandle avoids re-hash on expiry | **Resolved** |
 | PF-31 | 40 | Depth guard + max_depth config in resolveNsAddress | **Resolved** |
 | PF-19 | 36 | QueryResult struct + responseMatchesQuery accepts parsed Message | **Resolved** |
+| PF-29 | 24 | Use toStringBuf in cacheResponse (stack buffer, zero alloc) | **Resolved** |
+| PF-30 | 20 | Use toStringBuf in client resolve (stack buffer, zero alloc) | **Resolved** |
+| PF-20 | 8 | bufPrint with [15]u8 for IPv4 in resolveNsAddress | **Resolved** |
 
 ### Quick Wins (< 1 day)
 
-| ID | PerfScore | Fix | Effort |
-|---|---|---|---|
-| PF-20 | 8 | bufPrint with [15]u8 for IPv4 in resolveNsAddress | ~30 min |
+_No remaining quick wins._
 
 ### Medium (1-5 days)
 
 | ID | PerfScore | Fix | Effort |
 |---|---|---|---|
-| PF-29 | 24 | Use toStringBuf in cacheResponse (after PF-24) | ~1 day |
-| PF-30 | 20 | Use toStringBuf in client resolve (after PF-24) | ~1 day |
 | PF-10 | 24 | Replace allocPrint with bufPrint across 17 IP formatting sites | ~2 days |
 
 ### Strategic (> 5 days)
@@ -229,8 +231,8 @@ PF-01 (Name.eql fix -- RESOLVED)
   +-- PF-09 (responseMatchesQuery -- RESOLVED, used PF-01's allocation-free comparison)
 
 PF-24 (Name.toStringBuf -- RESOLVED)
-  +-- PF-29 (cacheResponse -- use stack buffer instead of getName)
-  +-- PF-30 (client getName -- use stack buffer instead of getName)
+  +-- PF-29 (cacheResponse -- RESOLVED, uses toStringBuf with stack buffer)
+  +-- PF-30 (client getName -- RESOLVED, uses toStringBuf with stack buffer)
 
 PF-02 (Cache migration to DnsCache)
   +-- PF-02b (Cache.get non-contiguous slice -- RESOLVED, compact-swap fix)
@@ -239,10 +241,10 @@ PF-02 (Cache migration to DnsCache)
       +-- PF-13 (concurrent queries -- requires thread-safe cache)
 
 PF-10 (allocPrint IP formatting)
-  +-- PF-20 (resolveNsAddress IPv4 -- subsumable under PF-10)
+  +-- PF-20 (resolveNsAddress IPv4 -- RESOLVED independently via bufPrint)
 
 PF-15 (DnsCache.makeKey stack buffer -- RESOLVED)
-  +-- PF-22 (CachePrefetcher.makeKey -- same pattern, not yet applied)
+  +-- PF-22 (CachePrefetcher.makeKey -- RESOLVED, same pattern applied)
 
 PF-18 (Benchmarks)
   +-- All findings -- benchmarks needed to validate each fix

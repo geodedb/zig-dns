@@ -107,6 +107,16 @@ const Referral = struct {
         name: []const u8,
         address: ?ServerAddress,
     };
+
+    /// Free all heap-allocated memory owned by this referral.
+    /// Frees each server name string, the servers slice, and the zone string.
+    fn deinit(self: Referral, allocator: std.mem.Allocator) void {
+        for (self.servers) |s| {
+            allocator.free(s.name);
+        }
+        allocator.free(self.servers);
+        allocator.free(self.zone);
+    }
 };
 
 /// Recursive Resolver
@@ -221,9 +231,10 @@ pub const RecursiveResolver = struct {
             // Verify 0x20 case randomization if enabled
             if (self.config.case_randomization) {
                 if (state.last_query_name) |expected_qname| {
-                    const response_qname = name_mod.extractQname(self.allocator, response) catch null;
+                    // Use stack buffer to avoid heap allocation on every 0x20 query (PF-NEW-01)
+                    var qname_buf: [name_mod.max_name_length]u8 = undefined;
+                    const response_qname = name_mod.extractQnameBuf(&qname_buf, response) catch null;
                     if (response_qname) |rq| {
-                        defer self.allocator.free(rq);
                         if (!name_mod.verifyCase0x20(expected_qname, rq)) {
                             // Potential spoofing attempt - retry with different server
                             continue :outer;
@@ -313,6 +324,10 @@ pub const RecursiveResolver = struct {
                     if (msg.header.nscount > 0) {
                         const referral = try self.extractReferral(response, msg);
                         if (referral) |ref| {
+                            // Free referral-owned memory (zone, server names, servers slice)
+                            // after we have extracted what we need (PF-NEW-02).
+                            defer ref.deinit(self.allocator);
+
                             // Collect addresses for referred NS servers
                             var new_servers: std.ArrayList(ServerAddress) = .{};
                             errdefer new_servers.deinit(self.allocator);
@@ -547,8 +562,13 @@ pub const RecursiveResolver = struct {
     fn extractReferral(self: *Self, response: []const u8, msg: Message) !?Referral {
         var ns_names: std.ArrayList([]const u8) = .{};
         defer ns_names.deinit(self.allocator);
+        // On error, free each ns_name string (on success they are transferred
+        // into the Referral.servers slice and freed by Referral.deinit).
+        errdefer for (ns_names.items) |ns_str| self.allocator.free(ns_str);
 
         var zone_name: ?[]const u8 = null;
+        // Free zone_name on error paths to prevent leaks (PF-NEW-02).
+        errdefer if (zone_name) |zn| self.allocator.free(zn);
 
         // Get NS records from authority section
         var auth_iter = msg.authority();
@@ -624,7 +644,10 @@ pub const RecursiveResolver = struct {
         }
 
         return Referral{
-            .zone = zone_name orelse ".",
+            // zone_name is always set when ns_names is non-empty (the early
+            // return at line 581 guards this), but dupe a fallback for safety
+            // so that Referral.deinit can unconditionally free .zone (PF-NEW-02).
+            .zone = zone_name orelse try self.allocator.dupe(u8, "."),
             .servers = servers,
         };
     }
@@ -1315,4 +1338,49 @@ test "PF-19: QueryResult struct carries both response and parsed Message" {
     try std.testing.expectEqual(@as(usize, 2), info.@"struct".fields.len);
     try std.testing.expectEqualStrings("response", info.@"struct".fields[0].name);
     try std.testing.expectEqualStrings("msg", info.@"struct".fields[1].name);
+}
+
+test "PF-NEW-02: Referral.deinit frees zone, server names, and servers slice" {
+    // Verifies that Referral.deinit properly frees all heap-allocated memory.
+    // Before the fix, the caller of extractReferral never freed ref.zone,
+    // ref.servers[i].name, or ref.servers, causing memory leaks on every
+    // referral during recursive resolution.
+    // Using std.testing.allocator ensures any leak is detected as a test failure.
+    const allocator = std.testing.allocator;
+
+    // Simulate what extractReferral produces: heap-allocated zone, names, and slice
+    const zone = try allocator.dupe(u8, "example.com.");
+    const name1 = try allocator.dupe(u8, "ns1.example.com.");
+    const name2 = try allocator.dupe(u8, "ns2.example.com.");
+    var servers = try allocator.alloc(Referral.ServerInfo, 2);
+    servers[0] = .{ .name = name1, .address = null };
+    servers[1] = .{ .name = name2, .address = null };
+
+    const ref = Referral{
+        .zone = zone,
+        .servers = servers,
+    };
+
+    // deinit must free zone, both server names, and the servers slice.
+    // If any allocation is missed, the testing allocator will report a leak.
+    ref.deinit(allocator);
+}
+
+test "PF-NEW-02: Referral.deinit with single server and address" {
+    // Verifies deinit works when servers have glue addresses (value types,
+    // no extra freeing needed for addresses).
+    const allocator = std.testing.allocator;
+
+    const zone = try allocator.dupe(u8, "com.");
+    const name1 = try allocator.dupe(u8, "a.gtld-servers.net.");
+    var servers = try allocator.alloc(Referral.ServerInfo, 1);
+    const addr = ServerAddress.fromIpv4("192.0.2.1", 53) catch unreachable;
+    servers[0] = .{ .name = name1, .address = addr };
+
+    const ref = Referral{
+        .zone = zone,
+        .servers = servers,
+    };
+
+    ref.deinit(allocator);
 }
