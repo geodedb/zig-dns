@@ -1,6 +1,6 @@
 # Gap Analysis -- Resolved
 
-Last updated: 2026-03-24
+Last updated: 2026-03-24 (post-commit 8fef334)
 
 Items below were identified in prior gap analyses and verified as resolved. They are listed here for audit trail purposes.
 
@@ -575,6 +575,24 @@ The following 15 items were closed by commit `6d42d51` ("fix: close 15 security,
 - **Category:** Quality / Documentation (Low)
 - **Resolution:** `lib.zig` doc comment updated from `//! - Zero external dependencies` to `//! - Minimal dependencies (optional spice for parallelism)`.
 - **Evidence:** `src/lib.zig:16` -- corrected doc comment
+- **Resolved date:** 2026-03-24
+
+---
+
+## Resolved in Commit 8fef334 (2026-03-24)
+
+The following 2 security items were closed by commit `8fef334` ("fix: close 4 additional security and performance gaps").
+
+### SEC-NEW-02: OOB read in extractSig0 -- rdlength not validated before slice [RESOLVED]
+- **Category:** Security (High)
+- **Resolution:** Bounds check added before `message[offset .. offset + rdlength]` in extractSig0. Identical pattern to SEC-NEW-01 fix. Test added for truncated SIG(0) record triggering `error.InvalidMessage`.
+- **Evidence:** `src/security/sig0.zig` -- bounds check before rdlength slice; commit 8fef334
+- **Resolved date:** 2026-03-24
+
+### SEC-NEW-05: @intCast(u16) on options.len without bounds check [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** Bounds validation added before `@intCast(u16)` in EDNS encode and buildOption paths. Oversized options now return an error instead of panicking or truncating.
+- **Evidence:** `src/edns.zig` -- bounds validation before u16 cast in encode and buildOption; commit 8fef334
 - **Resolved date:** 2026-03-24
 
 ---
