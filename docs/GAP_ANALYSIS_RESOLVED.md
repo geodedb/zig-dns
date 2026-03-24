@@ -420,4 +420,66 @@ The following items were evaluated and intentionally deferred with documented ra
 
 ---
 
+## Verified Resolved -- GitLab Issues (2026-03-24 audit)
+
+The following GitLab issues were verified as resolved during the 2026-03-24 full audit. These were not previously tracked as GAP items but are recorded here for completeness.
+
+### Issue #29: Max name length enforcement [RESOLVED]
+- **Issue:** [#29](https://gitlab.com/devnw/zig/dns/-/issues/29)
+- **Category:** Security
+- **Resolution:** DNS name length validation enforces 253-character maximum per RFC 1035
+- **Evidence:** `src/name.zig` -- length checks in name parsing
+- **Resolved date:** verified 2026-03-24
+
+### Issue #36: Compression pointer loop detection [RESOLVED]
+- **Issue:** [#36](https://gitlab.com/devnw/zig/dns/-/issues/36)
+- **Category:** Security
+- **Resolution:** Compression hop limit (`max_compression_hops = 16`) added to `decode()`, `toStringBuf()`, and `eql()`. Note: `toString()`, `labelCount()`, and `parent()` still lack this protection (tracked as GAP-0037).
+- **Evidence:** `src/name.zig:22` -- `max_compression_hops`; `src/name.zig:83,291,379,395` -- hop checks
+- **Resolved date:** verified 2026-03-24
+
+### Issue #37: @panic in channel removed [RESOLVED]
+- **Issue:** [#37](https://gitlab.com/devnw/zig/dns/-/issues/37)
+- **Category:** Bug
+- **Resolution:** `@panic` calls replaced with proper error returns in channel/resolver code
+- **Evidence:** Channel implementation uses error unions instead of panicking
+- **Resolved date:** verified 2026-03-24
+
+### Issue #45: Stub resolver response memory leak [RESOLVED]
+- **Issue:** [#45](https://gitlab.com/devnw/zig/dns/-/issues/45)
+- **Category:** Bug
+- **Resolution:** Response data freed after DNS resolution; commit `976fedf` ("fix: free response.data after DNS resolution (memory leak + use-after-free)")
+- **Evidence:** `src/stub.zig` -- proper `defer` / free of response data
+- **Resolved date:** verified 2026-03-24
+
+### Issue #50: Cache poisoning bailiwick check [RESOLVED]
+- **Issue:** [#50](https://gitlab.com/devnw/zig/dns/-/issues/50)
+- **Category:** Security
+- **Resolution:** Bailiwick validation via `isSubdomainOf()` prevents out-of-bailiwick cache injection (also covers SEC-C27)
+- **Evidence:** `src/recursive.zig` -- `isSubdomainOf()` check on glue records and authority section
+- **Resolved date:** verified 2026-03-24
+
+### Issue #48: DoH/DoQ message size caps [RESOLVED]
+- **Issue:** [#48](https://gitlab.com/devnw/zig/dns/-/issues/48)
+- **Category:** Security
+- **Resolution:** Message size limits enforced in DoH and DoQ transport interfaces
+- **Evidence:** `src/transports/doh.zig`, `src/transports/doq.zig` -- size validation on received messages
+- **Resolved date:** verified 2026-03-24
+
+### Issue #28: Deprecated crypto usage removed [RESOLVED]
+- **Issue:** [#28](https://gitlab.com/devnw/zig/dns/-/issues/28)
+- **Category:** Security
+- **Resolution:** Deprecated cryptographic primitives replaced with current `std.crypto` APIs
+- **Evidence:** DNSSEC and TSIG modules use `std.crypto` Ed25519/ECDSA; CSPRNG via `std.crypto.random`
+- **Resolved date:** verified 2026-03-24
+
+### Issue #52: CI build and test pipeline [RESOLVED]
+- **Issue:** [#52](https://gitlab.com/devnw/zig/dns/-/issues/52)
+- **Category:** CI-CD
+- **Resolution:** CI pipeline builds and runs all tests successfully; 316/316 tests pass
+- **Evidence:** `.gitlab-ci.yml` -- build and test stages; all tests green
+- **Resolved date:** verified 2026-03-24
+
+---
+
 Note: GAP-0001 through GAP-0010 issues remain OPEN in the GitLab tracker despite fixes being present in code. See GAP-0015 (#78) for the broader state-conflict tracking.
