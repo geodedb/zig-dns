@@ -31,15 +31,28 @@ pub const QueryType = enum(u16) {
 pub const IPv4 = struct {
     bytes: [4]u8,
 
-    pub fn format(self: IPv4) [15]u8 {
-        var buf: [15]u8 = undefined;
-        _ = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{
+    pub const Formatted = struct {
+        buf: [15]u8,
+        len: u8,
+
+        /// Return the formatted IP address as a string slice.
+        pub fn slice(self: *const Formatted) []const u8 {
+            return self.buf[0..self.len];
+        }
+    };
+
+    pub fn format(self: IPv4) Formatted {
+        var buf: [15]u8 = .{0} ** 15;
+        const result = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{
             self.bytes[0],
             self.bytes[1],
             self.bytes[2],
             self.bytes[3],
         }) catch unreachable;
-        return buf;
+        return .{
+            .buf = buf,
+            .len = @intCast(result.len),
+        };
     }
 
     pub fn toSlice(self: *const IPv4) []const u8 {
@@ -372,7 +385,27 @@ pub fn normalizeDomain(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
 test "IPv4 format" {
     const ip = IPv4{ .bytes = .{ 192, 168, 1, 1 } };
     const formatted = ip.format();
-    try std.testing.expect(std.mem.startsWith(u8, &formatted, "192.168.1.1"));
+    try std.testing.expectEqualStrings("192.168.1.1", formatted.slice());
+}
+
+test "IPv4 format max length" {
+    // Maximum length IP: 255.255.255.255 = 15 chars
+    const ip = IPv4{ .bytes = .{ 255, 255, 255, 255 } };
+    const formatted = ip.format();
+    try std.testing.expectEqualStrings("255.255.255.255", formatted.slice());
+    try std.testing.expectEqual(@as(u8, 15), formatted.len);
+}
+
+test "IPv4 format min length" {
+    // Minimum length IP: 0.0.0.0 = 7 chars
+    const ip = IPv4{ .bytes = .{ 0, 0, 0, 0 } };
+    const formatted = ip.format();
+    try std.testing.expectEqualStrings("0.0.0.0", formatted.slice());
+    try std.testing.expectEqual(@as(u8, 7), formatted.len);
+    // Trailing bytes should be zero
+    for (formatted.buf[formatted.len..]) |b| {
+        try std.testing.expectEqual(@as(u8, 0), b);
+    }
 }
 
 test "parseIPv4" {

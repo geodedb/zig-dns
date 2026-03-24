@@ -301,9 +301,9 @@ pub const DoTTransport = struct {
         var length_prefix: [2]u8 = undefined;
         std.mem.writeInt(u16, &length_prefix, @intCast(wire_req.len), .big);
 
-        // Write length prefix + message
-        _ = try conn.write(&length_prefix);
-        _ = try conn.write(wire_req);
+        // Write length prefix + message (writeAll loop to handle partial writes)
+        try tlsWriteAll(conn, &length_prefix);
+        try tlsWriteAll(conn, wire_req);
 
         // Read response length
         var resp_len_buf: [2]u8 = undefined;
@@ -347,6 +347,17 @@ pub const DoTTransport = struct {
         .close = closeImpl,
     };
 };
+
+/// Write all bytes through a TLS connection, looping on partial writes.
+/// Prevents silent data truncation when TLS write returns fewer bytes than requested.
+fn tlsWriteAll(conn: TlsConnection, data: []const u8) !void {
+    var sent: usize = 0;
+    while (sent < data.len) {
+        const n = try conn.write(data[sent..]);
+        if (n == 0) return error.ConnectionClosed;
+        sent += n;
+    }
+}
 
 /// Mock TLS backend for testing
 pub const MockTlsBackend = struct {

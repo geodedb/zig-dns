@@ -209,7 +209,7 @@ pub const Client = struct {
         }
 
         // Extract answers
-        var ans_iter = try response.answers();
+        var ans_iter = response.answers();
         while (try ans_iter.next()) |rr| {
             const owner = rr.getName(self.allocator, response.data) catch continue;
             defer self.allocator.free(owner);
@@ -220,7 +220,11 @@ pub const Client = struct {
 
             // Cache the record under its owner name
             if (self.cache) |*cache| {
-                cache.put(owner, rr) catch {};
+                cache.put(owner, rr) catch |err| {
+                    // Cache population is best-effort; resolution succeeds regardless.
+                    // Log at debug level so operators can diagnose cache issues.
+                    std.log.debug("cache put failed: {}", .{err});
+                };
             }
 
             if (rr.rtype == qtype) {
@@ -275,7 +279,7 @@ pub const Client = struct {
         var results: std.ArrayList(MXRecord) = .empty;
         errdefer results.deinit(self.allocator);
 
-        var ans_iter = try response.answers();
+        var ans_iter = response.answers();
         while (try ans_iter.next()) |rr| {
             if (rr.rtype == .mx) {
                 const mx_data = try rr.parseMX(response.data);
@@ -344,6 +348,16 @@ fn nameInChain(chain: []const []const u8, name: []const u8) bool {
     return false;
 }
 
+/// A CNAME mapping from owner name to target name.
+const CnameMapping = struct {
+    owner: []const u8,
+    target: []const u8,
+};
+
+/// Maximum number of CNAME records we collect from a single response.
+/// RFC 1034 recommends following CNAME chains; 16 is generous.
+const max_cname_mappings = 16;
+
 fn buildCnameChain(
     allocator: std.mem.Allocator,
     msg: Message,
@@ -358,33 +372,64 @@ fn buildCnameChain(
         chain.deinit(allocator);
     }
 
+    // Pre-build CNAME owner->target mappings in a single pass over answers.
+    // This replaces O(hops * ancount) with O(ancount + hops).
+    var mappings: [max_cname_mappings]CnameMapping = undefined;
+    var mapping_count: usize = 0;
+
+    // Track allocated strings so we can free them on exit
+    var mapping_owners: [max_cname_mappings][]const u8 = undefined;
+    var mapping_targets: [max_cname_mappings][]const u8 = undefined;
+
+    defer {
+        for (0..mapping_count) |i| {
+            allocator.free(mapping_owners[i]);
+            allocator.free(mapping_targets[i]);
+        }
+    }
+
+    var ans_iter = msg.answers();
+    while (try ans_iter.next()) |rr| {
+        if (rr.rtype != .cname) continue;
+        if (mapping_count >= max_cname_mappings) break;
+
+        const owner = rr.getName(allocator, response) catch continue;
+        errdefer allocator.free(owner);
+
+        const target_name = rr.parseName(response) catch {
+            allocator.free(owner);
+            continue;
+        };
+        const target_str = target_name.toString(allocator, response) catch {
+            allocator.free(owner);
+            continue;
+        };
+
+        mapping_owners[mapping_count] = owner;
+        mapping_targets[mapping_count] = target_str;
+        mappings[mapping_count] = .{ .owner = owner, .target = target_str };
+        mapping_count += 1;
+    }
+
+    // Build the chain by walking the pre-built mappings
     const qname_copy = try allocator.dupe(u8, trimTrailingDot(qname));
     try chain.append(allocator, qname_copy);
 
-    var current = qname_copy;
+    var current: []const u8 = qname_copy;
     var depth: u8 = 0;
 
     while (depth < 8) : (depth += 1) {
         var found = false;
-        var ans_iter = try msg.answers();
-        while (try ans_iter.next()) |rr| {
-            if (rr.rtype != .cname) continue;
+        for (mappings[0..mapping_count]) |m| {
+            if (!namesEqual(m.owner, current)) continue;
 
-            const owner = rr.getName(allocator, response) catch continue;
-            defer allocator.free(owner);
-
-            if (!namesEqual(owner, current)) continue;
-
-            const target_name = rr.parseName(response) catch continue;
-            const target_str = target_name.toString(allocator, response) catch continue;
-
-            if (nameInChain(chain.items, target_str)) {
-                allocator.free(target_str);
+            if (nameInChain(chain.items, m.target)) {
                 return chain;
             }
 
-            try chain.append(allocator, target_str);
-            current = target_str;
+            const target_copy = try allocator.dupe(u8, m.target);
+            try chain.append(allocator, target_copy);
+            current = target_copy;
             found = true;
             break;
         }
@@ -431,9 +476,14 @@ test "buildCnameChain from response" {
         0x00, 0x00, // NSCOUNT: 0
         0x00, 0x00, // ARCOUNT: 0
         // Question: www.example.com A IN
-        3, 'w', 'w', 'w',
-        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
-        3, 'c', 'o', 'm',
+        3,    'w',
+        'w',  'w',
+        7,    'e',
+        'x',  'a',
+        'm',  'p',
+        'l',  'e',
+        3,    'c',
+        'o',  'm',
         0,
         0x00, 0x01, // QTYPE: A
         0x00, 0x01, // QCLASS: IN
@@ -443,15 +493,27 @@ test "buildCnameChain from response" {
         0x00, 0x01, // CLASS: IN
         0x00, 0x00, 0x01, 0x2C, // TTL: 300
         0x00, 0x13, // RDLENGTH: 19
-        5, 'a', 'l', 'i', 'a', 's',
-        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
-        3, 'n', 'e', 't',
+        5,    'a',
+        'l',  'i',
+        'a',  's',
+        7,    'e',
+        'x',  'a',
+        'm',  'p',
+        'l',  'e',
+        3,    'n',
+        'e',  't',
         0,
         // Answer 2: alias.example.net A IN 1.2.3.4
-        5, 'a', 'l', 'i', 'a', 's',
-        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
-        3, 'n', 'e', 't',
-        0,
+           5,
+        'a',  'l',
+        'i',  'a',
+        's',  7,
+        'e',  'x',
+        'a',  'm',
+        'p',  'l',
+        'e',  3,
+        'n',  'e',
+        't',  0,
         0x00, 0x01, // TYPE: A
         0x00, 0x01, // CLASS: IN
         0x00, 0x00, 0x01, 0x2C, // TTL: 300

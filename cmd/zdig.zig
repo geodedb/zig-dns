@@ -454,6 +454,7 @@ fn escapeJsonString(allocator: Allocator, input: []const u8) ![]u8 {
 
 fn performQuery(allocator: Allocator, options: *const QueryOptions) !void {
     var stdout = StdoutContext{};
+    // stdout flush on function exit is best-effort; output may already be partially written.
     defer stdout.flush() catch {};
     const writer = stdout.writer();
 
@@ -500,12 +501,12 @@ fn performQuery(allocator: Allocator, options: *const QueryOptions) !void {
 
             // Normalize both names for comparison (remove trailing dots)
             const query_name_normalized = if (options.name.len > 0 and options.name[options.name.len - 1] == '.')
-                options.name[0..options.name.len - 1]
+                options.name[0 .. options.name.len - 1]
             else
                 options.name;
 
             const response_name_normalized = if (q_name_str.len > 0 and q_name_str[q_name_str.len - 1] == '.')
-                q_name_str[0..q_name_str.len - 1]
+                q_name_str[0 .. q_name_str.len - 1]
             else
                 q_name_str;
 
@@ -589,7 +590,7 @@ fn addressMatches(expected: *const std.posix.sockaddr, received: *const std.posi
         const received_in6: *const std.posix.sockaddr.in6 = @ptrCast(@alignCast(received));
         // Compare IPv6 address and port
         return std.mem.eql(u8, &expected_in6.addr, &received_in6.addr) and
-               expected_in6.port == received_in6.port;
+            expected_in6.port == received_in6.port;
     }
 
     return false;
@@ -646,7 +647,7 @@ fn sendTcp(allocator: Allocator, address: std.net.Address, query_data: []const u
 }
 
 fn outputShort(allocator: Allocator, writer: anytype, response: dns.message.Message, data: []const u8) !void {
-    var iter = try response.answers();
+    var iter = response.answers();
     while (try iter.next()) |rr| {
         try outputRDataShort(allocator, writer, rr, data);
         try writer.writeAll("\n");
@@ -791,7 +792,7 @@ fn outputDigStyle(allocator: Allocator, writer: anytype, response: dns.message.M
     // Answer section
     if (options.answer and header.ancount > 0) {
         try writer.writeAll(";; ANSWER SECTION:\n");
-        var ans_iter = try response.answers();
+        var ans_iter = response.answers();
         while (try ans_iter.next()) |rr| {
             try outputResourceRecord(allocator, writer, rr, data);
         }
@@ -801,7 +802,7 @@ fn outputDigStyle(allocator: Allocator, writer: anytype, response: dns.message.M
     // Authority section
     if (options.authority and header.nscount > 0) {
         try writer.writeAll(";; AUTHORITY SECTION:\n");
-        var auth_iter = try response.authority();
+        var auth_iter = response.authority();
         while (try auth_iter.next()) |rr| {
             try outputResourceRecord(allocator, writer, rr, data);
         }
@@ -811,7 +812,7 @@ fn outputDigStyle(allocator: Allocator, writer: anytype, response: dns.message.M
     // Additional section
     if (options.additional and header.arcount > 0) {
         try writer.writeAll(";; ADDITIONAL SECTION:\n");
-        var add_iter = try response.additional();
+        var add_iter = response.additional();
         while (try add_iter.next()) |rr| {
             // Skip OPT pseudo-records in display
             if (rr.rtype == .opt) continue;
@@ -894,7 +895,7 @@ fn outputJson(allocator: Allocator, writer: anytype, response: dns.message.Messa
 
     // Answers
     try writer.writeAll("  \"answer\": [\n");
-    var ans_iter = try response.answers();
+    var ans_iter = response.answers();
     var ans_first = true;
     while (try ans_iter.next()) |rr| {
         if (!ans_first) try writer.writeAll(",\n");
@@ -905,7 +906,7 @@ fn outputJson(allocator: Allocator, writer: anytype, response: dns.message.Messa
 
     // Authority
     try writer.writeAll("  \"authority\": [\n");
-    var auth_iter = try response.authority();
+    var auth_iter = response.authority();
     var auth_first = true;
     while (try auth_iter.next()) |rr| {
         if (!auth_first) try writer.writeAll(",\n");
@@ -916,7 +917,7 @@ fn outputJson(allocator: Allocator, writer: anytype, response: dns.message.Messa
 
     // Additional
     try writer.writeAll("  \"additional\": [\n");
-    var add_iter = try response.additional();
+    var add_iter = response.additional();
     var add_first = true;
     while (try add_iter.next()) |rr| {
         if (rr.rtype == .opt) continue;
@@ -948,6 +949,7 @@ fn outputJsonRR(allocator: Allocator, writer: anytype, rr: dns.record.ResourceRe
 
 fn performTrace(allocator: Allocator, options: *const QueryOptions) !void {
     var stdout = StdoutContext{};
+    // stdout flush on function exit is best-effort; output may already be partially written.
     defer stdout.flush() catch {};
     const writer = stdout.writer();
 
@@ -991,7 +993,7 @@ fn performTrace(allocator: Allocator, options: *const QueryOptions) !void {
 
         if (response.header.ancount > 0) {
             // Got answer - we're done
-            var ans_iter = try response.answers();
+            var ans_iter = response.answers();
             while (try ans_iter.next()) |rr| {
                 try outputResourceRecord(allocator, writer, rr, response_data);
             }
@@ -1000,7 +1002,7 @@ fn performTrace(allocator: Allocator, options: *const QueryOptions) !void {
 
         if (response.header.nscount > 0) {
             // Print NS referrals
-            var ns_iter = try response.authority();
+            var ns_iter = response.authority();
             while (try ns_iter.next()) |rr| {
                 try outputResourceRecord(allocator, writer, rr, response_data);
             }
@@ -1008,7 +1010,7 @@ fn performTrace(allocator: Allocator, options: *const QueryOptions) !void {
 
             // Find IP for one of the NS servers in additional section
             var found_ip = false;
-            var add_iter = try response.additional();
+            var add_iter = response.additional();
             while (try add_iter.next()) |add| {
                 if (add.rtype == .a) {
                     const ip = try add.parseA();

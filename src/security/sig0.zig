@@ -16,6 +16,8 @@
 const std = @import("std");
 
 /// DNSSEC Algorithm numbers (subset relevant for SIG(0))
+/// Non-exhaustive to safely handle unknown algorithm values from wire data
+/// without panicking (SEC-C20, CWE-704).
 pub const Algorithm = enum(u8) {
     /// RSA/SHA-256 (requires external crypto)
     rsa_sha256 = 8,
@@ -27,6 +29,8 @@ pub const Algorithm = enum(u8) {
     ecdsa_p384_sha384 = 14,
     /// Ed25519
     ed25519 = 15,
+    /// Unknown/unrecognized algorithm values from wire data
+    _,
 
     const Self = @This();
 
@@ -35,6 +39,7 @@ pub const Algorithm = enum(u8) {
         return switch (self) {
             .ecdsa_p256_sha256, .ecdsa_p384_sha384, .ed25519 => true,
             .rsa_sha256, .rsa_sha512 => false,
+            _ => false,
         };
     }
 
@@ -45,6 +50,7 @@ pub const Algorithm = enum(u8) {
             .ecdsa_p384_sha384 => 96, // r (48) + s (48)
             .ed25519 => 64,
             .rsa_sha256, .rsa_sha512 => null, // Variable
+            _ => null,
         };
     }
 };
@@ -109,6 +115,7 @@ pub const Sig0KeyPair = struct {
                 };
             },
             .rsa_sha256, .rsa_sha512 => return error.UnsupportedAlgorithm,
+            _ => return error.UnsupportedAlgorithm,
         }
     }
 
@@ -182,6 +189,7 @@ pub const Sig0PublicKey = struct {
                 };
             },
             .rsa_sha256, .rsa_sha512 => return error.UnsupportedAlgorithm,
+            _ => return error.UnsupportedAlgorithm,
         }
     }
 };
@@ -210,7 +218,7 @@ pub const Sig0Record = struct {
     const Self = @This();
 
     /// Parse SIG(0) record from RDATA
-    pub fn parse(allocator: std.mem.Allocator, rdata: []const u8, full_message: []const u8) !Self {
+    pub fn parse(allocator: std.mem.Allocator, rdata: []const u8) !Self {
         if (rdata.len < 18) return error.InvalidSig0Record;
 
         const type_covered = std.mem.readInt(u16, rdata[0..2], .big);
@@ -223,7 +231,7 @@ pub const Sig0Record = struct {
 
         // Parse signer's name
         var offset: usize = 18;
-        const name_result = try parseName(allocator, rdata, offset, full_message);
+        const name_result = try parseName_(allocator, rdata, offset);
         offset = name_result.offset;
 
         // Rest is signature
@@ -347,7 +355,7 @@ pub const Sig0Context = struct {
         }
 
         // Parse SIG(0) record
-        var sig0 = try Sig0Record.parse(self.allocator, sig_info.sig_rdata, message);
+        var sig0 = try Sig0Record.parse(self.allocator, sig_info.sig_rdata);
         defer sig0.deinit(self.allocator);
 
         // Verify type covered is 0
@@ -592,94 +600,12 @@ pub fn calculateKeyTag(algorithm: Algorithm, public_key: []const u8) u16 {
     return @intCast(ac & 0xFFFF);
 }
 
-// Helper functions
-
-/// Maximum compression pointer hops to prevent infinite loops (RFC 1035)
-const max_compression_hops: u8 = 16;
-/// Maximum DNS name length per RFC 1035 Section 2.3.4
-const max_name_length: usize = 255;
-
-fn parseName(allocator: std.mem.Allocator, data: []const u8, start: usize, full_msg: []const u8) !struct { name: []const u8, offset: usize } {
-    var name: std.ArrayList(u8) = .empty;
-    errdefer name.deinit(allocator);
-
-    var offset = start;
-    var followed_ptr = false;
-    var final_offset = start;
-    var pointer_hops: u8 = 0;
-    var total_name_len: usize = 0;
-    _ = full_msg;
-
-    while (offset < data.len) {
-        const len = data[offset];
-
-        if (len == 0) {
-            if (!followed_ptr) final_offset = offset + 1;
-            break;
-        }
-
-        if (len & 0xC0 == 0xC0) {
-            // Compression pointer - check for loop
-            pointer_hops += 1;
-            if (pointer_hops > max_compression_hops) {
-                return error.CompressionLoopDetected;
-            }
-            if (offset + 1 >= data.len) return error.InvalidName;
-            const ptr = (@as(u16, len & 0x3F) << 8) | data[offset + 1];
-            if (!followed_ptr) final_offset = offset + 2;
-            followed_ptr = true;
-            offset = ptr;
-            continue;
-        }
-
-        if (offset + 1 + len > data.len) return error.InvalidName;
-
-        // Check max name length (length byte + label)
-        total_name_len += 1 + len;
-        if (total_name_len > max_name_length) {
-            return error.NameTooLong;
-        }
-
-        if (name.items.len > 0) {
-            try name.append(allocator, '.');
-        }
-        try name.appendSlice(allocator, data[offset + 1 .. offset + 1 + len]);
-        offset += 1 + len;
-    }
-
-    return .{
-        .name = try name.toOwnedSlice(allocator),
-        .offset = final_offset,
-    };
-}
-
-fn encodeName(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), name: []const u8) !void {
-    var iter = std.mem.splitScalar(u8, name, '.');
-    while (iter.next()) |label| {
-        if (label.len == 0) continue;
-        try buffer.append(allocator, @intCast(label.len));
-        try buffer.appendSlice(allocator, label);
-    }
-    try buffer.append(allocator, 0);
-}
-
-fn skipName(data: []const u8, start: usize) !usize {
-    var offset = start;
-    while (offset < data.len) {
-        const len = data[offset];
-        if (len == 0) return offset + 1;
-        if (len & 0xC0 == 0xC0) return offset + 2;
-        offset += 1 + len;
-    }
-    return error.InvalidName;
-}
-
-fn skipRR(data: []const u8, start: usize) !usize {
-    const offset = try skipName(data, start);
-    if (offset + 10 > data.len) return error.InvalidRR;
-    const rdlength = std.mem.readInt(u16, data[offset + 8 ..][0..2], .big);
-    return offset + 10 + rdlength;
-}
+// Helper functions -- delegated to shared dns_name module to avoid duplication
+const dns_name = @import("dns_name");
+const parseName_ = dns_name.parseName;
+const encodeName = dns_name.encodeName;
+const skipName = dns_name.skipName;
+const skipRR = dns_name.skipRR;
 
 // ============================================================================
 // Tests

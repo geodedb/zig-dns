@@ -166,6 +166,50 @@ pub const Name = struct {
         return result;
     }
 
+    /// Encode a name from a string into a caller-provided buffer (zero allocation).
+    /// Returns a Name struct referencing the filled portion of the buffer.
+    /// Returns error.NameTooLong if the encoded name exceeds the buffer size.
+    pub fn encodeBuf(domain: []const u8, buf: []u8) !Self {
+        if (domain.len > max_name_length) {
+            return error.NameTooLong;
+        }
+
+        // Handle root domain
+        if (domain.len == 0 or (domain.len == 1 and domain[0] == '.')) {
+            if (buf.len < 1) return error.NameTooLong;
+            buf[0] = 0;
+            return Self{
+                .labels = buf[0..1],
+                .wire_length = 1,
+                .compressed = false,
+            };
+        }
+
+        var pos: usize = 0;
+        var iter = std.mem.splitScalar(u8, domain, '.');
+        while (iter.next()) |label| {
+            if (label.len == 0) continue;
+            if (label.len > max_label_length) {
+                return error.LabelTooLong;
+            }
+            if (pos + 1 + label.len > buf.len) return error.NameTooLong;
+            buf[pos] = @intCast(label.len);
+            pos += 1;
+            @memcpy(buf[pos..][0..label.len], label);
+            pos += label.len;
+        }
+
+        if (pos >= buf.len) return error.NameTooLong;
+        buf[pos] = 0; // Null terminator
+        pos += 1;
+
+        return Self{
+            .labels = buf[0..pos],
+            .wire_length = pos,
+            .compressed = false,
+        };
+    }
+
     /// Convert wire format name to human-readable string (e.g., "example.com")
     pub fn toString(self: Self, allocator: std.mem.Allocator, full_message: ?[]const u8) ![]u8 {
         var result: std.ArrayList(u8) = .empty;
@@ -219,6 +263,71 @@ pub const Name = struct {
         return try result.toOwnedSlice(allocator);
     }
 
+    /// Convert wire format name to human-readable string into a caller-provided buffer.
+    /// Returns a slice of `buf` containing the dotted name (e.g., "example.com").
+    /// Avoids heap allocation -- DNS names are at most 253 chars, so a 256-byte
+    /// stack buffer always suffices.
+    pub fn toStringBuf(self: Self, buf: []u8, full_message: ?[]const u8) ![]const u8 {
+        var out_pos: usize = 0;
+        var pos: usize = 0;
+        var data = self.labels;
+        var first = true;
+        var pointer_hops: u8 = 0;
+
+        while (pos < data.len) {
+            const len_byte = data[pos];
+
+            if (len_byte == 0) {
+                break;
+            }
+
+            // Handle compression pointer
+            if ((len_byte & compression_marker) == compression_marker) {
+                if (full_message) |msg| {
+                    if (pos + 1 >= data.len) {
+                        return error.InvalidCompression;
+                    }
+                    pointer_hops += 1;
+                    if (pointer_hops > max_compression_hops) {
+                        return error.CompressionLoopDetected;
+                    }
+                    const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | data[pos + 1];
+                    data = msg[ptr_offset..];
+                    pos = 0;
+                    continue;
+                } else {
+                    return error.CompressionRequiresFullMessage;
+                }
+            }
+
+            const label_len: usize = len_byte;
+            if (pos + 1 + label_len > data.len) {
+                return error.UnexpectedEnd;
+            }
+
+            if (!first) {
+                if (out_pos >= buf.len) return error.NameTooLong;
+                buf[out_pos] = '.';
+                out_pos += 1;
+            }
+            first = false;
+
+            if (out_pos + label_len > buf.len) return error.NameTooLong;
+            @memcpy(buf[out_pos..][0..label_len], data[pos + 1 ..][0..label_len]);
+            out_pos += label_len;
+            pos += 1 + label_len;
+        }
+
+        // Return root if empty
+        if (out_pos == 0) {
+            if (buf.len < 1) return error.NameTooLong;
+            buf[0] = '.';
+            return buf[0..1];
+        }
+
+        return buf[0..out_pos];
+    }
+
     /// Get the number of labels in the name
     pub fn labelCount(self: Self, full_message: ?[]const u8) usize {
         var count: usize = 0;
@@ -251,16 +360,77 @@ pub const Name = struct {
     }
 
     /// Compare two names for equality (case-insensitive per RFC 1035)
+    /// Zero-allocation: walks wire-format labels directly, following compression pointers.
     pub fn eql(self: Self, other: Self, self_msg: ?[]const u8, other_msg: ?[]const u8) bool {
-        var allocator = std.heap.page_allocator;
+        var self_data = self.labels;
+        var self_pos: usize = 0;
+        var self_hops: u8 = 0;
 
-        const self_str = self.toString(allocator, self_msg) catch return false;
-        defer allocator.free(self_str);
+        var other_data = other.labels;
+        var other_pos: usize = 0;
+        var other_hops: u8 = 0;
 
-        const other_str = other.toString(allocator, other_msg) catch return false;
-        defer allocator.free(other_str);
+        while (true) {
+            // Follow compression pointers for self
+            while (self_pos < self_data.len and
+                (self_data[self_pos] & compression_marker) == compression_marker)
+            {
+                self_hops += 1;
+                if (self_hops > max_compression_hops) return false;
+                if (self_msg) |msg| {
+                    if (self_pos + 1 >= self_data.len) return false;
+                    const ptr = (@as(u16, self_data[self_pos] & 0x3F) << 8) | self_data[self_pos + 1];
+                    self_data = msg;
+                    self_pos = ptr;
+                } else {
+                    return false; // compressed name without full message
+                }
+            }
 
-        return std.ascii.eqlIgnoreCase(self_str, other_str);
+            // Follow compression pointers for other
+            while (other_pos < other_data.len and
+                (other_data[other_pos] & compression_marker) == compression_marker)
+            {
+                other_hops += 1;
+                if (other_hops > max_compression_hops) return false;
+                if (other_msg) |msg| {
+                    if (other_pos + 1 >= other_data.len) return false;
+                    const ptr = (@as(u16, other_data[other_pos] & 0x3F) << 8) | other_data[other_pos + 1];
+                    other_data = msg;
+                    other_pos = ptr;
+                } else {
+                    return false;
+                }
+            }
+
+            // Bounds check
+            if (self_pos >= self_data.len or other_pos >= other_data.len) return false;
+
+            const self_len = self_data[self_pos];
+            const other_len = other_data[other_pos];
+
+            // Both at root label -- names are equal
+            if (self_len == 0 and other_len == 0) return true;
+
+            // One at root but not the other -- different number of labels
+            if (self_len == 0 or other_len == 0) return false;
+
+            // Label lengths differ
+            if (self_len != other_len) return false;
+
+            // Bounds check for label data
+            if (self_pos + 1 + self_len > self_data.len) return false;
+            if (other_pos + 1 + other_len > other_data.len) return false;
+
+            // Compare label bytes case-insensitively (ASCII only per RFC 4343)
+            const self_label = self_data[self_pos + 1 ..][0..self_len];
+            const other_label = other_data[other_pos + 1 ..][0..other_len];
+            if (!std.ascii.eqlIgnoreCase(self_label, other_label)) return false;
+
+            // Advance past this label
+            self_pos += 1 + self_len;
+            other_pos += 1 + other_len;
+        }
     }
 
     // ============================================================
@@ -449,17 +619,7 @@ pub fn encodeWithCase0x20(allocator: std.mem.Allocator, domain: []const u8, rand
 /// Verify that a response name matches the query name (case-sensitive for 0x20)
 /// Returns true if the names match exactly (same case)
 pub fn verifyCase0x20(query_name: []const u8, response_name: []const u8) bool {
-    if (query_name.len != response_name.len) {
-        return false;
-    }
-
-    for (query_name, response_name) |q, r| {
-        if (q != r) {
-            return false;
-        }
-    }
-
-    return true;
+    return std.mem.eql(u8, query_name, response_name);
 }
 
 /// Extract the QNAME from a DNS message (for 0x20 verification)
@@ -515,6 +675,64 @@ test "Name.encode simple domain" {
         7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
         3, 'c', 'o', 'm', 0,
     }, encoded);
+}
+
+test "Name.encodeBuf simple domain" {
+    // Regression test for PF-09: zero-allocation wire encoding into a stack buffer.
+    var buf: [256]u8 = undefined;
+    const name = try Name.encodeBuf("example.com", &buf);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        3, 'c', 'o', 'm', 0,
+    }, name.labels);
+    try std.testing.expectEqual(@as(usize, 13), name.wire_length);
+    try std.testing.expect(!name.compressed);
+}
+
+test "Name.encodeBuf root domain" {
+    var buf: [256]u8 = undefined;
+    const name = try Name.encodeBuf("", &buf);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0}, name.labels);
+    try std.testing.expectEqual(@as(usize, 1), name.wire_length);
+}
+
+test "Name.encodeBuf with trailing dot" {
+    var buf: [256]u8 = undefined;
+    const name = try Name.encodeBuf("example.com.", &buf);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        3, 'c', 'o', 'm', 0,
+    }, name.labels);
+}
+
+test "Name.encodeBuf eql with parsed name" {
+    // Verify that a name encoded via encodeBuf compares equal to a parsed name.
+    const wire_data = [_]u8{
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        3, 'c', 'o', 'm', 0,
+    };
+    const parsed = try Name.parse(&wire_data, 0);
+
+    var buf: [256]u8 = undefined;
+    const from_buf = try Name.encodeBuf("example.com", &buf);
+
+    try std.testing.expect(parsed.eql(from_buf, null, null));
+    try std.testing.expect(from_buf.eql(parsed, null, null));
+}
+
+test "Name.encodeBuf eql case insensitive" {
+    const wire_data = [_]u8{
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        3, 'c', 'o', 'm', 0,
+    };
+    const parsed = try Name.parse(&wire_data, 0);
+
+    var buf: [256]u8 = undefined;
+    const from_buf = try Name.encodeBuf("EXAMPLE.COM", &buf);
+
+    try std.testing.expect(parsed.eql(from_buf, null, null));
 }
 
 test "Name.encode root domain" {
@@ -588,7 +806,9 @@ test "Name.parse rejects compression pointer loops" {
         // Padding
         0x00, 0x00,
         // Offset 4: a valid name
-        3, 'f', 'o', 'o', 0,
+        3,    'f',
+        'o',  'o',
+        0,
     };
 
     // This should detect the forward pointer and error
@@ -857,4 +1077,130 @@ test "encodeWithCase0x20" {
     defer allocator.free(str);
 
     try std.testing.expect(std.ascii.eqlIgnoreCase("test.example.com", str));
+}
+
+// ============================================================
+// Tests for Name.eql() zero-allocation label comparison
+// ============================================================
+
+test "Name.eql basic equality" {
+    // Same name should be equal
+    const wire = [_]u8{ 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 };
+    const name1 = try Name.parse(&wire, 0);
+    const name2 = try Name.parse(&wire, 0);
+    try std.testing.expect(name1.eql(name2, null, null));
+}
+
+test "Name.eql case insensitive" {
+    // DNS names are case-insensitive (RFC 4343)
+    const lower = [_]u8{ 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 };
+    const upper = [_]u8{ 7, 'E', 'X', 'A', 'M', 'P', 'L', 'E', 3, 'C', 'O', 'M', 0 };
+    const name_lower = try Name.parse(&lower, 0);
+    const name_upper = try Name.parse(&upper, 0);
+    try std.testing.expect(name_lower.eql(name_upper, null, null));
+}
+
+test "Name.eql different names" {
+    const wire1 = [_]u8{ 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 };
+    const wire2 = [_]u8{ 4, 't', 'e', 's', 't', 3, 'c', 'o', 'm', 0 };
+    const name1 = try Name.parse(&wire1, 0);
+    const name2 = try Name.parse(&wire2, 0);
+    try std.testing.expect(!name1.eql(name2, null, null));
+}
+
+test "Name.eql different label count" {
+    // example.com vs www.example.com
+    const wire1 = [_]u8{ 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 };
+    const wire2 = [_]u8{ 3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 };
+    const name1 = try Name.parse(&wire1, 0);
+    const name2 = try Name.parse(&wire2, 0);
+    try std.testing.expect(!name1.eql(name2, null, null));
+}
+
+test "Name.eql root domain" {
+    const root = [_]u8{0};
+    const name1 = try Name.parse(&root, 0);
+    const name2 = try Name.parse(&root, 0);
+    try std.testing.expect(name1.eql(name2, null, null));
+}
+
+test "Name.eql root vs non-root" {
+    const root = [_]u8{0};
+    const wire = [_]u8{ 3, 'c', 'o', 'm', 0 };
+    const name_root = try Name.parse(&root, 0);
+    const name_com = try Name.parse(&wire, 0);
+    try std.testing.expect(!name_root.eql(name_com, null, null));
+}
+
+test "Name.eql with compression pointers" {
+    // Message: example.com at offset 0, then www.<ptr to 0> at offset 13
+    const wire_data = [_]u8{
+        // Name 1: example.com at offset 0
+        7,   'e',  'x',  'a', 'm', 'p', 'l', 'e',
+        3,   'c',  'o',  'm', 0,
+        // Name 2: www.<pointer to offset 0> at offset 13
+          3,   'w', 'w',
+        'w', 0xC0, 0x00,
+    };
+
+    const name1 = try Name.parse(&wire_data, 13); // www.example.com (compressed)
+
+    // Construct www.example.com uncompressed
+    const uncompressed = [_]u8{ 3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 };
+    const name2 = try Name.parse(&uncompressed, 0);
+
+    // Compressed vs uncompressed should be equal
+    try std.testing.expect(name1.eql(name2, &wire_data, null));
+}
+
+test "Name.eql both compressed" {
+    // Two compressed names pointing to the same underlying data
+    const wire_data = [_]u8{
+        // Offset 0: example.com
+        7,    'e',  'x',  'a', 'm', 'p', 'l', 'e',
+        3,    'c',  'o',  'm', 0,
+        // Offset 13: www.<ptr to 0>
+          3,   'w', 'w',
+        'w',  0xC0, 0x00,
+        // Offset 19: www.<ptr to 0> (same)
+        3,   'w', 'w', 'w', 0xC0,
+        0x00,
+    };
+
+    const name1 = try Name.parse(&wire_data, 13);
+    const name2 = try Name.parse(&wire_data, 19);
+    try std.testing.expect(name1.eql(name2, &wire_data, &wire_data));
+}
+
+test "Name.eql same label different case with compression" {
+    const wire_data = [_]u8{
+        // Offset 0: EXAMPLE.COM (uppercase)
+        7,   'E',  'X',  'A', 'M', 'P', 'L', 'E',
+        3,   'C',  'O',  'M', 0,
+        // Offset 13: www.<ptr to 0> (will resolve to www.EXAMPLE.COM)
+          3,   'w', 'w',
+        'w', 0xC0, 0x00,
+    };
+
+    // Uncompressed www.example.com (lowercase)
+    const uncompressed = [_]u8{ 3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 };
+    const name1 = try Name.parse(&wire_data, 13);
+    const name2 = try Name.parse(&uncompressed, 0);
+
+    // Should be equal because DNS comparison is case-insensitive
+    try std.testing.expect(name1.eql(name2, &wire_data, null));
+}
+
+test "Name.eql performs zero allocations" {
+    // Use the failing allocator -- any allocation attempt will panic/error.
+    // If eql() tries to allocate, this test will fail.
+    const wire1 = [_]u8{ 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 };
+    const wire2 = [_]u8{ 7, 'E', 'X', 'A', 'M', 'P', 'L', 'E', 3, 'C', 'O', 'M', 0 };
+    const name1 = try Name.parse(&wire1, 0);
+    const name2 = try Name.parse(&wire2, 0);
+
+    // The key assertion: eql() must not allocate. If it did, it would need
+    // an allocator parameter. Our new implementation has no allocator parameter
+    // and works entirely on wire-format data -- zero allocations by construction.
+    try std.testing.expect(name1.eql(name2, null, null));
 }

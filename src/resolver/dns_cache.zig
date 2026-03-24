@@ -103,21 +103,31 @@ pub const DnsCache = struct {
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, options: CacheOptions, clk: Clock) Self {
+        var entries = lru.LruCache(CacheEntry).init(allocator, options.max_entries);
+        entries.on_evict = &freeCacheEntry;
         return Self{
             .allocator = allocator,
             .options = options,
-            .entries = lru.LruCache(CacheEntry).init(allocator, options.max_entries),
+            .entries = entries,
             .clock = clk,
         };
     }
 
-    pub fn deinit(self: *Self) void {
-        var it = self.entries.map.iterator();
-        while (it.next()) |kv| {
-            if (kv.value_ptr.value.rdata.len > 0) {
-                self.allocator.free(kv.value_ptr.value.rdata);
-            }
+    /// Free owned memory inside a CacheEntry (rdata and zone_name).
+    /// Used as the LRU on_evict callback so that eviction, removal,
+    /// overwrite, clear, and deinit all release entry-owned memory.
+    fn freeCacheEntry(allocator: std.mem.Allocator, entry: CacheEntry) void {
+        if (entry.rdata.len > 0) {
+            allocator.free(entry.rdata);
         }
+        if (entry.zone_name) |zn| {
+            allocator.free(zn);
+        }
+    }
+
+    pub fn deinit(self: *Self) void {
+        // The LRU deinit calls on_evict for each entry, which frees
+        // rdata and zone_name via freeCacheEntry.
         self.entries.deinit();
     }
 
@@ -176,6 +186,8 @@ pub const DnsCache = struct {
     /// Extracts SOA minimum field automatically
     pub fn putNxdomainFromResponse(self: *Self, name: []const u8, qtype: Type, qclass: Class, response: []const u8) !void {
         const soa_data = self.extractSoaFromResponse(response);
+        defer if (soa_data) |soa| self.allocator.free(soa.zone);
+
         const ttl = if (soa_data) |soa|
             self.clampNegativeTtl(soa.negativeTtl())
         else
@@ -238,6 +250,8 @@ pub const DnsCache = struct {
     /// Extracts SOA minimum field automatically
     pub fn putNodataFromResponse(self: *Self, name: []const u8, qtype: Type, qclass: Class, response: []const u8) !void {
         const soa_data = self.extractSoaFromResponse(response);
+        defer if (soa_data) |soa| self.allocator.free(soa.zone);
+
         const ttl = if (soa_data) |soa|
             self.clampNegativeTtl(soa.negativeTtl())
         else
@@ -257,17 +271,17 @@ pub const DnsCache = struct {
     }
 
     /// Extract SOA record data from a DNS response (RFC 2308)
-    /// Returns null if no SOA is found in authority section
+    /// Returns null if no SOA is found in authority section.
+    /// Caller must free the returned SoaCacheData.zone slice when done.
     pub fn extractSoaFromResponse(self: *Self, response: []const u8) ?SoaCacheData {
         const msg = Message.parse(response) catch return null;
 
         // SOA should be in authority section for negative responses
-        var auth_iter = msg.authority() catch return null;
+        var auth_iter = msg.authority();
         while (auth_iter.next() catch null) |rr| {
             if (rr.rtype == .soa) {
                 const soa = rr.parseSOA(response) catch continue;
                 const zone_name = rr.getName(self.allocator, response) catch continue;
-                defer self.allocator.free(zone_name);
 
                 return SoaCacheData{
                     .soa_ttl = rr.ttl,
@@ -314,12 +328,8 @@ pub const DnsCache = struct {
     }
 
     pub fn clear(self: *Self) void {
-        var it = self.entries.map.iterator();
-        while (it.next()) |kv| {
-            if (kv.value_ptr.value.rdata.len > 0) {
-                self.allocator.free(kv.value_ptr.value.rdata);
-            }
-        }
+        // The LRU clear calls on_evict for each entry, which frees
+        // rdata and zone_name via freeCacheEntry.
         self.entries.clear();
     }
 
@@ -328,15 +338,17 @@ pub const DnsCache = struct {
     }
 
     fn makeKey(self: *Self, name: []const u8, qtype: Type, qclass: Class) ![]u8 {
-        // Lowercase for case-insensitive matching
-        const lower = try self.allocator.alloc(u8, name.len);
-        defer self.allocator.free(lower);
-        for (name, 0..) |c, i| {
-            lower[i] = std.ascii.toLower(c);
+        // Lowercase into a stack buffer for case-insensitive matching.
+        // DNS names are at most 255 bytes (RFC 1035 Section 2.3.4).
+        var lower_buf: [name_mod.max_name_length]u8 = undefined;
+        const clamped_len = @min(name.len, lower_buf.len);
+        for (name[0..clamped_len], 0..) |c, i| {
+            lower_buf[i] = std.ascii.toLower(c);
         }
 
+        // Single heap allocation for the final key string
         return std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}", .{
-            lower,
+            lower_buf[0..clamped_len],
             @intFromEnum(qtype),
             @intFromEnum(qclass),
         });
@@ -427,6 +439,160 @@ test "DnsCache negative TTL clamping" {
     try std.testing.expect(entry != null);
     // TTL should be clamped to max_negative_ttl_s
     try std.testing.expectEqual(@as(u32, 3600), entry.?.original_ttl);
+}
+
+test "DnsCache NXDOMAIN with zone_name freed on deinit" {
+    // Regression test for PF-12: zone_name must be freed on deinit.
+    // The testing allocator will detect any leak.
+    const allocator = std.testing.allocator;
+    var mock_clock = clock_mod.MockClock.init();
+
+    var cache = DnsCache.init(allocator, .{}, mock_clock.clock());
+    defer cache.deinit();
+
+    // Manually insert an entry with an allocated zone_name
+    const zone = try allocator.dupe(u8, "example.com.");
+    const key = try cache.makeKey("nonexistent.example.com.", .a, .in);
+    defer allocator.free(key);
+
+    try cache.entries.put(key, CacheEntry{
+        .entry_type = .nxdomain,
+        .rdata = &[_]u8{},
+        .cached_at = mock_clock.clock().now(),
+        .original_ttl = 300,
+        .zone_name = zone,
+    });
+}
+
+test "DnsCache zone_name freed on clear" {
+    // Regression test for PF-12: zone_name must be freed on clear.
+    const allocator = std.testing.allocator;
+    var mock_clock = clock_mod.MockClock.init();
+
+    var cache = DnsCache.init(allocator, .{}, mock_clock.clock());
+    defer cache.deinit();
+
+    const zone = try allocator.dupe(u8, "test.org.");
+    const key = try cache.makeKey("gone.test.org.", .a, .in);
+    defer allocator.free(key);
+
+    try cache.entries.put(key, CacheEntry{
+        .entry_type = .nxdomain,
+        .rdata = &[_]u8{},
+        .cached_at = mock_clock.clock().now(),
+        .original_ttl = 300,
+        .zone_name = zone,
+    });
+
+    cache.clear();
+    // After clear, no leak should be detected by testing allocator
+}
+
+test "DnsCache zone_name freed on eviction" {
+    // Regression test for PF-12: zone_name must be freed when LRU evicts.
+    const allocator = std.testing.allocator;
+    var mock_clock = clock_mod.MockClock.init();
+
+    // Cache with capacity of 2 to trigger eviction
+    var cache = DnsCache.init(allocator, .{ .max_entries = 2 }, mock_clock.clock());
+    defer cache.deinit();
+
+    // Insert entry with zone_name
+    const zone = try allocator.dupe(u8, "evict.zone.");
+    const key1 = try cache.makeKey("a.evict.zone.", .a, .in);
+    defer allocator.free(key1);
+
+    try cache.entries.put(key1, CacheEntry{
+        .entry_type = .nxdomain,
+        .rdata = &[_]u8{},
+        .cached_at = mock_clock.clock().now(),
+        .original_ttl = 300,
+        .zone_name = zone,
+    });
+
+    // Fill up the cache to trigger eviction of the first entry
+    try cache.putPositive("b.evict.zone.", .a, .in, &[_]u8{ 1, 2, 3, 4 }, 300);
+    try cache.putPositive("c.evict.zone.", .a, .in, &[_]u8{ 5, 6, 7, 8 }, 300);
+
+    // The first entry (with zone_name) should have been evicted.
+    // Testing allocator will catch any leak.
+}
+
+test "DnsCache zone_name freed on expired removal" {
+    // Regression test for PF-12: zone_name freed when expired entries are removed via get().
+    const allocator = std.testing.allocator;
+    var mock_clock = clock_mod.MockClock.init();
+
+    var cache = DnsCache.init(allocator, .{}, mock_clock.clock());
+    defer cache.deinit();
+
+    const zone = try allocator.dupe(u8, "expired.zone.");
+    const key = try cache.makeKey("old.expired.zone.", .a, .in);
+    defer allocator.free(key);
+
+    try cache.entries.put(key, CacheEntry{
+        .entry_type = .nxdomain,
+        .rdata = &[_]u8{},
+        .cached_at = mock_clock.clock().now(),
+        .original_ttl = 10,
+        .zone_name = zone,
+    });
+
+    // Advance time past TTL
+    mock_clock.advance(11);
+
+    // get() removes expired entries -- zone_name must be freed
+    const result = cache.get("old.expired.zone.", .a, .in);
+    try std.testing.expect(result == null);
+}
+
+test "DnsCache makeKey uses stack buffer for lowercase" {
+    // Regression test for PF-15: makeKey must use a stack buffer for lowercase
+    // conversion instead of a heap allocation + free. Verified by code review:
+    // the implementation uses a [max_name_length]u8 stack buffer.
+    // Here we verify correctness of the key format and case-insensitivity.
+    const allocator = std.testing.allocator;
+    var mock_clock = clock_mod.MockClock.init();
+
+    var cache = DnsCache.init(allocator, .{}, mock_clock.clock());
+    defer cache.deinit();
+
+    // Verify the key value is correct and lowercase
+    const key = try cache.makeKey("Example.COM.", .a, .in);
+    defer allocator.free(key);
+    try std.testing.expect(std.mem.startsWith(u8, key, "example.com.:"));
+
+    // Verify with max-length name (255 bytes)
+    var max_name: [255]u8 = undefined;
+    @memset(&max_name, 'A');
+    const max_key = try cache.makeKey(&max_name, .a, .in);
+    defer allocator.free(max_key);
+
+    // Should be all lowercase
+    var expected_lower: [255]u8 = undefined;
+    @memset(&expected_lower, 'a');
+    try std.testing.expect(std.mem.startsWith(u8, max_key, &expected_lower));
+}
+
+test "DnsCache makeKey case insensitive" {
+    // Verify case-insensitive key generation still works after PF-15 optimization.
+    const allocator = std.testing.allocator;
+    var mock_clock = clock_mod.MockClock.init();
+
+    var cache = DnsCache.init(allocator, .{}, mock_clock.clock());
+    defer cache.deinit();
+
+    const key1 = try cache.makeKey("Example.COM.", .a, .in);
+    defer allocator.free(key1);
+
+    const key2 = try cache.makeKey("example.com.", .a, .in);
+    defer allocator.free(key2);
+
+    const key3 = try cache.makeKey("EXAMPLE.COM.", .a, .in);
+    defer allocator.free(key3);
+
+    try std.testing.expectEqualStrings(key1, key2);
+    try std.testing.expectEqualStrings(key2, key3);
 }
 
 test "SoaCacheData negativeTtl calculation" {

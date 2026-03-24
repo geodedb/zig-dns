@@ -16,6 +16,9 @@ pub fn LruCache(comptime V: type) type {
         tail: ?*Node,
         capacity: usize,
         count: usize,
+        /// Optional callback invoked when a value is evicted or overwritten.
+        /// The caller can use this to free any owned memory inside the value.
+        on_evict: ?*const fn (std.mem.Allocator, V) void,
 
         const Self = @This();
 
@@ -34,12 +37,16 @@ pub fn LruCache(comptime V: type) type {
                 .tail = null,
                 .capacity = capacity,
                 .count = 0,
+                .on_evict = null,
             };
         }
 
         pub fn deinit(self: *Self) void {
             var it = self.map.iterator();
             while (it.next()) |entry| {
+                if (self.on_evict) |cb| {
+                    cb(self.allocator, entry.value_ptr.value);
+                }
                 self.allocator.free(entry.key_ptr.*);
             }
             self.map.deinit();
@@ -55,6 +62,9 @@ pub fn LruCache(comptime V: type) type {
 
         pub fn put(self: *Self, key: []const u8, value: V) !void {
             if (self.map.getPtr(key)) |node| {
+                if (self.on_evict) |cb| {
+                    cb(self.allocator, node.value);
+                }
                 node.value = value;
                 self.moveToFront(node);
                 return;
@@ -91,6 +101,9 @@ pub fn LruCache(comptime V: type) type {
         pub fn remove(self: *Self, key: []const u8) bool {
             if (self.map.fetchRemove(key)) |kv| {
                 const node = &kv.value;
+                if (self.on_evict) |cb| {
+                    cb(self.allocator, node.value);
+                }
                 self.removeFromList(node);
                 self.allocator.free(kv.key);
                 self.count -= 1;
@@ -102,6 +115,9 @@ pub fn LruCache(comptime V: type) type {
         pub fn clear(self: *Self) void {
             var it = self.map.iterator();
             while (it.next()) |entry| {
+                if (self.on_evict) |cb| {
+                    cb(self.allocator, entry.value_ptr.value);
+                }
                 self.allocator.free(entry.key_ptr.*);
             }
             self.map.clearRetainingCapacity();
@@ -152,6 +168,9 @@ pub fn LruCache(comptime V: type) type {
         fn evictLru(self: *Self) void {
             if (self.tail) |tail| {
                 const key = tail.key;
+                if (self.on_evict) |cb| {
+                    cb(self.allocator, tail.value);
+                }
                 self.removeFromList(tail);
                 _ = self.map.remove(key);
                 self.allocator.free(key);

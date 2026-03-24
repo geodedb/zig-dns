@@ -323,7 +323,11 @@ pub const SplitDns = struct {
                 if (self.stats.rule_hits.getPtr(name_hash)) |count| {
                     count.* += 1;
                 } else {
-                    self.stats.rule_hits.put(name_hash, 1) catch {};
+                    self.stats.rule_hits.put(name_hash, 1) catch |err| {
+                        // Stats tracking is best-effort; routing proceeds regardless.
+                        // Log at debug level so operators can diagnose stats OOM.
+                        std.log.debug("stats rule_hits put failed: {}", .{err});
+                    };
                 }
 
                 return &rule.target;

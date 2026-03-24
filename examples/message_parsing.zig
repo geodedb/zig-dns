@@ -154,7 +154,7 @@ pub fn main() !void {
 
         // Iterate over answers
         std.debug.print("    Answers:\n", .{});
-        var ans_iter = try msg.answers();
+        var ans_iter = msg.answers();
         var count: usize = 0;
         while (try ans_iter.next()) |rr| {
             count += 1;
@@ -269,7 +269,7 @@ pub fn main() !void {
             std.debug.print("      Success: {}\n", .{response.isSuccess()});
             std.debug.print("      Answers: {d}\n", .{response.header.ancount});
 
-            var ans_iter = try response.answers();
+            var ans_iter = response.answers();
             while (try ans_iter.next()) |rr| {
                 if (rr.rtype == .a) {
                     const addr = try rr.parseA();

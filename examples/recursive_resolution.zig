@@ -137,7 +137,7 @@ pub fn main() !void {
             std.debug.print("      - Additional: {d}\n", .{msg.header.arcount});
 
             // Extract A records
-            var ans_iter = msg.answers() catch return;
+            var ans_iter = msg.answers();
             while (ans_iter.next() catch null) |rr| {
                 if (rr.rtype == .a) {
                     const addr = rr.parseA() catch continue;

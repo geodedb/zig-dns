@@ -246,7 +246,6 @@ pub const ConnectionPool = struct {
     /// Get or create a connection to the server
     pub fn acquire(self: *Self, server: ServerKey, timeout_ms: u32) !*PooledConnection {
         self.mutex.lock();
-        defer self.mutex.unlock();
 
         const now = std.time.milliTimestamp();
 
@@ -258,23 +257,30 @@ pub const ConnectionPool = struct {
 
             conn.markActive(now);
             self.stats.connections_reused += 1;
+            self.mutex.unlock();
             return conn;
         }
 
         // Check if we can create a new connection
         const server_count = self.countServerConnections(server);
         if (server_count >= self.config.max_connections_per_server) {
-            // Wait for a connection to become available
+            self.mutex.unlock();
             return error.PoolExhausted;
         }
 
-        // Create new connection (unlock during connect)
+        // Unlock during potentially-blocking connect to avoid holding the
+        // mutex while waiting on the network.
         self.mutex.unlock();
-        defer self.mutex.lock();
 
-        const fd = try self.createConnection(server, timeout_ms);
+        const fd = self.createConnection(server, timeout_ms) catch |err| {
+            return err;
+        };
+        errdefer std.posix.close(fd);
 
-        // Re-lock and add to pool
+        // Re-lock to mutate pool state
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         const conn = PooledConnection.init(fd, server, now);
         try self.connections.append(self.allocator, conn);
 
@@ -445,27 +451,32 @@ pub const PipelinedBatch = struct {
     }
 
     /// Execute all queries in the batch
-    pub fn execute(self: *Self, fd: std.posix.fd_t) !void {
-        // Send all queries with TCP length prefix
+    /// Uses poll-based timeout to avoid blocking indefinitely on reads/writes.
+    pub fn execute(self: *Self, fd: std.posix.fd_t, timeout_ms: u32) !void {
+        // Send all queries with TCP length prefix using writeAll loop
         for (self.queries.items) |q| {
             var length_prefix: [2]u8 = undefined;
             std.mem.writeInt(u16, &length_prefix, @intCast(q.wire_data.len), .big);
 
-            _ = try std.posix.write(fd, &length_prefix);
-            _ = try std.posix.write(fd, q.wire_data);
+            try writeAllWithTimeout(fd, &length_prefix, timeout_ms);
+            try writeAllWithTimeout(fd, q.wire_data, timeout_ms);
         }
 
         // Receive all responses in order
-        for (self.queries.items) |*q| {
-            // Read response length
+        outer: for (self.queries.items) |*q| {
+            // Read response length with timeout
             var resp_len_buf: [2]u8 = undefined;
             var len_read: usize = 0;
             while (len_read < 2) {
-                const n = try std.posix.read(fd, resp_len_buf[len_read..]);
+                const n = readWithTimeout(fd, resp_len_buf[len_read..], timeout_ms) catch |err| {
+                    q.err = err;
+                    q.completed = true;
+                    continue :outer;
+                };
                 if (n == 0) {
                     q.err = error.ConnectionClosed;
                     q.completed = true;
-                    continue;
+                    continue :outer;
                 }
                 len_read += n;
             }
@@ -473,21 +484,29 @@ pub const PipelinedBatch = struct {
             if (resp_len == 0 or resp_len > max_message_size) {
                 q.err = error.MessageTooLarge;
                 q.completed = true;
-                continue;
+                continue :outer;
             }
 
             // Read response
-            const response = try self.allocator.alloc(u8, resp_len);
-            errdefer self.allocator.free(response);
+            const response = self.allocator.alloc(u8, resp_len) catch |err| {
+                q.err = err;
+                q.completed = true;
+                continue :outer;
+            };
 
             var total_read: usize = 0;
             while (total_read < resp_len) {
-                const n = try std.posix.read(fd, response[total_read..]);
+                const n = readWithTimeout(fd, response[total_read..], timeout_ms) catch |err| {
+                    q.err = err;
+                    q.completed = true;
+                    self.allocator.free(response);
+                    continue :outer;
+                };
                 if (n == 0) {
                     q.err = error.ConnectionClosed;
                     q.completed = true;
                     self.allocator.free(response);
-                    continue;
+                    continue :outer;
                 }
                 total_read += n;
             }

@@ -171,13 +171,13 @@ pub const TsigRecord = struct {
     const Self = @This();
 
     /// Parse TSIG record from RDATA
-    pub fn parse(allocator: std.mem.Allocator, rdata: []const u8, full_message: []const u8) !Self {
+    pub fn parse(allocator: std.mem.Allocator, rdata: []const u8) !Self {
         if (rdata.len < 16) return error.InvalidTsigRecord;
 
         var offset: usize = 0;
 
         // Parse algorithm name
-        const alg_result = try parseName(allocator, rdata, 0, full_message);
+        const alg_result = try parseName_(allocator, rdata, 0);
         const algorithm_name = alg_result.name;
         offset = alg_result.offset;
 
@@ -325,7 +325,7 @@ pub const TsigContext = struct {
         }
 
         // Parse TSIG record
-        var tsig = try TsigRecord.parse(self.allocator, tsig_info.tsig_rdata, message);
+        var tsig = try TsigRecord.parse(self.allocator, tsig_info.tsig_rdata);
         defer tsig.deinit(self.allocator);
 
         // Verify key name matches
@@ -618,7 +618,7 @@ pub const TsigContext = struct {
         i = 0;
         while (i < arcount) : (i += 1) {
             const rr_start = offset;
-            const name_result = try parseName(self.allocator, message, offset, message);
+            const name_result = try parseName_(self.allocator, message, offset);
             defer self.allocator.free(name_result.name);
             offset = name_result.offset;
 
@@ -675,97 +675,12 @@ pub const VerifyResult = struct {
     original_id: u16 = 0,
 };
 
-// Helper functions
-
-/// Maximum compression pointer hops to prevent infinite loops (RFC 1035)
-const max_compression_hops: u8 = 16;
-/// Maximum DNS name length per RFC 1035 Section 2.3.4
-const max_name_length: usize = 255;
-
-fn parseName(allocator: std.mem.Allocator, data: []const u8, start: usize, full_msg: []const u8) !struct { name: []const u8, offset: usize } {
-    var name: std.ArrayList(u8) = .empty;
-    errdefer name.deinit(allocator);
-
-    var offset = start;
-    var followed_ptr = false;
-    var final_offset = start;
-    var pointer_hops: u8 = 0;
-    var total_name_len: usize = 0;
-    _ = full_msg;
-
-    while (offset < data.len) {
-        const len = data[offset];
-
-        if (len == 0) {
-            if (!followed_ptr) final_offset = offset + 1;
-            break;
-        }
-
-        if (len & 0xC0 == 0xC0) {
-            // Compression pointer - check for loop
-            pointer_hops += 1;
-            if (pointer_hops > max_compression_hops) {
-                return error.CompressionLoopDetected;
-            }
-            if (offset + 1 >= data.len) return error.InvalidName;
-            const ptr = (@as(u16, len & 0x3F) << 8) | data[offset + 1];
-            if (!followed_ptr) final_offset = offset + 2;
-            followed_ptr = true;
-            offset = ptr;
-            continue;
-        }
-
-        if (offset + 1 + len > data.len) return error.InvalidName;
-
-        // Check max name length (length byte + label)
-        total_name_len += 1 + len;
-        if (total_name_len > max_name_length) {
-            return error.NameTooLong;
-        }
-
-        if (name.items.len > 0) {
-            try name.append(allocator, '.');
-        }
-        try name.appendSlice(allocator, data[offset + 1 .. offset + 1 + len]);
-        offset += 1 + len;
-    }
-
-    return .{
-        .name = try name.toOwnedSlice(allocator),
-        .offset = final_offset,
-    };
-}
-
-/// Encode name in wire format (lowercase)
-fn encodeNameLower(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), name: []const u8) !void {
-    var iter = std.mem.splitScalar(u8, name, '.');
-    while (iter.next()) |label| {
-        if (label.len == 0) continue;
-        try buffer.append(allocator, @intCast(label.len));
-        for (label) |c| {
-            try buffer.append(allocator, std.ascii.toLower(c));
-        }
-    }
-    try buffer.append(allocator, 0);
-}
-
-fn skipName(data: []const u8, start: usize) !usize {
-    var offset = start;
-    while (offset < data.len) {
-        const len = data[offset];
-        if (len == 0) return offset + 1;
-        if (len & 0xC0 == 0xC0) return offset + 2;
-        offset += 1 + len;
-    }
-    return error.InvalidName;
-}
-
-fn skipRR(data: []const u8, start: usize) !usize {
-    const offset = try skipName(data, start);
-    if (offset + 10 > data.len) return error.InvalidRR;
-    const rdlength = std.mem.readInt(u16, data[offset + 8 ..][0..2], .big);
-    return offset + 10 + rdlength;
-}
+// Helper functions -- delegated to shared dns_name module to avoid duplication
+const dns_name = @import("dns_name");
+const parseName_ = dns_name.parseName;
+const encodeNameLower = dns_name.encodeNameLower;
+const skipName = dns_name.skipName;
+const skipRR = dns_name.skipRR;
 
 // ============================================================================
 // Tests

@@ -287,7 +287,11 @@ pub fn checkAndSchedulePrefetch(
     qclass: Class,
 ) void {
     if (prefetcher.needsPrefetch(entry, name, qtype, qclass)) {
-        _ = prefetcher.schedulePrefetch(name, qtype, qclass) catch {};
+        _ = prefetcher.schedulePrefetch(name, qtype, qclass) catch |err| {
+            // Prefetch scheduling is best-effort; cache still serves stale entry.
+            // Log at debug level so operators can diagnose prefetch failures.
+            std.log.debug("schedulePrefetch failed: {}", .{err});
+        };
     }
 }
 

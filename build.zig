@@ -18,6 +18,9 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "feature_doq", feature_doq);
     build_options.addOption(bool, "enable_spice", enable_spice);
 
+    // Create a single shared build_options module to avoid duplication conflicts
+    const build_options_mod = build_options.createModule();
+
     // Get spice dependency if enabled
     const spice_mod: ?*std.Build.Module = if (enable_spice) blk: {
         const spice_dep = b.dependency("spice", .{
@@ -38,28 +41,28 @@ pub fn build(b: *std.Build) void {
     // - Transport (client, server)
     // - Utilities (compression, edns)
 
-    // RFC 1035 Section 3.1: Name Space Definitions
+    // Public API -- RFC 1035 Section 3.1: Name Space Definitions
     // DNS name handling (labels, compression, encoding)
     const name_mod = b.addModule("name", .{
         .root_source_file = b.path("src/name.zig"),
         .target = target,
     });
 
-    // RFC 1035 Section 4.1.1: Header Section Format
+    // Public API -- RFC 1035 Section 4.1.1: Header Section Format
     // DNS message header structure
     const header_mod = b.addModule("header", .{
         .root_source_file = b.path("src/header.zig"),
         .target = target,
     });
 
-    // RFC 1035 Section 3.2: RR Definitions
+    // Public API -- RFC 1035 Section 3.2: RR Definitions
     // DNS resource record types (A, AAAA, CNAME, MX, etc.)
     const types_mod = b.addModule("types", .{
         .root_source_file = b.path("src/types.zig"),
         .target = target,
     });
 
-    // RFC 1035 Section 4.1.2: Question Section Format
+    // Public API -- RFC 1035 Section 4.1.2: Question Section Format
     // DNS question section handling
     const question_mod = b.addModule("question", .{
         .root_source_file = b.path("src/question.zig"),
@@ -70,7 +73,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // RFC 1035 Section 4.1.3: Resource Record Format
+    // Public API -- RFC 1035 Section 4.1.3: Resource Record Format
     // DNS resource record parsing and encoding
     const record_mod = b.addModule("record", .{
         .root_source_file = b.path("src/record.zig"),
@@ -81,7 +84,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // RFC 1035 Section 4: Messages
+    // Public API -- RFC 1035 Section 4: Messages
     // Complete DNS message handling
     const message_mod = b.addModule("message", .{
         .root_source_file = b.path("src/message.zig"),
@@ -95,7 +98,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // RFC 6891: Extension Mechanisms for DNS (EDNS0)
+    // Public API -- RFC 6891: Extension Mechanisms for DNS (EDNS0)
     // Extended DNS options and OPT record handling
     const edns_mod = b.addModule("edns", .{
         .root_source_file = b.path("src/edns.zig"),
@@ -105,13 +108,13 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Cache Poisoning Protection (RFC 5452)
+    // Internal -- Cache poisoning protection used by cache module (RFC 5452)
     const cache_protection_mod = b.addModule("cache_protection", .{
         .root_source_file = b.path("src/resolver/cache_protection.zig"),
         .target = target,
     });
 
-    // DNS caching (RFC 1035 Section 7.4)
+    // Public API -- DNS caching (RFC 1035 Section 7.4)
     // TTL-based response caching
     const cache_mod = b.addModule("cache", .{
         .root_source_file = b.path("src/cache.zig"),
@@ -124,7 +127,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // RFC 1034 Section 5.3.3: Stub Resolver
+    // Public API -- RFC 1034 Section 5.3.3: Stub Resolver
     // Simple forwarding resolver
     const stub_mod = b.addModule("stub", .{
         .root_source_file = b.path("src/stub.zig"),
@@ -139,7 +142,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // RFC 1034 Section 5.3: Recursive Resolver
+    // Public API -- RFC 1034 Section 5.3: Recursive Resolver
     // Full recursive name resolution
     const recursive_mod = b.addModule("recursive", .{
         .root_source_file = b.path("src/recursive.zig"),
@@ -156,7 +159,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // DNS Client - High-level resolution interface
+    // Public API -- DNS Client - High-level resolution interface
     // Combines stub and recursive resolution
     const client_mod = b.addModule("client", .{
         .root_source_file = b.path("src/client.zig"),
@@ -179,37 +182,37 @@ pub fn build(b: *std.Build) void {
     // Utility Modules (for deterministic testing)
     // ========================================================================
 
-    // Clock abstraction for deterministic testing
+    // Internal -- Clock abstraction for deterministic testing
     const clock_mod = b.addModule("util_clock", .{
         .root_source_file = b.path("src/util/clock.zig"),
         .target = target,
     });
 
-    // Random abstraction for deterministic testing
+    // Internal -- Random abstraction for deterministic testing
     const random_mod = b.addModule("util_random", .{
         .root_source_file = b.path("src/util/random.zig"),
         .target = target,
     });
 
-    // LRU Cache implementation
+    // Internal -- LRU Cache implementation (used by dns_cache)
     const lru_mod = b.addModule("util_lru", .{
         .root_source_file = b.path("src/util/lru.zig"),
         .target = target,
     });
 
-    // Prometheus-style metrics
+    // Internal -- Prometheus-style metrics (used by resolver)
     const metrics_mod = b.addModule("util_metrics", .{
         .root_source_file = b.path("src/util/metrics.zig"),
         .target = target,
     });
 
-    // Enhanced metrics (histograms, gauges, per-server stats)
+    // Public API -- Enhanced metrics (histograms, gauges, per-server stats)
     const enhanced_metrics_mod = b.addModule("util_enhanced_metrics", .{
         .root_source_file = b.path("src/util/enhanced_metrics.zig"),
         .target = target,
     });
 
-    // Exponential backoff with jitter
+    // Public API -- Exponential backoff with jitter
     const backoff_mod = b.addModule("util_backoff", .{
         .root_source_file = b.path("src/util/backoff.zig"),
         .target = target,
@@ -219,19 +222,19 @@ pub fn build(b: *std.Build) void {
     // Resolver Channel Abstraction
     // ========================================================================
 
-    // Channel interface for all transports
+    // Internal -- Channel interface for all transports (vtable abstraction)
     const channel_mod = b.addModule("resolver_channel", .{
         .root_source_file = b.path("src/resolver/channel.zig"),
         .target = target,
     });
 
-    // EDNS(0) handling for resolver
+    // Internal -- EDNS(0) handling for resolver
     const resolver_edns_mod = b.addModule("resolver_edns", .{
         .root_source_file = b.path("src/resolver/edns.zig"),
         .target = target,
     });
 
-    // DNS Cache with TTL clamping (RFC 2308 negative caching)
+    // Internal -- DNS Cache with TTL clamping (RFC 2308 negative caching)
     const dns_cache_mod = b.addModule("dns_cache", .{
         .root_source_file = b.path("src/resolver/dns_cache.zig"),
         .target = target,
@@ -245,13 +248,13 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Zone Transfer (RFC 5936 AXFR, RFC 1995 IXFR)
+    // Public API -- Zone Transfer (RFC 5936 AXFR, RFC 1995 IXFR)
     const zone_transfer_mod = b.addModule("zone_transfer", .{
         .root_source_file = b.path("src/resolver/zone_transfer.zig"),
         .target = target,
     });
 
-    // DNSSEC Validation (RFC 4033/4034/4035)
+    // Public API -- DNSSEC Validation (RFC 4033/4034/4035)
     const dnssec_mod = b.addModule("dnssec", .{
         .root_source_file = b.path("src/resolver/dnssec.zig"),
         .target = target,
@@ -266,26 +269,37 @@ pub fn build(b: *std.Build) void {
     // Security Modules
     // ========================================================================
 
-    // TSIG - Transaction Signature (RFC 2845)
+    // Internal -- Shared DNS name parsing utilities for security modules
+    const security_dns_name_mod = b.addModule("security_dns_name", .{
+        .root_source_file = b.path("src/security/dns_name.zig"),
+        .target = target,
+    });
+
+    // Public API -- TSIG - Transaction Signature (RFC 2845)
     const tsig_mod = b.addModule("tsig", .{
         .root_source_file = b.path("src/security/tsig.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "dns_name", .module = security_dns_name_mod },
+        },
     });
 
-    // SIG(0) - DNS Request and Transaction Signatures (RFC 2931)
+    // Public API -- SIG(0) - DNS Request and Transaction Signatures (RFC 2931)
     const sig0_mod = b.addModule("sig0", .{
         .root_source_file = b.path("src/security/sig0.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "dns_name", .module = security_dns_name_mod },
+        },
     });
 
-    // Zone File Parser (RFC 1035 Section 5)
+    // Public API -- Zone File Parser (RFC 1035 Section 5)
     const zone_file_mod = b.addModule("zone_file", .{
         .root_source_file = b.path("src/zone_file.zig"),
         .target = target,
     });
-    _ = zone_file_mod;
 
-    // Cache Prefetching
+    // Public API -- Cache Prefetching
     const cache_prefetch_mod = b.addModule("cache_prefetch", .{
         .root_source_file = b.path("src/resolver/cache_prefetch.zig"),
         .target = target,
@@ -295,39 +309,38 @@ pub fn build(b: *std.Build) void {
             .{ .name = "clock", .module = clock_mod },
         },
     });
-    _ = cache_prefetch_mod; // Module available for external use
 
-    // Server Failover and Load Balancing
+    // Public API -- Server Failover and Load Balancing
     const failover_mod = b.addModule("failover", .{
         .root_source_file = b.path("src/resolver/failover.zig"),
         .target = target,
     });
 
-    // Split DNS / Policy Routing
+    // Public API -- Split DNS / Policy Routing
     const split_dns_mod = b.addModule("split_dns", .{
         .root_source_file = b.path("src/resolver/split_dns.zig"),
         .target = target,
     });
 
-    // Response Policy Zones (RFC 8646)
+    // Public API -- Response Policy Zones (RFC 8646)
     const rpz_mod = b.addModule("rpz", .{
         .root_source_file = b.path("src/resolver/rpz.zig"),
         .target = target,
     });
 
-    // Query/Response Logging
+    // Public API -- Query/Response Logging
     const logging_mod = b.addModule("logging", .{
         .root_source_file = b.path("src/resolver/logging.zig"),
         .target = target,
     });
 
-    // Configuration File Support
+    // Public API -- Configuration File Support
     const config_mod = b.addModule("config", .{
         .root_source_file = b.path("src/resolver/config.zig"),
         .target = target,
     });
 
-    // High-Level Convenience APIs
+    // Public API -- High-Level Convenience APIs
     const convenience_mod = b.addModule("convenience", .{
         .root_source_file = b.path("src/resolver/convenience.zig"),
         .target = target,
@@ -337,7 +350,7 @@ pub fn build(b: *std.Build) void {
     // Transport Modules
     // ========================================================================
 
-    // UDP Transport
+    // Public API -- UDP Transport
     const udp_mod = b.addModule("transport_udp", .{
         .root_source_file = b.path("src/transports/udp.zig"),
         .target = target,
@@ -346,7 +359,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // TCP Transport
+    // Public API -- TCP Transport
     const tcp_mod = b.addModule("transport_tcp", .{
         .root_source_file = b.path("src/transports/tcp.zig"),
         .target = target,
@@ -355,7 +368,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // DoT Transport (RFC 7858)
+    // Public API -- DoT Transport interface (RFC 7858, requires TLS backend)
     const dot_mod = b.addModule("transport_dot", .{
         .root_source_file = b.path("src/transports/dot.zig"),
         .target = target,
@@ -364,7 +377,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // DoH Transport (RFC 8484)
+    // Public API -- DoH Transport interface (RFC 8484, requires HTTP backend)
     const doh_mod = b.addModule("transport_doh", .{
         .root_source_file = b.path("src/transports/doh.zig"),
         .target = target,
@@ -373,45 +386,27 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // DoQ Transport (RFC 9250) - Feature gated
+    // Public API -- DoQ Transport interface (RFC 9250, feature-gated, requires QUIC backend)
     const doq_mod = b.addModule("transport_doq", .{
         .root_source_file = b.path("src/transports/doq.zig"),
         .target = target,
         .imports = &.{
             .{ .name = "channel", .module = channel_mod },
-            .{ .name = "build_options", .module = build_options.createModule() },
+            .{ .name = "build_options", .module = build_options_mod },
         },
     });
 
-    // Connection Pool (RFC 7766/7828 - TCP Implementation Requirements)
+    // Public API -- Connection Pool (RFC 7766/7828 - TCP Implementation Requirements)
     const connection_pool_mod = b.addModule("connection_pool", .{
         .root_source_file = b.path("src/transports/connection_pool.zig"),
         .target = target,
     });
 
-    // Happy Eyeballs (RFC 8305 - Dual-Stack Connection Racing)
+    // Public API -- Happy Eyeballs (RFC 8305 - Dual-Stack Connection Racing)
     const happy_eyeballs_mod = b.addModule("happy_eyeballs", .{
         .root_source_file = b.path("src/transports/happy_eyeballs.zig"),
         .target = target,
     });
-
-    // Mark unused modules as used (used indirectly or for future expansion)
-    _ = udp_mod;
-    _ = tcp_mod;
-    _ = doh_mod;
-    _ = dnssec_mod;
-    _ = tsig_mod;
-    _ = sig0_mod;
-    _ = connection_pool_mod;
-    _ = happy_eyeballs_mod;
-    _ = enhanced_metrics_mod;
-    _ = backoff_mod;
-    _ = failover_mod;
-    _ = split_dns_mod;
-    _ = rpz_mod;
-    _ = logging_mod;
-    _ = config_mod;
-    _ = convenience_mod;
 
     // ========================================================================
     // Public API Module - Main Entry Point
@@ -425,13 +420,13 @@ pub fn build(b: *std.Build) void {
     //        const message = dns.message;
     //        const resolver = dns.client;
 
-    // Parallel module for spice-based parallelism
+    // Public API -- Parallel module for spice-based parallelism
     const parallel_mod = b.addModule("parallel", .{
         .root_source_file = b.path("src/parallel.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "build_options", .module = build_options.createModule() },
+            .{ .name = "build_options", .module = build_options_mod },
             .{ .name = "record", .module = record_mod },
             .{ .name = "message", .module = message_mod },
         },
@@ -458,6 +453,34 @@ pub fn build(b: *std.Build) void {
             .{ .name = "parallel", .module = parallel_mod },
         },
     });
+
+    // Wire additional modules into the public API
+    // Transports
+    dns_mod.addImport("transport_udp", udp_mod);
+    dns_mod.addImport("transport_tcp", tcp_mod);
+    dns_mod.addImport("transport_dot", dot_mod);
+    dns_mod.addImport("transport_doh", doh_mod);
+    dns_mod.addImport("transport_doq", doq_mod);
+    dns_mod.addImport("connection_pool", connection_pool_mod);
+    dns_mod.addImport("happy_eyeballs", happy_eyeballs_mod);
+    // Security
+    dns_mod.addImport("tsig", tsig_mod);
+    dns_mod.addImport("sig0", sig0_mod);
+    // Resolver extensions
+    dns_mod.addImport("dnssec", dnssec_mod);
+    dns_mod.addImport("zone_transfer", zone_transfer_mod);
+    dns_mod.addImport("failover", failover_mod);
+    dns_mod.addImport("split_dns", split_dns_mod);
+    dns_mod.addImport("rpz", rpz_mod);
+    dns_mod.addImport("logging", logging_mod);
+    dns_mod.addImport("config", config_mod);
+    dns_mod.addImport("convenience", convenience_mod);
+    dns_mod.addImport("cache_prefetch", cache_prefetch_mod);
+    // Utilities
+    dns_mod.addImport("enhanced_metrics", enhanced_metrics_mod);
+    dns_mod.addImport("backoff", backoff_mod);
+    // Other
+    dns_mod.addImport("zone_file", zone_file_mod);
 
     // ========================================================================
     // zdig CLI - dig-like DNS query tool
@@ -906,6 +929,25 @@ pub fn build(b: *std.Build) void {
     const run_dnssec_test = b.addRunArtifact(dnssec_test);
     test_resolver_step.dependOn(&run_dnssec_test.step);
 
+    // DNS cache tests (RFC 2308 negative caching, TTL management)
+    const dns_cache_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/resolver/dns_cache.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "types", .module = types_mod },
+                .{ .name = "lru", .module = lru_mod },
+                .{ .name = "clock", .module = clock_mod },
+                .{ .name = "record", .module = record_mod },
+                .{ .name = "message", .module = message_mod },
+                .{ .name = "name", .module = name_mod },
+            },
+        }),
+    });
+    const run_dns_cache_test = b.addRunArtifact(dns_cache_test);
+    test_resolver_step.dependOn(&run_dns_cache_test.step);
+
     // Cache prefetching tests
     const cache_prefetch_test = b.addTest(.{
         .root_module = b.createModule(.{
@@ -1002,6 +1044,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/security/tsig.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "dns_name", .module = security_dns_name_mod },
+            },
         }),
     });
     const run_tsig_test = b.addRunArtifact(tsig_test);
@@ -1013,10 +1058,24 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/security/sig0.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "dns_name", .module = security_dns_name_mod },
+            },
         }),
     });
     const run_sig0_test = b.addRunArtifact(sig0_test);
     test_security_step.dependOn(&run_sig0_test.step);
+
+    // DNS name parsing utilities tests
+    const dns_name_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/security/dns_name.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_dns_name_test = b.addRunArtifact(dns_name_test);
+    test_security_step.dependOn(&run_dns_name_test.step);
 
     // Zone file tests
     const zone_file_test = b.addTest(.{

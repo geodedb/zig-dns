@@ -35,6 +35,15 @@ pub const Type = types_mod.Type;
 pub const Class = types_mod.Class;
 
 /// DNS Resource Record (RFC 1035 Section 4.1.3)
+///
+/// **Aliasing invariant:** The `rdata` field is always a sub-slice of the
+/// original DNS wire-format message buffer passed to `parse()`.  Methods
+/// that accept a `full_message` parameter (e.g. `parseName`, `parseMX`,
+/// `parseSOA`, `parseSRV`, `parseSVCB`, `parseRRSIG`, `parseNSEC`) rely
+/// on this: they compute the byte offset of `rdata` within `full_message`
+/// via pointer arithmetic (`@intFromPtr(rdata.ptr) - @intFromPtr(full_message.ptr)`).
+/// Callers **must** pass the same buffer (or a buffer whose `.ptr` matches)
+/// that was originally supplied to `ResourceRecord.parse()`.
 pub const ResourceRecord = struct {
     /// Domain name
     name: Name,
@@ -51,13 +60,23 @@ pub const ResourceRecord = struct {
     /// Length of RDATA
     rdlength: u16,
 
-    /// Record data (raw bytes)
+    /// Record data (raw bytes, sub-slice of the wire-format message buffer)
     rdata: []const u8,
 
     /// Total wire length of this record
     wire_length: usize,
 
     const Self = @This();
+
+    /// Compute the byte offset of `self.rdata` within `full_message`, plus
+    /// an optional `additional_offset` into the rdata payload.
+    ///
+    /// This relies on the aliasing invariant: `self.rdata.ptr` must point
+    /// into `full_message`.  The returned value is suitable for passing to
+    /// `Name.parse(full_message, offset)`.
+    fn rdataOffset(self: Self, full_message: []const u8, additional_offset: usize) usize {
+        return (@intFromPtr(self.rdata.ptr) - @intFromPtr(full_message.ptr)) + additional_offset;
+    }
 
     /// Parse a resource record from wire format
     pub fn parse(data: []const u8, offset: usize) !Self {
@@ -130,12 +149,7 @@ pub const ResourceRecord = struct {
             else => return error.WrongRecordType,
         }
 
-        // Find the offset of rdata in the full message
-        const rdata_ptr = @intFromPtr(self.rdata.ptr);
-        const msg_ptr = @intFromPtr(full_message.ptr);
-        const offset = rdata_ptr - msg_ptr;
-
-        return Name.parse(full_message, offset);
+        return Name.parse(full_message, self.rdataOffset(full_message, 0));
     }
 
     /// Parse RDATA as MX record
@@ -154,12 +168,8 @@ pub const ResourceRecord = struct {
 
         const preference = std.mem.readInt(u16, self.rdata[0..2], .big);
 
-        // Parse the exchange name
-        const rdata_ptr = @intFromPtr(self.rdata.ptr);
-        const msg_ptr = @intFromPtr(full_message.ptr);
-        const offset = rdata_ptr - msg_ptr + 2;
-
-        const exchange = try Name.parse(full_message, offset);
+        // Parse the exchange name (starts after 2-byte preference field)
+        const exchange = try Name.parse(full_message, self.rdataOffset(full_message, 2));
 
         return MxData{
             .preference = preference,
@@ -183,9 +193,7 @@ pub const ResourceRecord = struct {
             return error.WrongRecordType;
         }
 
-        const rdata_ptr = @intFromPtr(self.rdata.ptr);
-        const msg_ptr = @intFromPtr(full_message.ptr);
-        var offset = rdata_ptr - msg_ptr;
+        var offset = self.rdataOffset(full_message, 0);
 
         const mname = try Name.parse(full_message, offset);
         offset += mname.wire_length;
@@ -297,12 +305,8 @@ pub const ResourceRecord = struct {
         const weight = std.mem.readInt(u16, self.rdata[2..4], .big);
         const port = std.mem.readInt(u16, self.rdata[4..6], .big);
 
-        // Parse the target name
-        const rdata_ptr = @intFromPtr(self.rdata.ptr);
-        const msg_ptr = @intFromPtr(full_message.ptr);
-        const offset = rdata_ptr - msg_ptr + 6;
-
-        const target = try Name.parse(full_message, offset);
+        // Parse the target name (starts after 6-byte priority/weight/port fields)
+        const target = try Name.parse(full_message, self.rdataOffset(full_message, 6));
 
         return SrvData{
             .priority = priority,
@@ -512,10 +516,8 @@ pub const ResourceRecord = struct {
 
         const priority = std.mem.readInt(u16, self.rdata[0..2], .big);
 
-        // Parse the target name
-        const rdata_ptr = @intFromPtr(self.rdata.ptr);
-        const msg_ptr = @intFromPtr(full_message.ptr);
-        const target_offset = rdata_ptr - msg_ptr + 2;
+        // Parse the target name (starts after 2-byte priority field)
+        const target_offset = self.rdataOffset(full_message, 2);
 
         const target = try Name.parse(full_message, target_offset);
 
@@ -598,35 +600,31 @@ pub const ResourceRecord = struct {
     }
 
     /// Parse IPv4 hints from SVCB parameter
-    pub fn parseSvcbIpv4Hint(value: []const u8) ![][4]u8 {
+    pub fn parseSvcbIpv4Hint(value: []const u8, allocator: std.mem.Allocator) ![][4]u8 {
         if (value.len % 4 != 0) {
             return error.InvalidRdataLength;
         }
         const count = value.len / 4;
-        var result: [16][4]u8 = undefined;
-        if (count > 16) {
-            return error.InvalidRdataLength;
-        }
+        const result = try allocator.alloc([4]u8, count);
+        errdefer allocator.free(result);
         for (0..count) |i| {
             result[i] = value[i * 4 ..][0..4].*;
         }
-        return result[0..count];
+        return result;
     }
 
     /// Parse IPv6 hints from SVCB parameter
-    pub fn parseSvcbIpv6Hint(value: []const u8) ![][16]u8 {
+    pub fn parseSvcbIpv6Hint(value: []const u8, allocator: std.mem.Allocator) ![][16]u8 {
         if (value.len % 16 != 0) {
             return error.InvalidRdataLength;
         }
         const count = value.len / 16;
-        var result: [16][16]u8 = undefined;
-        if (count > 16) {
-            return error.InvalidRdataLength;
-        }
+        const result = try allocator.alloc([16]u8, count);
+        errdefer allocator.free(result);
         for (0..count) |i| {
             result[i] = value[i * 16 ..][0..16].*;
         }
-        return result[0..count];
+        return result;
     }
 
     /// Parse port from SVCB parameter
@@ -840,12 +838,8 @@ pub const ResourceRecord = struct {
         const sig_inception = std.mem.readInt(u32, self.rdata[12..16], .big);
         const key_tag = std.mem.readInt(u16, self.rdata[16..18], .big);
 
-        // Parse signer's name
-        const rdata_ptr = @intFromPtr(self.rdata.ptr);
-        const msg_ptr = @intFromPtr(full_message.ptr);
-        const signer_offset = rdata_ptr - msg_ptr + 18;
-
-        const signer = try Name.parse(full_message, signer_offset);
+        // Parse signer's name (starts after 18-byte fixed fields)
+        const signer = try Name.parse(full_message, self.rdataOffset(full_message, 18));
         const sig_offset = 18 + signer.wire_length;
 
         if (sig_offset > self.rdlength) {
@@ -926,11 +920,7 @@ pub const ResourceRecord = struct {
             return error.InvalidRdataLength;
         }
 
-        const rdata_ptr = @intFromPtr(self.rdata.ptr);
-        const msg_ptr = @intFromPtr(full_message.ptr);
-        const next_offset = rdata_ptr - msg_ptr;
-
-        const next_domain = try Name.parse(full_message, next_offset);
+        const next_domain = try Name.parse(full_message, self.rdataOffset(full_message, 0));
 
         const bitmap_start = next_domain.wire_length;
         const type_bitmaps = if (bitmap_start < self.rdlength)
@@ -1760,4 +1750,100 @@ test "ResourceRecord.parseHTTPS with params" {
 
     // No more params
     try std.testing.expect(iter.next() == null);
+}
+
+test "ResourceRecord.parseSvcbIpv4Hint single address" {
+    const allocator = std.testing.allocator;
+    // Single IPv4 address: 192.168.1.1
+    const value = [_]u8{ 192, 168, 1, 1 };
+    const hints = try ResourceRecord.parseSvcbIpv4Hint(&value, allocator);
+    defer allocator.free(hints);
+
+    try std.testing.expectEqual(@as(usize, 1), hints.len);
+    try std.testing.expectEqual([4]u8{ 192, 168, 1, 1 }, hints[0]);
+}
+
+test "ResourceRecord.parseSvcbIpv4Hint multiple addresses" {
+    const allocator = std.testing.allocator;
+    // Two IPv4 addresses: 10.0.0.1, 10.0.0.2
+    const value = [_]u8{ 10, 0, 0, 1, 10, 0, 0, 2 };
+    const hints = try ResourceRecord.parseSvcbIpv4Hint(&value, allocator);
+    defer allocator.free(hints);
+
+    try std.testing.expectEqual(@as(usize, 2), hints.len);
+    try std.testing.expectEqual([4]u8{ 10, 0, 0, 1 }, hints[0]);
+    try std.testing.expectEqual([4]u8{ 10, 0, 0, 2 }, hints[1]);
+}
+
+test "ResourceRecord.parseSvcbIpv4Hint invalid length" {
+    const allocator = std.testing.allocator;
+    // 5 bytes is not a multiple of 4
+    const value = [_]u8{ 10, 0, 0, 1, 10 };
+    try std.testing.expectError(error.InvalidRdataLength, ResourceRecord.parseSvcbIpv4Hint(&value, allocator));
+}
+
+test "ResourceRecord.parseSvcbIpv4Hint empty value" {
+    const allocator = std.testing.allocator;
+    const value = [_]u8{};
+    const hints = try ResourceRecord.parseSvcbIpv4Hint(&value, allocator);
+    defer allocator.free(hints);
+
+    try std.testing.expectEqual(@as(usize, 0), hints.len);
+}
+
+test "ResourceRecord.parseSvcbIpv6Hint single address" {
+    const allocator = std.testing.allocator;
+    // Single IPv6 address: ::1 (loopback)
+    const value = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    const hints = try ResourceRecord.parseSvcbIpv6Hint(&value, allocator);
+    defer allocator.free(hints);
+
+    try std.testing.expectEqual(@as(usize, 1), hints.len);
+    const expected = [16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+    try std.testing.expectEqual(expected, hints[0]);
+}
+
+test "ResourceRecord.parseSvcbIpv6Hint multiple addresses" {
+    const allocator = std.testing.allocator;
+    // Two IPv6 addresses
+    var value: [32]u8 = undefined;
+    // First: 2001:db8::1
+    value[0] = 0x20;
+    value[1] = 0x01;
+    value[2] = 0x0d;
+    value[3] = 0xb8;
+    @memset(value[4..15], 0);
+    value[15] = 0x01;
+    // Second: 2001:db8::2
+    value[16] = 0x20;
+    value[17] = 0x01;
+    value[18] = 0x0d;
+    value[19] = 0xb8;
+    @memset(value[20..31], 0);
+    value[31] = 0x02;
+
+    const hints = try ResourceRecord.parseSvcbIpv6Hint(&value, allocator);
+    defer allocator.free(hints);
+
+    try std.testing.expectEqual(@as(usize, 2), hints.len);
+    try std.testing.expectEqual(@as(u8, 0x20), hints[0][0]);
+    try std.testing.expectEqual(@as(u8, 0x01), hints[0][15]);
+    try std.testing.expectEqual(@as(u8, 0x02), hints[1][15]);
+}
+
+test "ResourceRecord.parseSvcbIpv6Hint invalid length" {
+    const allocator = std.testing.allocator;
+    // 17 bytes is not a multiple of 16
+    var value: [17]u8 = undefined;
+    @memset(&value, 0);
+    try std.testing.expectError(error.InvalidRdataLength, ResourceRecord.parseSvcbIpv6Hint(&value, allocator));
+}
+
+test "ResourceRecord.parseSvcbIpv6Hint empty value" {
+    const allocator = std.testing.allocator;
+    const value = [_]u8{};
+    const hints = try ResourceRecord.parseSvcbIpv6Hint(&value, allocator);
+    defer allocator.free(hints);
+
+    try std.testing.expectEqual(@as(usize, 0), hints.len);
 }

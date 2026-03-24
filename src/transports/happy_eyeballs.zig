@@ -329,6 +329,7 @@ pub const HappyEyeballs = struct {
 
         // Set TCP_NODELAY
         const one: c_int = 1;
+        // TCP_NODELAY is an optional performance optimization; connection works without it.
         std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {};
 
         // Start connection (will return WouldBlock for non-blocking)

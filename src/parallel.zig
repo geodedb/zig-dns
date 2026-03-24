@@ -64,6 +64,10 @@ const spice = if (build_options.enable_spice) @import("spice") else struct {
 // Global Thread Pool
 // ============================================================================
 
+/// GPA wrapping page_allocator so the thread pool's small internal
+/// allocations (job states, worker lists) are sub-allocated from pages
+/// instead of issuing a separate mmap syscall for each one.
+var pool_gpa: if (build_options.enable_spice) std.heap.GeneralPurposeAllocator(.{ .backing_allocator = .page_allocator }) else void = if (build_options.enable_spice) .init else {};
 var global_pool: if (build_options.enable_spice) ?spice.ThreadPool else void = if (build_options.enable_spice) null else {};
 var pool_mutex: std.Thread.Mutex = .{};
 
@@ -74,7 +78,7 @@ pub fn getPool() if (build_options.enable_spice) *spice.ThreadPool else void {
     defer pool_mutex.unlock();
 
     if (global_pool == null) {
-        global_pool = spice.ThreadPool.init(std.heap.page_allocator);
+        global_pool = spice.ThreadPool.init(pool_gpa.allocator());
         global_pool.?.start(.{});
     }
     return &global_pool.?;
@@ -90,6 +94,9 @@ pub fn deinitPool() void {
         pool.deinit();
         global_pool = null;
     }
+    // Reset the GPA so leaked-memory checks pass and pages are returned.
+    _ = pool_gpa.deinit();
+    pool_gpa = .init;
 }
 
 // ============================================================================

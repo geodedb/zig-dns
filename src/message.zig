@@ -39,16 +39,55 @@ pub const Message = struct {
     /// Offset where questions begin
     question_offset: usize,
 
+    /// Cached byte offset where answer records begin
+    answer_offset: usize,
+
+    /// Cached byte offset where authority records begin
+    authority_offset: usize,
+
+    /// Cached byte offset where additional records begin
+    additional_offset: usize,
+
     const Self = @This();
 
-    /// Parse a DNS message from wire format
+    /// Parse a DNS message from wire format.
+    /// Eagerly computes section offsets so that answers(), authority(),
+    /// and additional() are O(1) on every call.
     pub fn parse(data: []const u8) !Self {
         const header = try Header.parse(data);
+
+        // Compute answer_offset by skipping questions
+        var offset: usize = header_mod.header_size;
+        var q_remaining = header.qdcount;
+        while (q_remaining > 0) : (q_remaining -= 1) {
+            const q = try Question.parse(data, offset);
+            offset += q.wire_length;
+        }
+        const answer_off = offset;
+
+        // Compute authority_offset by skipping answers
+        var an_remaining = header.ancount;
+        while (an_remaining > 0) : (an_remaining -= 1) {
+            const rr = try ResourceRecord.parse(data, offset);
+            offset += rr.wire_length;
+        }
+        const authority_off = offset;
+
+        // Compute additional_offset by skipping authority
+        var ns_remaining = header.nscount;
+        while (ns_remaining > 0) : (ns_remaining -= 1) {
+            const rr = try ResourceRecord.parse(data, offset);
+            offset += rr.wire_length;
+        }
+        const additional_off = offset;
 
         return Self{
             .data = data,
             .header = header,
             .question_offset = header_mod.header_size,
+            .answer_offset = answer_off,
+            .authority_offset = authority_off,
+            .additional_offset = additional_off,
         };
     }
 
@@ -61,77 +100,29 @@ pub const Message = struct {
         };
     }
 
-    /// Iterate over answer records
-    pub fn answers(self: Self) !RecordIterator {
-        var offset = self.question_offset;
-
-        // Skip questions
-        var q_remaining = self.header.qdcount;
-        while (q_remaining > 0) : (q_remaining -= 1) {
-            const q = try Question.parse(self.data, offset);
-            offset += q.wire_length;
-        }
-
+    /// Iterate over answer records (O(1) -- uses cached offset)
+    pub fn answers(self: Self) RecordIterator {
         return RecordIterator{
             .message = self,
-            .offset = offset,
+            .offset = self.answer_offset,
             .remaining = self.header.ancount,
         };
     }
 
-    /// Iterate over authority records
-    pub fn authority(self: Self) !RecordIterator {
-        var offset = self.question_offset;
-
-        // Skip questions
-        var q_remaining = self.header.qdcount;
-        while (q_remaining > 0) : (q_remaining -= 1) {
-            const q = try Question.parse(self.data, offset);
-            offset += q.wire_length;
-        }
-
-        // Skip answers
-        var an_remaining = self.header.ancount;
-        while (an_remaining > 0) : (an_remaining -= 1) {
-            const rr = try ResourceRecord.parse(self.data, offset);
-            offset += rr.wire_length;
-        }
-
+    /// Iterate over authority records (O(1) -- uses cached offset)
+    pub fn authority(self: Self) RecordIterator {
         return RecordIterator{
             .message = self,
-            .offset = offset,
+            .offset = self.authority_offset,
             .remaining = self.header.nscount,
         };
     }
 
-    /// Iterate over additional records
-    pub fn additional(self: Self) !RecordIterator {
-        var offset = self.question_offset;
-
-        // Skip questions
-        var q_remaining = self.header.qdcount;
-        while (q_remaining > 0) : (q_remaining -= 1) {
-            const q = try Question.parse(self.data, offset);
-            offset += q.wire_length;
-        }
-
-        // Skip answers
-        var an_remaining = self.header.ancount;
-        while (an_remaining > 0) : (an_remaining -= 1) {
-            const rr = try ResourceRecord.parse(self.data, offset);
-            offset += rr.wire_length;
-        }
-
-        // Skip authority
-        var ns_remaining = self.header.nscount;
-        while (ns_remaining > 0) : (ns_remaining -= 1) {
-            const rr = try ResourceRecord.parse(self.data, offset);
-            offset += rr.wire_length;
-        }
-
+    /// Iterate over additional records (O(1) -- uses cached offset)
+    pub fn additional(self: Self) RecordIterator {
         return RecordIterator{
             .message = self,
-            .offset = offset,
+            .offset = self.additional_offset,
             .remaining = self.header.arcount,
         };
     }
@@ -141,7 +132,7 @@ pub const Message = struct {
         var result: std.ArrayList(ResourceRecord) = .empty;
         errdefer result.deinit(allocator);
 
-        var iter = try self.answers();
+        var iter = self.answers();
         while (try iter.next()) |rr| {
             if (rr.rtype == rtype) {
                 try result.append(allocator, rr);
@@ -361,7 +352,7 @@ test "Message.parse response with answer" {
     try std.testing.expectEqual(@as(u16, 1), msg.header.ancount);
     try std.testing.expect(msg.isSuccess());
 
-    var ans_iter = try msg.answers();
+    var ans_iter = msg.answers();
     const ans = (try ans_iter.next()).?;
     try std.testing.expectEqual(Type.a, ans.rtype);
 
@@ -379,4 +370,135 @@ test "buildQuery" {
     try std.testing.expect(!msg.header.qr);
     try std.testing.expect(msg.header.rd);
     try std.testing.expectEqual(@as(u16, 1), msg.header.qdcount);
+}
+
+test "Message section offsets are cached - multiple calls yield same results" {
+    // DNS response with 1 question, 1 answer, 1 authority (NS), 1 additional (A)
+    const data = [_]u8{
+        // Header
+        0x12, 0x34, // ID
+        0x81, 0x80, // Flags: QR=1, RD=1, RA=1
+        0x00, 0x01, // QDCOUNT: 1
+        0x00, 0x01, // ANCOUNT: 1
+        0x00, 0x01, // NSCOUNT: 1
+        0x00, 0x01, // ARCOUNT: 1
+        // Question: example.com A IN (offset 12)
+        7,    'e',
+        'x',  'a',
+        'm',  'p',
+        'l',  'e',
+        3,    'c',
+        'o',  'm',
+        0,
+        0x00, 0x01, // QTYPE: A
+        0x00, 0x01, // QCLASS: IN
+        // Answer: example.com A IN 300 93.184.216.34
+        0xC0, 0x0C, // Name pointer to offset 12
+        0x00, 0x01, // TYPE: A
+        0x00, 0x01, // CLASS: IN
+        0x00, 0x00, 0x01, 0x2C, // TTL: 300
+        0x00, 0x04, // RDLENGTH: 4
+        93, 184, 216, 34, // RDATA
+        // Authority: example.com NS ns1.example.com
+        0xC0, 0x0C, // Name pointer to offset 12
+        0x00, 0x02, // TYPE: NS
+        0x00, 0x01, // CLASS: IN
+        0x00, 0x00, 0x0E, 0x10, // TTL: 3600
+        0x00, 0x06, // RDLENGTH: 6
+        3,    'n',
+        's',  '1',
+        0xC0, 0x0C, // pointer to example.com
+        // Additional: ns1.example.com A 1.2.3.4
+        3,    'n',
+        's',  '1',
+        0xC0, 0x0C, // pointer to example.com
+        0x00, 0x01, // TYPE: A
+        0x00, 0x01, // CLASS: IN
+        0x00, 0x00, 0x0E, 0x10, // TTL: 3600
+        0x00, 0x04, // RDLENGTH: 4
+        1,    2,
+        3,    4,
+    };
+
+    const msg = try Message.parse(&data);
+
+    // Verify cached offsets are set
+    try std.testing.expect(msg.answer_offset > msg.question_offset);
+    try std.testing.expect(msg.authority_offset > msg.answer_offset);
+    try std.testing.expect(msg.additional_offset > msg.authority_offset);
+
+    // Call answers() twice, verify both return same first record
+    {
+        var iter1 = msg.answers();
+        const rr1 = (try iter1.next()).?;
+        var iter2 = msg.answers();
+        const rr2 = (try iter2.next()).?;
+        try std.testing.expectEqual(rr1.rtype, rr2.rtype);
+        try std.testing.expectEqual(Type.a, rr1.rtype);
+        const addr = try rr1.parseA();
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 93, 184, 216, 34 }, &addr);
+    }
+
+    // Call authority() twice, verify both return same record
+    {
+        var iter1 = msg.authority();
+        const rr1 = (try iter1.next()).?;
+        var iter2 = msg.authority();
+        const rr2 = (try iter2.next()).?;
+        try std.testing.expectEqual(rr1.rtype, rr2.rtype);
+        try std.testing.expectEqual(Type.ns, rr1.rtype);
+    }
+
+    // Call additional() twice, verify both return same record
+    {
+        var iter1 = msg.additional();
+        const rr1 = (try iter1.next()).?;
+        var iter2 = msg.additional();
+        const rr2 = (try iter2.next()).?;
+        try std.testing.expectEqual(rr1.rtype, rr2.rtype);
+        try std.testing.expectEqual(Type.a, rr1.rtype);
+        const addr = try rr1.parseA();
+        try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4 }, &addr);
+    }
+}
+
+test "Message section offsets with empty sections" {
+    // DNS query with 1 question, no answers/authority/additional
+    const data = [_]u8{
+        // Header
+        0x12, 0x34, // ID
+        0x01, 0x00, // Flags: RD=1
+        0x00, 0x01, // QDCOUNT: 1
+        0x00, 0x00, // ANCOUNT: 0
+        0x00, 0x00, // NSCOUNT: 0
+        0x00, 0x00, // ARCOUNT: 0
+        // Question: example.com A IN
+        7,    'e',
+        'x',  'a',
+        'm',  'p',
+        'l',  'e',
+        3,    'c',
+        'o',  'm',
+        0,
+        0x00, 0x01, // QTYPE: A
+        0x00, 0x01, // QCLASS: IN
+    };
+
+    const msg = try Message.parse(&data);
+
+    // All section offsets point to end of question section
+    try std.testing.expectEqual(msg.answer_offset, msg.authority_offset);
+    try std.testing.expectEqual(msg.authority_offset, msg.additional_offset);
+
+    // answers() returns no records
+    var ans_iter = msg.answers();
+    try std.testing.expect(try ans_iter.next() == null);
+
+    // authority() returns no records
+    var auth_iter = msg.authority();
+    try std.testing.expect(try auth_iter.next() == null);
+
+    // additional() returns no records
+    var add_iter = msg.additional();
+    try std.testing.expect(try add_iter.next() == null);
 }

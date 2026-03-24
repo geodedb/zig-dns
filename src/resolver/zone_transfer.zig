@@ -520,15 +520,22 @@ pub const ZoneTransferClient = struct {
         var length_prefix: [2]u8 = undefined;
         std.mem.writeInt(u16, &length_prefix, @intCast(message.len), .big);
 
-        _ = try stream.write(&length_prefix);
-        _ = try stream.write(message);
+        // Use writeAll to ensure all bytes are sent (prevents partial write data loss)
+        try stream.writeAll(&length_prefix);
+        try stream.writeAll(message);
     }
 
     fn receiveTcpMessage(self: *Self, stream: std.net.Stream) ![]u8 {
-        // Read length prefix
+        // Read length prefix - loop to ensure we get exactly 2 bytes
+        // A single read() may return only 1 byte on a slow or congested link;
+        // treating that as ConnectionClosed would be incorrect (SEC-C33/QH-08).
         var length_buf: [2]u8 = undefined;
-        const len_read = try stream.read(&length_buf);
-        if (len_read < 2) return error.ConnectionClosed;
+        var len_read: usize = 0;
+        while (len_read < 2) {
+            const n = try stream.read(length_buf[len_read..]);
+            if (n == 0) return error.ConnectionClosed;
+            len_read += n;
+        }
 
         const message_len = std.mem.readInt(u16, &length_buf, .big);
         if (message_len > self.config.buffer_size) {

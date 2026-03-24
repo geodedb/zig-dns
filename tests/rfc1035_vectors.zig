@@ -75,7 +75,7 @@ test "parse standard response with A record" {
     try std.testing.expectEqual(@as(u16, 1), msg.header.ancount);
     try std.testing.expect(msg.isSuccess());
 
-    var ans_iter = try msg.answers();
+    var ans_iter = msg.answers();
     const answer = (try ans_iter.next()).?;
 
     try std.testing.expectEqual(types.Type.a, answer.rtype);
@@ -92,7 +92,7 @@ test "parse NXDOMAIN response" {
         0x81, 0x83, // Flags: QR=1, RD=1, RA=1, RCODE=3 (NXDOMAIN)
         0x00, 0x01, // QDCOUNT: 1
         0x00, 0x00, // ANCOUNT: 0
-        0x00, 0x01, // NSCOUNT: 1 (SOA for negative caching)
+        0x00, 0x00, // NSCOUNT: 0
         0x00, 0x00, // ARCOUNT: 0
         // Question: nonexistent.example.com A IN
         11,   'n',

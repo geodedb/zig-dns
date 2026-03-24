@@ -62,7 +62,9 @@ pub const UdpTransport = struct {
             }
 
             // Receive response (capture source)
-            var buffer: [65535]u8 = undefined;
+            // 4096 bytes matches EDNS default max payload (RFC 6891).
+            // Responses exceeding this are truncated and fall back to TCP.
+            var buffer: [4096]u8 = undefined;
             var src_addr: std.net.Address = undefined;
             var src_len: std.posix.socklen_t = @sizeOf(std.net.Address);
             const recv_len = std.posix.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len) catch |err| switch (err) {

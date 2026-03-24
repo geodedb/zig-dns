@@ -128,19 +128,7 @@ pub const StubResolver = struct {
         return std.crypto.random.int(u16);
     }
 
-    fn trimTrailingDot(name: []const u8) []const u8 {
-        if (name.len > 0 and name[name.len - 1] == '.') {
-            return name[0 .. name.len - 1];
-        }
-        return name;
-    }
-
-    fn namesEqual(a: []const u8, b: []const u8) bool {
-        return std.ascii.eqlIgnoreCase(trimTrailingDot(a), trimTrailingDot(b));
-    }
-
     fn responseMatchesQuery(
-        allocator: std.mem.Allocator,
         msg: Message,
         expected_name: []const u8,
         expected_type: Type,
@@ -154,10 +142,11 @@ pub const StubResolver = struct {
         const q = (q_iter.next() catch null) orelse return false;
         if (q.qtype != expected_type or q.qclass != expected_class) return false;
 
-        const qname = q.getName(allocator, msg.data) catch return false;
-        defer allocator.free(qname);
-
-        return namesEqual(qname, expected_name);
+        // Zero-allocation name comparison: encode expected name to wire format
+        // on the stack and use Name.eql for case-insensitive comparison.
+        var buf: [name_mod.max_name_length + 1]u8 = undefined;
+        const expected_wire = Name.encodeBuf(expected_name, &buf) catch return false;
+        return q.qname.eql(expected_wire, msg.data, null);
     }
 
     /// Resolve a domain name
@@ -186,7 +175,7 @@ pub const StubResolver = struct {
                     self.allocator.free(response);
                     continue;
                 };
-                if (msg.header.id != id or !responseMatchesQuery(self.allocator, msg, domain, qtype, qclass)) {
+                if (msg.header.id != id or !responseMatchesQuery(msg, domain, qtype, qclass)) {
                     self.allocator.free(response);
                     continue;
                 }
@@ -233,7 +222,9 @@ pub const StubResolver = struct {
             }
 
             // Receive response (capture source)
-            var buffer: [65535]u8 = undefined;
+            // 4096 bytes matches EDNS default max payload (RFC 6891).
+            // Responses exceeding this are truncated and fall back to TCP.
+            var buffer: [4096]u8 = undefined;
             var src_addr: std.net.Address = undefined;
             var src_len: std.posix.socklen_t = @sizeOf(std.net.Address);
             const recv_len = std.posix.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len) catch |err| switch (err) {
@@ -299,7 +290,7 @@ pub const StubResolver = struct {
 
 fn connectWithTimeout(sock: std.posix.socket_t, address: std.net.Address, timeout_ms: u32) !void {
     std.posix.connect(sock, &address.any, address.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock => {},
+        error.WouldBlock, error.InProgress => {},
         else => return err,
     };
 
