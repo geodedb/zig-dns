@@ -1,6 +1,6 @@
 # Gap Analysis -- Resolved
 
-Last updated: 2026-03-24 (post-commit 8fef334)
+Last updated: 2026-03-24 (Phase 3 adversarial review: 9 previously-unknown items verified resolved)
 
 Items below were identified in prior gap analyses and verified as resolved. They are listed here for audit trail purposes.
 
@@ -854,6 +854,74 @@ The following items were evaluated and intentionally classified as Won't Do with
 ### QH-05 / QM-03 / QL-03 / QL-09: Deferred items [DEFERRED]
 - **Category:** Various
 - **Reason:** QH-05 requires fuzz infrastructure. QM-03/QL-03/QL-09 are large-scale refactoring efforts.
+
+---
+
+## Verified Resolved -- Previously "Unknown" Status Items (2026-03-24)
+
+The following 9 GitLab issues were previously in "Unknown" status and have been verified as resolved during the Phase 3 adversarial review audit.
+
+### Issue #32 (SEC-005): SIG(0) Fixed 5-Minute Validity Period [RESOLVED]
+- **Issue:** [#32](https://gitlab.com/devnw/zig/dns/-/issues/32)
+- **Category:** Security
+- **Resolution:** Verified resolved -- SIG(0) validity period is configurable
+- **Evidence:** Phase 3 adversarial review audit verification
+- **Resolved date:** verified 2026-03-24
+
+### Issue #31 (SEC-010): Gitleaks Overly Broad Allowlist [RESOLVED]
+- **Issue:** [#31](https://gitlab.com/devnw/zig/dns/-/issues/31)
+- **Category:** Security
+- **Resolution:** Verified resolved -- Gitleaks allowlist tightened
+- **Evidence:** Phase 3 adversarial review audit verification
+- **Resolved date:** verified 2026-03-24
+
+### Issue #33 (SEC-011): Transport Backend Security Dependencies Undocumented [RESOLVED]
+- **Issue:** [#33](https://gitlab.com/devnw/zig/dns/-/issues/33)
+- **Category:** Security
+- **Resolution:** Verified resolved -- transport backend security dependencies documented in SECURITY.md and ARCHITECTURE.md
+- **Evidence:** Phase 3 adversarial review audit verification
+- **Resolved date:** verified 2026-03-24
+
+### Issue #34 (SEC-012): Missing Build Hardening Documentation [RESOLVED]
+- **Issue:** [#34](https://gitlab.com/devnw/zig/dns/-/issues/34)
+- **Category:** Security
+- **Resolution:** Verified resolved -- build hardening documentation added
+- **Evidence:** Phase 3 adversarial review audit verification
+- **Resolved date:** verified 2026-03-24
+
+### Issue #38 (SEC-016): RPZ Wildcard Pattern Matching May Allow Domain Bypass [RESOLVED]
+- **Issue:** [#38](https://gitlab.com/devnw/zig/dns/-/issues/38)
+- **Category:** Security
+- **Resolution:** Verified resolved -- RPZ wildcard boundary fix present in `src/resolver/rpz.zig:381-386` (test coverage tracked separately as GAP-0048)
+- **Evidence:** `src/resolver/rpz.zig:381-386` -- wildcard boundary check
+- **Resolved date:** verified 2026-03-24
+
+### Issue #41 (SEC-019): Gitleaks edns.zig Full File Allowlist [RESOLVED]
+- **Issue:** [#41](https://gitlab.com/devnw/zig/dns/-/issues/41)
+- **Category:** Security
+- **Resolution:** Verified resolved -- Gitleaks allowlist no longer blanket-allows edns.zig
+- **Evidence:** Phase 3 adversarial review audit verification
+- **Resolved date:** verified 2026-03-24
+
+### Issue #49: DoH transport ignores ca_pem/bootstrap_ip options [RESOLVED]
+- **Issue:** [#49](https://gitlab.com/devnw/zig/dns/-/issues/49)
+- **Category:** Security
+- **Resolution:** Verified resolved -- DoH transport handles ca_pem and bootstrap_ip options
+- **Evidence:** Phase 3 adversarial review audit verification
+- **Resolved date:** verified 2026-03-24
+
+### Issue #51: DoQ prepareDoQMessage lacks input length validation [RESOLVED]
+- **Issue:** [#51](https://gitlab.com/devnw/zig/dns/-/issues/51)
+- **Category:** Security
+- **Resolution:** Verified resolved -- input length validation added to DoQ message preparation
+- **Evidence:** Phase 3 adversarial review audit verification
+- **Resolved date:** verified 2026-03-24
+
+### DoH/DoT documentation gaps [RESOLVED]
+- **Category:** Docs
+- **Resolution:** Verified resolved -- DoH and DoT transport documentation updated in ARCHITECTURE.md and SECURITY.md to reflect interface-only status with backend requirements
+- **Evidence:** Phase 3 adversarial review audit verification; cross-ref GAP-0014 (Won't Do), GAP-0040 (Resolved)
+- **Resolved date:** verified 2026-03-24
 
 ---
 

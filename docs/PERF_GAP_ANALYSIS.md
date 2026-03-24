@@ -1,6 +1,6 @@
 # Performance Gap Analysis
 
-Last updated: 2026-03-24 (final gap closure -- PF-NEW-15 resolved; Won't-Do items classified)
+Last updated: 2026-03-24 (deep audit findings PF-NEW-20 through PF-NEW-31 added)
 
 ## Summary
 
@@ -8,16 +8,16 @@ Last updated: 2026-03-24 (final gap closure -- PF-NEW-15 resolved; Won't-Do item
 |---|---|---|
 | **Resolved** | 37 | PF-01, PF-02b, PF-04, PF-06, PF-07, PF-08, PF-09, PF-11, PF-12, PF-15, PF-17, PF-19, PF-20, PF-21, PF-22, PF-23, PF-24, PF-25, PF-26, PF-27, PF-28, PF-29, PF-30, PF-31, PF-NEW-01, PF-NEW-02, PF-NEW-03, PF-NEW-04, PF-NEW-05, PF-NEW-06, PF-NEW-07, PF-NEW-08, PF-NEW-09, PF-NEW-10, PF-NEW-12, PF-NEW-13, PF-NEW-15 |
 | **Won't Do** | 15 | PF-02, PF-02b-evict, PF-02c, PF-03, PF-03b, PF-03c, PF-05, PF-14, PF-18, PF-NEW-14, PF-NEW-16, PF-NEW-17, PF-NEW-18, PF-NEW-19, PF-21-pool |
-| **Open/Deferred** | 6 | PF-10, PF-13, PF-16, PF-22-prefetch, PF-23-spice, PF-24-dual-cache |
-| **Total** | **58** |
+| **Open/Deferred** | 17 | PF-10, PF-13, PF-16, PF-22-prefetch, PF-23-spice, PF-24-dual-cache, PF-NEW-20, PF-NEW-21, PF-NEW-22, PF-NEW-23, PF-NEW-24, PF-NEW-25, PF-NEW-27, PF-NEW-28, PF-NEW-29, PF-NEW-30, PF-NEW-31 |
+| **Total** | **69** |
 
-### Top 10 Risks (by PerfScore) -- post gap closure
+### Top 10 Risks (by PerfScore) -- post deep audit
 
-Note: Many high-scoring items classified as Won't Do (require architectural changes outside scope).
+Note: Many high-scoring items classified as Won't Do (require architectural changes outside scope). Deep audit confirmed PF-24-dual-cache and PF-03b remain #1 and #2 priorities. New findings PF-NEW-20 through PF-NEW-31 added from allocation audit.
 
 1. **PF-18 (PerfScore 400, P0):** No benchmarks in CI. **Won't Do** (infrastructure investment).
-2. **PF-24-dual-cache (PerfScore 324, P1):** Two cache implementations; hot path uses O(n). **Deferred** (future migration).
-3. **PF-03b (PerfScore 252, P1):** Sequential server dispatch. **Won't Do** (transport architecture rework).
+2. **PF-24-dual-cache (PerfScore 324, P1):** Two cache implementations; hot path uses O(n). **Deferred** (future migration). Deep review confirmed as #1 priority.
+3. **PF-03b (PerfScore 252, P1):** Sequential server dispatch. **Won't Do** (transport architecture rework). Deep review confirmed as #2 priority.
 4. **PF-02 (PerfScore 189, P1):** O(n) linear cache. **Won't Do** (subsumed by dual-cache migration).
 5. **PF-03 (PerfScore 160, P1):** Socket per query. **Won't Do** (transport architecture rework).
 6. **PF-05 (PerfScore 112, P1):** No arena allocator. **Won't Do** (large architectural change).
@@ -64,9 +64,26 @@ Note: Many high-scoring items classified as Won't Do (require architectural chan
 
 ### Open Items
 
-Remaining items by priority (after final gap closure; Won't-Do items classified):
+Remaining items by priority (after deep audit; Won't-Do items classified):
 
-**Deferred (future work):**
+**New from deep audit (P2):**
+- **PF-NEW-20 (PerfScore 35):** Redundant heap dupe per delegation step -- combine with PF-NEW-27
+- **PF-NEW-21 (PerfScore 18):** buildQuery heap-allocates for bounded-size message (~280 bytes max)
+
+**New from deep audit (P3):**
+- **PF-NEW-27 (PerfScore 12):** Double alloc in 0x20 path -- fix with PF-NEW-20
+- **PF-NEW-25 (PerfScore 4):** buildCnameChain runs on all resolves even when no CNAMEs
+- **PF-NEW-22 (PerfScore 3):** Redundant timestamp syscalls -- auto-fixed by PF-24 migration
+- **PF-NEW-31 (PerfScore 3):** CachePrefetcher.makeKey always heap-allocates
+- **PF-NEW-24 (PerfScore 2):** ArrayList without capacity hint in resolve results
+- **PF-NEW-23 (PerfScore 1):** ArrayList without capacity hint in extractReferral
+
+**New from deep audit (Info):**
+- **PF-NEW-29 (PerfScore 0.5):** DnsCache CacheEntry methods not inline
+- **PF-NEW-30 (PerfScore 0.5):** zoneAtDepth uses ArrayList instead of stack buffer
+- **PF-NEW-28 (PerfScore 0.5):** MessageBuilder zero-fills header overwritten by finish()
+
+**Deferred (prior cycle):**
 - **PF-24-dual-cache:** Two cache implementations; hot path uses slower O(n) one
 - **PF-23-spice:** spice parallel module not integrated into query dispatch
 - **PF-13:** Concurrent queries -- requires thread-safe cache first
@@ -74,7 +91,7 @@ Remaining items by priority (after final gap closure; Won't-Do items classified)
 - **PF-10:** allocPrint for IP formatting -- 13 production sites across 10 files
 - **PF-16:** PRNG per call -- low impact optimization
 
-**Won't Do (classified in this cycle):**
+**Won't Do (classified in prior cycle):**
 - **PF-18:** No benchmarks or perf CI -- infrastructure investment outside scope
 - **PF-03b:** Sequential server dispatch -- requires transport architecture rework
 - **PF-02:** O(n) linear cache -- subsumed by PF-24-dual-cache migration
@@ -124,31 +141,42 @@ Remaining items by priority (after final gap closure; Won't-Do items classified)
 | 25 | P2 | 36 | PF-22: CachePrefetcher.makeKey double heap allocation | `src/resolver/cache_prefetch.zig:262-275` | Stack buffer for lowercase, single allocPrint for key (PF-15 pattern applied) | ~200-400ns saved per prefetch check | [#146](https://gitlab.com/devnw/zig/dns/-/issues/146) | Applied PF-15 stack-buffer pattern from DnsCache.makeKey | Core maintainer | Quarter | **Resolved** |
 | 26 | P2 | 36 | PF-NEW-15: DnsCache put methods use heap makeKey while get uses stack makeKeyBuf | `src/resolver/dns_cache.zig:166-278` | `putPositive`, `putNxdomain`, `putNodata` now use `makeKeyBuf` (stack); falls back to heap only for oversized names | Zero heap allocs per cache write (normal case) | -- | Applied `makeKeyBuf` pattern to put methods | Core maintainer | Quarter | **Resolved** |
 | 27 | P2 | 36 | PF-21-pool: ConnectionPool exists but not wired into resolvers | `src/transports/connection_pool.zig`, `src/stub.zig`, `src/recursive.zig` | ConnectionPool importable but not used by resolvers | Socket reuse unused | -- | Won't Do: requires transport architecture rework | Core maintainer | Quarter | **Won't Do** |
-| 28 | P2 | 30 | PF-25: isUnderNxdomainZone allocates keys in while loop | `src/resolver/dns_cache.zig:314-354` | Stack buffer shared across loop iterations via makeNxdomainZoneKeyBuf | Zero heap allocs per check | [#158](https://gitlab.com/devnw/zig/dns/-/issues/158) | Stack buffer with bufPrint; heap fallback for oversized names | Core maintainer | Quarter | **Resolved** |
-| 29 | P2 | 24 | PF-06: 65KB stack buffer per UDP receive | `src/stub.zig:238`, `src/recursive.zig:509`, `src/transports/udp.zig:67` | Buffer reduced to 4096 (EDNS default, RFC 6891) | 4096 bytes/call, ~61KB saved | [#99](https://gitlab.com/devnw/zig/dns/-/issues/99) | Reduced UDP receive buffer from 65535 to 4096 in all 3 locations | Core maintainer | Quarter | **Resolved** |
-| 30 | P2 | 24 | PF-10: allocPrint for IP formatting (13 production sites) | 10 files across `src/` | allocPrint for IPv4/IPv6 formatting; down from 17 sites after Phase 2 stack-buffer fixes (PF-NEW-05, PF-20, PF-30) | ~100-200ns per format | [#108](https://gitlab.com/devnw/zig/dns/-/issues/108) | Stack buffer + bufPrint (max 45 bytes) | Core maintainer | Quarter | Deferred |
-| 31 | P2 | 24 | PF-NEW-10: Cache hit path uses allocPrint while non-cache path uses stack buffers | `src/client.zig:152-164` | Cache hit path now uses `bufPrint` into `[15]u8`/`[39]u8` stack buffers + `allocator.dupe`, matching non-cache path pattern | Zero intermediate heap alloc; single dupe per entry | Commit 6d42d51 | `bufPrint` + `allocator.dupe` on cache hit path | Core maintainer | Quarter | **Resolved** |
-| 32 | P2 | 24 | PF-29: cacheResponse getName+free per answer record | `src/recursive.zig:696-706` | Uses toStringBuf with 256-byte stack buffer; zero heap allocation per record | ~200-500ns saved per answer record | [#167](https://gitlab.com/devnw/zig/dns/-/issues/167) | Use Name.toStringBuf (depends on PF-24) | Core maintainer | Quarter | **Resolved** |
-| 33 | P2 | 23 | PF-NEW-19: Response buffer copied twice in sendQuery | `src/recursive.zig:547-561` | recvfrom into stack buffer then memcpy to heap | ~200-400ns per query | -- | Won't Do: marginal improvement | Core maintainer | Quarter | **Won't Do** |
-| 34 | P2 | 20 | PF-02c: Cache stores duplicate entries | `src/cache.zig:104-155` | `put()` appends unconditionally | Wasted memory + slower scan | -- | Won't Do: subsumed by cache migration | Core maintainer | Quarter | **Won't Do** |
-| 35 | P2 | 20 | PF-NEW-07: extractReferral zone_name heap alloc via getName | `src/recursive.zig:586` | Zone name now uses `toStringBuf` with 256-byte stack buffer for comparisons; only duped once at end for Referral | Zero heap allocs during iteration; single dupe at end | -- | `rr.name.toStringBuf(&zone_buf, response)` + final `allocator.dupe` | Core maintainer | Quarter | **Resolved** |
-| 36 | P2 | 20 | PF-NEW-09: Additional section glue getName heap allocs | `src/recursive.zig:614` | Glue names use `toStringBuf` with stack buffer; NS matching done inline against servers array; GlueRecord intermediate eliminated | Zero heap allocs for glue names | -- | `add_rr.name.toStringBuf(&glue_buf, response)` + inline NS matching | Core maintainer | Quarter | **Resolved** |
-| 37 | P2 | 20 | PF-30: client.zig resolve() getName per answer for CNAME check | `src/client.zig:213-217` | Uses toStringBuf with 256-byte stack buffer; zero heap allocation per answer | ~200-400ns saved per answer record | [#168](https://gitlab.com/devnw/zig/dns/-/issues/168) | Use Name.toStringBuf (depends on PF-24) | Core maintainer | Quarter | **Resolved** |
-| 38 | P3 | 16 | PF-NEW-08: buildCnameChain heap getName/toString per CNAME record | `src/client.zig:404-428` | `buildCnameChain` now uses `toStringBuf` with `[256]u8` stack buffers for owner and target names, then `allocator.dupe` for the mapping arrays | Zero intermediate ArrayList alloc per CNAME record | Commit 6d42d51 | `toStringBuf` + `dupe` pattern in buildCnameChain | Core maintainer | Backlog | **Resolved** |
-| 39 | P3 | 16 | PF-15: Double allocation in DnsCache.makeKey | `src/resolver/dns_cache.zig:330-343` | Stack buffer `lower_buf: [max_name_length]u8` replaces heap allocation | Zero extra allocations | [#120](https://gitlab.com/devnw/zig/dns/-/issues/120) | Uses stack buffer for lowercase (max 255 bytes) | Core maintainer | Backlog | **Resolved** |
-| 40 | P3 | 16 | PF-16: New PRNG per getSecureRandomId call | `src/resolver/stub.zig` (deleted -- see QM-08) | getrandom() syscall + PRNG init per call | ~2us vs ~10ns | [#122](https://gitlab.com/devnw/zig/dns/-/issues/122) | Persistent PRNG on resolver struct; canonical stub is `src/stub.zig` | Core maintainer | Backlog | Deferred |
-| 41 | P3 | 12 | PF-NEW-13: MessageBuilder.addQuestion intermediate heap alloc for encoded question | `src/message.zig:247-253` | `addQuestion` uses `Name.encodeBuf` with stack buffer + direct `writeInt` for type/class; zero intermediate heap allocation | Zero heap allocs in addQuestion | -- | `Name.encodeBuf` into `[max_name_length+4]u8` stack buffer; append slice to builder | Core maintainer | Backlog | **Resolved** |
-| 42 | P3 | 12 | PF-17: Global thread pool uses page_allocator | `src/parallel.zig:77` | GPA backed by page_allocator wraps pool allocator; small allocs sub-allocated from pages | Fewer mmap syscalls | [#124](https://gitlab.com/devnw/zig/dns/-/issues/124) | Wrap with GPA | Core maintainer | Backlog | **Resolved** |
-| 43 | P3 | 8 | PF-NEW-12: queryWithRetry duplicates domain name twice when 0x20 disabled | `src/recursive.zig:476-484` | `last_query_name` dupe skipped entirely when `case_randomization` is false; only set when 0x20 is enabled (the only branch that reads it) | Zero redundant alloc when 0x20 disabled | -- | Wrapped `last_query_name` assignment in `if (self.config.case_randomization)` guard | Core maintainer | Backlog | **Resolved** |
-| 44 | P3 | 8 | PF-20: allocPrint for IPv4 in resolveNsAddress | `src/recursive.zig:674-681` | bufPrint with [15]u8 stack buffer; zero heap allocation | ~100-200ns saved | [#142](https://gitlab.com/devnw/zig/dns/-/issues/142) | bufPrint with [15]u8 stack buffer | Core maintainer | Backlog | **Resolved** |
-| 45 | P3 | 8 | PF-28: ArrayList byte-by-byte append without capacity pre-alloc | `src/name.zig:568`, `src/resolver/convenience.zig:301` | extractQname and reverseIPv6Name start with capacity 0 | ~100-300ns extra per call | [#164](https://gitlab.com/devnw/zig/dns/-/issues/164) | Added ensureTotalCapacity(253) in extractQname, ensureTotalCapacity(72) in reverseIPv6Name. **Superseded by PF-NEW-01**: extractQname now uses extractQnameBuf (stack buffer, zero allocation). | Core maintainer | Backlog | **Resolved** |
-| 46 | P3 | 4 | PF-NEW-17: Name.parent() does toString + alloc + free + dupe | `src/name.zig:461-476` | Not in hot path | ~200-400ns per call | -- | Won't Do: not in hot path | Core maintainer | Backlog | **Won't Do** |
-| 47 | P3 | 4 | PF-NEW-18: Name.minimizedName() does toString + allocPrint | `src/name.zig:521-536` | Not in hot path | ~200-400ns per call | -- | Won't Do: not in hot path | Core maintainer | Backlog | **Won't Do** |
-| 48 | P3 | 4 | PF-23: getMinimizedQname iterates labels twice | `src/recursive.zig:397-436` | Single-pass: labels collected once, depth checked against count | ~50-100ns saved | [#153](https://gitlab.com/devnw/zig/dns/-/issues/153) | Single-pass label collection | Core maintainer | Backlog | **Resolved** |
-| 49 | P3 | 4 | PF-26: Expired entry removal re-hashes key | `src/resolver/dns_cache.zig:150-163`, `src/util/lru.zig:63-101` | getWithHandle returns EntryHandle; removeByHandle uses map.removeByPtr | Zero re-hash on expiry removal | [#159](https://gitlab.com/devnw/zig/dns/-/issues/159) | LRU getWithHandle + removeByHandle using HashMap removeByPtr | Core maintainer | Backlog | **Resolved** |
-| 50 | P3 | 4 | PF-27: No inline hints on hot-path functions | `src/name.zig`, `src/cache.zig` | Small leaf functions in tight loops lack inline | ~2-5ns per call (debug builds) | [#162](https://gitlab.com/devnw/zig/dns/-/issues/162) | Added inline to CacheEntry.isExpired, CacheEntry.remainingTtl, verifyCase0x20 | Core maintainer | Backlog | **Resolved** |
-| 51 | P3 | 3 | PF-NEW-14: extractReferral NS name toString allocation | `src/recursive.zig:596` | `ns_name.toString(self.allocator, response)` heap-allocates per NS record; structurally required since NS names are stored in Referral.servers | 1 alloc per NS record (~4-13 per referral) | -- | Allocation required for ownership transfer; toStringBuf not applicable since name must outlive the function | Core maintainer | Backlog | Info |
-| 52 | P3 | 3 | PF-NEW-16: DoH URL allocPrint per GET query | `src/transports/doh.zig:220-225` | `allocPrint("{s}?dns={s}", ...)` builds URL per GET request; HTTP round-trip dominates by 3-4 orders of magnitude | ~100-200ns vs ~10-100ms HTTP | -- | Use `bufPrint` with stack buffer (URL typically <512 bytes); marginal improvement | Core maintainer | Backlog | Info |
+| 28 | P2 | 35 | PF-NEW-20: Redundant heap dupe per delegation step (combine with PF-NEW-27) | `src/recursive.zig:214-218` | `getMinimizedQname` builds in stack buf then dupes; `queryWithRetry` copies again | 1 wasted alloc+free per loop iter (5-10 per resolution) | [#189](https://gitlab.com/devnw/zig/dns/-/issues/189) | Transfer ownership or pass borrowed slice to queryWithRetry | Core maintainer | Quarter | Open |
+| 29 | P2 | 30 | PF-25: isUnderNxdomainZone allocates keys in while loop | `src/resolver/dns_cache.zig:314-354` | Stack buffer shared across loop iterations via makeNxdomainZoneKeyBuf | Zero heap allocs per check | [#158](https://gitlab.com/devnw/zig/dns/-/issues/158) | Stack buffer with bufPrint; heap fallback for oversized names | Core maintainer | Quarter | **Resolved** |
+| 30 | P2 | 24 | PF-06: 65KB stack buffer per UDP receive | `src/stub.zig:238`, `src/recursive.zig:509`, `src/transports/udp.zig:67` | Buffer reduced to 4096 (EDNS default, RFC 6891) | 4096 bytes/call, ~61KB saved | [#99](https://gitlab.com/devnw/zig/dns/-/issues/99) | Reduced UDP receive buffer from 65535 to 4096 in all 3 locations | Core maintainer | Quarter | **Resolved** |
+| 31 | P2 | 24 | PF-10: allocPrint for IP formatting (13 production sites) | 10 files across `src/` | allocPrint for IPv4/IPv6 formatting; down from 17 sites after Phase 2 stack-buffer fixes (PF-NEW-05, PF-20, PF-30) | ~100-200ns per format | [#108](https://gitlab.com/devnw/zig/dns/-/issues/108) | Stack buffer + bufPrint (max 45 bytes) | Core maintainer | Quarter | Deferred |
+| 32 | P2 | 24 | PF-NEW-10: Cache hit path uses allocPrint while non-cache path uses stack buffers | `src/client.zig:152-164` | Cache hit path now uses `bufPrint` into `[15]u8`/`[39]u8` stack buffers + `allocator.dupe`, matching non-cache path pattern | Zero intermediate heap alloc; single dupe per entry | Commit 6d42d51 | `bufPrint` + `allocator.dupe` on cache hit path | Core maintainer | Quarter | **Resolved** |
+| 33 | P2 | 24 | PF-29: cacheResponse getName+free per answer record | `src/recursive.zig:696-706` | Uses toStringBuf with 256-byte stack buffer; zero heap allocation per record | ~200-500ns saved per answer record | [#167](https://gitlab.com/devnw/zig/dns/-/issues/167) | Use Name.toStringBuf (depends on PF-24) | Core maintainer | Quarter | **Resolved** |
+| 34 | P2 | 23 | PF-NEW-19: Response buffer copied twice in sendQuery | `src/recursive.zig:547-561` | recvfrom into stack buffer then memcpy to heap | ~200-400ns per query | -- | Won't Do: marginal improvement | Core maintainer | Quarter | **Won't Do** |
+| 35 | P2 | 20 | PF-02c: Cache stores duplicate entries | `src/cache.zig:104-155` | `put()` appends unconditionally | Wasted memory + slower scan | -- | Won't Do: subsumed by cache migration | Core maintainer | Quarter | **Won't Do** |
+| 36 | P2 | 20 | PF-NEW-07: extractReferral zone_name heap alloc via getName | `src/recursive.zig:586` | Zone name now uses `toStringBuf` with 256-byte stack buffer for comparisons; only duped once at end for Referral | Zero heap allocs during iteration; single dupe at end | -- | `rr.name.toStringBuf(&zone_buf, response)` + final `allocator.dupe` | Core maintainer | Quarter | **Resolved** |
+| 37 | P2 | 20 | PF-NEW-09: Additional section glue getName heap allocs | `src/recursive.zig:614` | Glue names use `toStringBuf` with stack buffer; NS matching done inline against servers array; GlueRecord intermediate eliminated | Zero heap allocs for glue names | -- | `add_rr.name.toStringBuf(&glue_buf, response)` + inline NS matching | Core maintainer | Quarter | **Resolved** |
+| 38 | P2 | 20 | PF-30: client.zig resolve() getName per answer for CNAME check | `src/client.zig:213-217` | Uses toStringBuf with 256-byte stack buffer; zero heap allocation per answer | ~200-400ns saved per answer record | [#168](https://gitlab.com/devnw/zig/dns/-/issues/168) | Use Name.toStringBuf (depends on PF-24) | Core maintainer | Quarter | **Resolved** |
+| 39 | P2 | 18 | PF-NEW-21: buildQuery heap-allocates for bounded-size message (~280 bytes max) | `src/recursive.zig:504`, `src/stub.zig:163` | MessageBuilder uses ArrayList(u8) for ~32-280 byte queries; max DNS query is bounded | 1 heap alloc + 2-3 reallocations per query build | [#191](https://gitlab.com/devnw/zig/dns/-/issues/191) | Add buildQueryBuf using stack buffer or BoundedArray(u8, 512) | Core maintainer | Quarter | Open |
+| 40 | P3 | 16 | PF-NEW-08: buildCnameChain heap getName/toString per CNAME record | `src/client.zig:404-428` | `buildCnameChain` now uses `toStringBuf` with `[256]u8` stack buffers for owner and target names, then `allocator.dupe` for the mapping arrays | Zero intermediate ArrayList alloc per CNAME record | Commit 6d42d51 | `toStringBuf` + `dupe` pattern in buildCnameChain | Core maintainer | Backlog | **Resolved** |
+| 41 | P3 | 16 | PF-15: Double allocation in DnsCache.makeKey | `src/resolver/dns_cache.zig:330-343` | Stack buffer `lower_buf: [max_name_length]u8` replaces heap allocation | Zero extra allocations | [#120](https://gitlab.com/devnw/zig/dns/-/issues/120) | Uses stack buffer for lowercase (max 255 bytes) | Core maintainer | Backlog | **Resolved** |
+| 42 | P3 | 16 | PF-16: New PRNG per getSecureRandomId call | `src/resolver/stub.zig` (deleted -- see QM-08) | getrandom() syscall + PRNG init per call | ~2us vs ~10ns | [#122](https://gitlab.com/devnw/zig/dns/-/issues/122) | Persistent PRNG on resolver struct; canonical stub is `src/stub.zig` | Core maintainer | Backlog | Deferred |
+| 43 | P3 | 12 | PF-NEW-13: MessageBuilder.addQuestion intermediate heap alloc for encoded question | `src/message.zig:247-253` | `addQuestion` uses `Name.encodeBuf` with stack buffer + direct `writeInt` for type/class; zero intermediate heap allocation | Zero heap allocs in addQuestion | -- | `Name.encodeBuf` into `[max_name_length+4]u8` stack buffer; append slice to builder | Core maintainer | Backlog | **Resolved** |
+| 44 | P3 | 12 | PF-17: Global thread pool uses page_allocator | `src/parallel.zig:77` | GPA backed by page_allocator wraps pool allocator; small allocs sub-allocated from pages | Fewer mmap syscalls | [#124](https://gitlab.com/devnw/zig/dns/-/issues/124) | Wrap with GPA | Core maintainer | Backlog | **Resolved** |
+| 45 | P3 | 12 | PF-NEW-27: Double alloc in 0x20 path (fix with PF-NEW-20) | `src/recursive.zig:488-501` | `applyCase0x20` allocs, then duped into `last_query_name`; ownership transfer would eliminate one | 1 wasted alloc per query when 0x20 enabled | [#189](https://gitlab.com/devnw/zig/dns/-/issues/189) | Transfer ownership from applyCase0x20 result to last_query_name | Core maintainer | Backlog | Open |
+| 46 | P3 | 8 | PF-NEW-12: queryWithRetry duplicates domain name twice when 0x20 disabled | `src/recursive.zig:476-484` | `last_query_name` dupe skipped entirely when `case_randomization` is false; only set when 0x20 is enabled (the only branch that reads it) | Zero redundant alloc when 0x20 disabled | -- | Wrapped `last_query_name` assignment in `if (self.config.case_randomization)` guard | Core maintainer | Backlog | **Resolved** |
+| 47 | P3 | 8 | PF-20: allocPrint for IPv4 in resolveNsAddress | `src/recursive.zig:674-681` | bufPrint with [15]u8 stack buffer; zero heap allocation | ~100-200ns saved | [#142](https://gitlab.com/devnw/zig/dns/-/issues/142) | bufPrint with [15]u8 stack buffer | Core maintainer | Backlog | **Resolved** |
+| 48 | P3 | 8 | PF-28: ArrayList byte-by-byte append without capacity pre-alloc | `src/name.zig:568`, `src/resolver/convenience.zig:301` | extractQname and reverseIPv6Name start with capacity 0 | ~100-300ns extra per call | [#164](https://gitlab.com/devnw/zig/dns/-/issues/164) | Added ensureTotalCapacity(253) in extractQname, ensureTotalCapacity(72) in reverseIPv6Name. **Superseded by PF-NEW-01**: extractQname now uses extractQnameBuf (stack buffer, zero allocation). | Core maintainer | Backlog | **Resolved** |
+| 49 | P3 | 4 | PF-NEW-25: buildCnameChain runs on all resolves even when no CNAMEs | `src/client.zig:197,390` | `buildCnameChain` called unconditionally; 1 alloc + answer iteration wasted on common zero-CNAME path | ~100-300ns wasted per no-CNAME resolve | [#195](https://gitlab.com/devnw/zig/dns/-/issues/195) | Skip buildCnameChain when no CNAME records in response | Core maintainer | Backlog | Open |
+| 50 | P3 | 4 | PF-NEW-17: Name.parent() does toString + alloc + free + dupe | `src/name.zig:461-476` | Not in hot path | ~200-400ns per call | -- | Won't Do: not in hot path | Core maintainer | Backlog | **Won't Do** |
+| 51 | P3 | 4 | PF-NEW-18: Name.minimizedName() does toString + allocPrint | `src/name.zig:521-536` | Not in hot path | ~200-400ns per call | -- | Won't Do: not in hot path | Core maintainer | Backlog | **Won't Do** |
+| 52 | P3 | 4 | PF-23: getMinimizedQname iterates labels twice | `src/recursive.zig:397-436` | Single-pass: labels collected once, depth checked against count | ~50-100ns saved | [#153](https://gitlab.com/devnw/zig/dns/-/issues/153) | Single-pass label collection | Core maintainer | Backlog | **Resolved** |
+| 53 | P3 | 4 | PF-26: Expired entry removal re-hashes key | `src/resolver/dns_cache.zig:150-163`, `src/util/lru.zig:63-101` | getWithHandle returns EntryHandle; removeByHandle uses map.removeByPtr | Zero re-hash on expiry removal | [#159](https://gitlab.com/devnw/zig/dns/-/issues/159) | LRU getWithHandle + removeByHandle using HashMap removeByPtr | Core maintainer | Backlog | **Resolved** |
+| 54 | P3 | 4 | PF-27: No inline hints on hot-path functions | `src/name.zig`, `src/cache.zig` | Small leaf functions in tight loops lack inline | ~2-5ns per call (debug builds) | [#162](https://gitlab.com/devnw/zig/dns/-/issues/162) | Added inline to CacheEntry.isExpired, CacheEntry.remainingTtl, verifyCase0x20 | Core maintainer | Backlog | **Resolved** |
+| 55 | P3 | 3 | PF-NEW-22: Redundant timestamp syscalls in cache and client resolve | `src/cache.zig:116,170`, `src/client.zig:145` | 2+ clock_gettime per resolve that could be 1 | ~20-100ns wasted per resolution | [#193](https://gitlab.com/devnw/zig/dns/-/issues/193) | Auto-fixed by PF-24-dual-cache migration (pass shared `now` timestamp) | Core maintainer | Backlog | Open |
+| 56 | P3 | 3 | PF-NEW-31: CachePrefetcher.makeKey always heap-allocates | `src/resolver/cache_prefetch.zig:262` | `makeKey` uses `allocPrint` for final key; no `makeKeyBuf` variant | 1 heap alloc per shouldPrefetch call | [#202](https://gitlab.com/devnw/zig/dns/-/issues/202) | Add makeKeyBuf matching DnsCache pattern; not wired into hot path yet | Core maintainer | Backlog | Open |
+| 57 | P3 | 3 | PF-NEW-14: extractReferral NS name toString allocation | `src/recursive.zig:596` | `ns_name.toString(self.allocator, response)` heap-allocates per NS record; structurally required since NS names are stored in Referral.servers | 1 alloc per NS record (~4-13 per referral) | -- | Allocation required for ownership transfer; toStringBuf not applicable since name must outlive the function | Core maintainer | Backlog | Info |
+| 58 | P3 | 3 | PF-NEW-16: DoH URL allocPrint per GET query | `src/transports/doh.zig:220-225` | `allocPrint("{s}?dns={s}", ...)` builds URL per GET request; HTTP round-trip dominates by 3-4 orders of magnitude | ~100-200ns vs ~10-100ms HTTP | -- | Use `bufPrint` with stack buffer (URL typically <512 bytes); marginal improvement | Core maintainer | Backlog | Info |
+| 59 | P3 | 2 | PF-NEW-24: ArrayList without capacity hint in resolve results | `src/client.zig:146,205` | Result ArrayLists start at capacity 0; typical DNS responses have 1-4 results | ~50-200ns wasted per resolve (1-3 reallocations) | [#197](https://gitlab.com/devnw/zig/dns/-/issues/197) | Pre-allocate capacity of 4 for result lists | Core maintainer | Backlog | Open |
+| 60 | P3 | 1 | PF-NEW-23: ArrayList without capacity hint in extractReferral | `src/recursive.zig:589,344` | `ns_names` and `new_servers` ArrayLists start at capacity 0; typical referrals have 2-6 NS records | ~20-100ns per referral (1-2 reallocations) | [#204](https://gitlab.com/devnw/zig/dns/-/issues/204) | Pre-allocate capacity of 6 for NS lists | Core maintainer | Backlog | Open |
+| 61 | Info | 0.5 | PF-NEW-29: DnsCache CacheEntry methods not inline | `src/resolver/dns_cache.zig:84,89` | `isExpired` and `remainingTtl` lack `inline`; `cache.zig` equivalents already have it (PF-27) | ~2-5ns per cache get (marginal) | [#199](https://gitlab.com/devnw/zig/dns/-/issues/199) | Add `inline` hint to isExpired and remainingTtl | Core maintainer | As capacity | Open |
+| 62 | Info | 0.5 | PF-NEW-30: zoneAtDepth uses ArrayList instead of stack buffer | `src/name.zig:640-651` | `ArrayList(u8)` used to build zone name string; not on hot path | Marginal; not hot path | [#205](https://gitlab.com/devnw/zig/dns/-/issues/205) | Replace with [253]u8 stack buffer + dupe (matches PF-NEW-04 pattern) | Core maintainer | As capacity | Open |
+| 63 | Info | 0.5 | PF-NEW-28: MessageBuilder zero-fills header overwritten by finish() | `src/message.zig:241` | 12-byte `appendNTimes(0)` immediately overwritten by `finish()` header serialization | <1ns; not actionable | [#203](https://gitlab.com/devnw/zig/dns/-/issues/203) | No fix recommended; documented for completeness | Core maintainer | As capacity | Info |
 
 ---
 
@@ -192,8 +220,17 @@ Remaining items by priority (after final gap closure; Won't-Do items classified)
 | PF-27 | P3 | 4 | No inline hints | [#162](https://gitlab.com/devnw/zig/dns/-/issues/162) | **Resolved** |
 | PF-NEW-17 | P3 | 4 | Name.parent() toString + alloc + free + dupe | -- | **Won't Do** |
 | PF-NEW-18 | P3 | 4 | Name.minimizedName() toString + allocPrint | -- | **Won't Do** |
+| PF-NEW-20 | P2 | 35 | Redundant heap dupe per delegation step (combine with PF-NEW-27) | [#189](https://gitlab.com/devnw/zig/dns/-/issues/189) | Open |
+| PF-NEW-21 | P2 | 18 | buildQuery heap-allocates for bounded-size message | [#191](https://gitlab.com/devnw/zig/dns/-/issues/191) | Open |
+| PF-NEW-27 | P3 | 12 | Double alloc in 0x20 path (fix with PF-NEW-20) | [#189](https://gitlab.com/devnw/zig/dns/-/issues/189) | Open |
+| PF-NEW-25 | P3 | 4 | buildCnameChain runs on all resolves even when no CNAMEs | [#195](https://gitlab.com/devnw/zig/dns/-/issues/195) | Open |
+| PF-NEW-22 | P3 | 3 | Redundant timestamp syscalls in cache and client resolve | [#193](https://gitlab.com/devnw/zig/dns/-/issues/193) | Open |
 | PF-NEW-14 | P3 | 3 | extractReferral NS name toString -- structurally required | -- | Info |
 | PF-NEW-16 | P3 | 3 | DoH URL allocPrint per GET query | -- | Info |
+| PF-NEW-24 | P3 | 2 | ArrayList without capacity hint in resolve results | [#197](https://gitlab.com/devnw/zig/dns/-/issues/197) | Open |
+| PF-NEW-23 | P3 | 1 | ArrayList without capacity hint in extractReferral | [#204](https://gitlab.com/devnw/zig/dns/-/issues/204) | Open |
+| PF-NEW-30 | Info | 0.5 | zoneAtDepth uses ArrayList instead of stack buffer | [#205](https://gitlab.com/devnw/zig/dns/-/issues/205) | Open |
+| PF-NEW-28 | Info | 0.5 | MessageBuilder zero-fills header overwritten by finish() | [#203](https://gitlab.com/devnw/zig/dns/-/issues/203) | Info |
 | PF-NEW-02 | P1 | 48 | extractReferral memory leak (zone, server names, servers slice) | -- | **Resolved** |
 | PF-NEW-03 | P1 | 36 | CNAME target double-alloc (toString+dupe) | -- | **Resolved** |
 | PF-NEW-04 | P2 | 16 | getMinimizedQname ArrayList heap alloc | -- | **Resolved** |
@@ -216,6 +253,8 @@ Remaining items by priority (after final gap closure; Won't-Do items classified)
 | PF-02c | P2 | 20 | Cache stores duplicate entries | -- | **Won't Do** |
 | PF-15 | P3 | 16 | makeKey double alloc | [#120](https://gitlab.com/devnw/zig/dns/-/issues/120) | **Resolved** |
 | PF-26 | P3 | 4 | Expired entry re-hash | [#159](https://gitlab.com/devnw/zig/dns/-/issues/159) | **Resolved** |
+| PF-NEW-31 | P3 | 3 | CachePrefetcher.makeKey always heap-allocates | [#202](https://gitlab.com/devnw/zig/dns/-/issues/202) | Open |
+| PF-NEW-29 | Info | 0.5 | DnsCache CacheEntry methods not inline | [#199](https://gitlab.com/devnw/zig/dns/-/issues/199) | Open |
 
 ### Infrastructure (`area::infra`)
 
@@ -648,6 +687,225 @@ zig build test -- --filter "sendQuery"
 
 ---
 
+## Deep Audit Finding Details (PF-NEW-20 through PF-NEW-31)
+
+### PF-NEW-20: Redundant heap dupe per delegation step (PerfScore 35, P2)
+
+**Summary:** `getMinimizedQname` builds a name in a stack buffer then dupes to heap, and `queryWithRetry` copies the domain again. 1 wasted alloc+free per loop iteration (5-10 per resolution).
+
+**Perf Impact:** 5-10 unnecessary heap round-trips per resolution (~500ns-2us total).
+
+**Evidence:**
+- `src/recursive.zig:214-218`: `getMinimizedQname` returns heap-allocated string, then line 217 `self.allocator.dupe(u8, state.original_qname)` creates another copy when QMIN is disabled. `queryWithRetry` at line 504 copies the name again into the message buffer.
+- `src/recursive.zig:488-491`: `queryWithRetry` dupes the domain unconditionally.
+
+**Root Cause:** The delegation loop and `queryWithRetry` were written independently without considering ownership transfer. Each defensively copies its input.
+
+**Fix Guidance:** Have `queryWithRetry` accept the domain as a borrowed slice. The caller already owns the string and keeps it alive for the call duration. Combine with PF-NEW-27.
+
+**Validation Plan:**
+```
+zig build test --summary all
+# Verify allocation count drops by 1 per delegation step (5-10 per resolution)
+```
+
+**Rollout Risk:** Medium. Ownership transfer changes require careful lifetime analysis.
+
+**Confidence:** `confidence::confirmed` -- dupe chain visible in source.
+
+**Issue:** [#189](https://gitlab.com/devnw/zig/dns/-/issues/189)
+
+---
+
+### PF-NEW-27: Double alloc in 0x20 path (PerfScore 12, P3)
+
+**Summary:** `applyCase0x20` allocates a case-randomized copy, then `queryWithRetry` dupes it again into `last_query_name`. Ownership transfer would eliminate one allocation.
+
+**Perf Impact:** 1 wasted alloc per query when 0x20 is enabled.
+
+**Evidence:**
+- `src/recursive.zig:488-501`: `applyCase0x20(self.allocator, domain, csprng)` heap-allocates (line 489). Then line 501: `state.last_query_name = try self.allocator.dupe(u8, query_name)`. The `defer free` at line 492 frees the first copy.
+
+**Root Cause:** Defensive copying. The `applyCase0x20` result could be transferred to `last_query_name` instead of duped.
+
+**Fix Guidance:** Transfer ownership of the `applyCase0x20` result to `state.last_query_name`. Remove the `defer free` for that branch. Fix together with PF-NEW-20.
+
+**Confidence:** `confidence::confirmed` -- dupe chain visible in source.
+
+**Issue:** [#189](https://gitlab.com/devnw/zig/dns/-/issues/189) (combined with PF-NEW-20)
+
+---
+
+### PF-NEW-21: buildQuery heap-allocates for bounded-size message (PerfScore 18, P2)
+
+**Summary:** `buildQuery` uses `MessageBuilder` which internally uses `ArrayList(u8)` for assembling query messages. DNS queries are bounded at ~280 bytes max. A stack buffer would eliminate the heap allocation.
+
+**Perf Impact:** 1 heap allocation + 2-3 reallocations per DNS query build. ~100-300ns per query.
+
+**Evidence:**
+- `src/recursive.zig:504`: `const query = try message_mod.buildQuery(self.allocator, ...)`
+- `src/stub.zig:163`: same pattern
+- `src/message.zig:229-241`: `initQuery` creates `.buffer = .empty` then `appendNTimes(allocator, 0, header_size)` -- first heap alloc
+
+**Root Cause:** `MessageBuilder` uses growable `ArrayList(u8)` regardless of message type. Queries have a known maximum size (~280 bytes).
+
+**Fix Guidance:** Add a `buildQueryBuf` variant using a `[512]u8` fixed buffer or `BoundedArray(u8, 512)`.
+
+**Validation Plan:**
+```
+zig build test --summary all
+# Before: 1 heap alloc per buildQuery
+# After: 0 heap allocs for queries under 512 bytes
+```
+
+**Rollout Risk:** Low. Additive change.
+
+**Confidence:** `confidence::confirmed` -- ArrayList usage visible in source.
+
+**Issue:** [#191](https://gitlab.com/devnw/zig/dns/-/issues/191)
+
+---
+
+### PF-NEW-22: Redundant timestamp syscalls (PerfScore 3, P3)
+
+**Summary:** 2+ `clock_gettime` syscalls per resolve that could be 1. The cache `put()`, cache `get()`, and client `resolve()` each call `std.time.timestamp()` independently.
+
+**Perf Impact:** ~20-100ns wasted per resolution. Marginal.
+
+**Evidence:**
+- `src/cache.zig:116`: `const now = std.time.timestamp();` in `put()`
+- `src/cache.zig:170`: `const now = std.time.timestamp();` in `get()`
+- `src/client.zig:145`: `const now = std.time.timestamp();` in `resolve()`
+
+**Root Cause:** No shared "current time" passed through the call chain.
+
+**Fix Guidance:** Auto-fixed by PF-24-dual-cache migration. No standalone fix needed.
+
+**Confidence:** `confidence::suspected` -- syscall overhead not measured; pattern-matched.
+
+**Issue:** [#193](https://gitlab.com/devnw/zig/dns/-/issues/193)
+
+---
+
+### PF-NEW-25: buildCnameChain runs on all resolves even when no CNAMEs (PerfScore 4, P3)
+
+**Summary:** `buildCnameChain` is called unconditionally in `client.zig resolve()` even when the response has zero CNAME records (the common case). 1 ArrayList allocation + full answer iteration wasted.
+
+**Perf Impact:** ~100-300ns per no-CNAME resolution.
+
+**Evidence:**
+- `src/client.zig:197`: `var cname_chain = try buildCnameChain(...)` -- called unconditionally
+- `src/client.zig:390-415`: function allocates ArrayList, iterates all answers
+
+**Root Cause:** No early-exit check for CNAME presence.
+
+**Fix Guidance:** Scan answer section for any CNAME record type before calling `buildCnameChain`. Skip if none found.
+
+**Confidence:** `confidence::confirmed` -- unconditional call visible in source.
+
+**Issue:** [#195](https://gitlab.com/devnw/zig/dns/-/issues/195)
+
+---
+
+### PF-NEW-24: ArrayList without capacity hint in resolve results (PerfScore 2, P3)
+
+**Summary:** Result ArrayLists in `client.zig resolve()` start at capacity 0. Typical DNS responses have 1-4 results.
+
+**Perf Impact:** ~50-200ns wasted per resolve (1-3 reallocations).
+
+**Evidence:**
+- `src/client.zig:146`: `var results: std.ArrayList([]const u8) = .empty;`
+- `src/client.zig:205`: same pattern
+
+**Fix Guidance:** Add `ensureTotalCapacity(self.allocator, 4)` after initialization.
+
+**Confidence:** `confidence::confirmed` -- zero capacity visible in source.
+
+**Issue:** [#197](https://gitlab.com/devnw/zig/dns/-/issues/197)
+
+---
+
+### PF-NEW-23: ArrayList without capacity hint in extractReferral (PerfScore 1, P3)
+
+**Summary:** `ns_names` and `new_servers` ArrayLists in `extractReferral` start at capacity 0. Typical referrals have 2-6 NS records.
+
+**Perf Impact:** ~20-100ns per referral (1-2 reallocations).
+
+**Evidence:**
+- `src/recursive.zig:589`: `var ns_names: std.ArrayList([]const u8) = .{};`
+- `src/recursive.zig:344`: `var new_servers: std.ArrayList(ServerAddress) = .{};`
+
+**Fix Guidance:** Add `try ns_names.ensureTotalCapacity(self.allocator, 6)` after initialization.
+
+**Confidence:** `confidence::confirmed` -- zero capacity visible in source.
+
+**Issue:** [#204](https://gitlab.com/devnw/zig/dns/-/issues/204)
+
+---
+
+### PF-NEW-29: DnsCache CacheEntry methods not inline (PerfScore 0.5, Info)
+
+**Summary:** `CacheEntry.isExpired` and `CacheEntry.remainingTtl` in `dns_cache.zig` lack `inline` hints. The equivalent methods in `cache.zig` already have them (PF-27).
+
+**Perf Impact:** ~2-5ns per cache get. Marginal; release builds may auto-inline.
+
+**Evidence:**
+- `src/resolver/dns_cache.zig:84`: `pub fn isExpired(self: Self, now: i64) bool {`
+- `src/resolver/dns_cache.zig:89`: `pub fn remainingTtl(self: Self, now: i64) u32 {`
+
+**Confidence:** `confidence::confirmed` -- absence of inline visible in source.
+
+**Issue:** [#199](https://gitlab.com/devnw/zig/dns/-/issues/199)
+
+---
+
+### PF-NEW-31: CachePrefetcher.makeKey always heap-allocates (PerfScore 3, P3)
+
+**Summary:** `CachePrefetcher.makeKey` uses `allocPrint` for final key formatting. No `makeKeyBuf` variant exists. The prefetch module is not yet wired into the hot path (PF-22-prefetch).
+
+**Perf Impact:** 1 heap alloc per `shouldPrefetch` call. Current impact zero (not wired in).
+
+**Evidence:**
+- `src/resolver/cache_prefetch.zig:262`: `fn makeKey(self: *Self, name: []const u8, qtype: Type, qclass: Class) ![]u8 {`
+
+**Fix Guidance:** Add `makeKeyBuf` matching DnsCache pattern.
+
+**Confidence:** `confidence::confirmed` -- allocPrint visible in source.
+
+**Issue:** [#202](https://gitlab.com/devnw/zig/dns/-/issues/202)
+
+---
+
+### PF-NEW-28: MessageBuilder zero-fills header overwritten by finish() (PerfScore 0.5, Info)
+
+**Summary:** `MessageBuilder.initQuery` zero-fills 12 header bytes that are immediately overwritten by `finish()`. Cost: <1ns.
+
+**Evidence:**
+- `src/message.zig:241`: `try builder.buffer.appendNTimes(allocator, 0, header_mod.header_size);`
+
+**Fix Guidance:** No fix recommended. Documented for completeness.
+
+**Confidence:** `confidence::confirmed` -- zero-fill visible in source.
+
+**Issue:** [#203](https://gitlab.com/devnw/zig/dns/-/issues/203)
+
+---
+
+### PF-NEW-30: zoneAtDepth uses ArrayList instead of stack buffer (PerfScore 0.5, Info)
+
+**Summary:** `Name.zoneAtDepth` uses `ArrayList(u8)` for name assembly. Not on hot path.
+
+**Evidence:**
+- `src/name.zig:640-651`: `var result: std.ArrayList(u8) = .empty;`
+
+**Fix Guidance:** Replace with `[253]u8` stack buffer + dupe. Not recommended as standalone fix.
+
+**Confidence:** `confidence::confirmed` -- ArrayList visible in source.
+
+**Issue:** [#205](https://gitlab.com/devnw/zig/dns/-/issues/205)
+
+---
+
 ## Roadmap
 
 ### Completed
@@ -687,6 +945,11 @@ zig build test -- --filter "sendQuery"
 
 | ID | PerfScore | Fix | Status |
 |---|---|---|---|
+| PF-NEW-25 | 4 | Skip buildCnameChain when no CNAME records in response | Open |
+| PF-NEW-24 | 2 | Pre-allocate capacity of 4 for resolve result lists | Open |
+| PF-NEW-23 | 1 | Pre-allocate capacity of 6 for extractReferral NS lists | Open |
+| PF-NEW-29 | 0.5 | Add inline hint to DnsCache CacheEntry.isExpired/remainingTtl | Open |
+| PF-NEW-31 | 3 | Add makeKeyBuf to CachePrefetcher matching DnsCache pattern | Open |
 | PF-NEW-15 | 36 | Apply makeKeyBuf pattern to DnsCache put methods | **Resolved** |
 | PF-NEW-17 | 4 | Name.parent() use toStringBuf + dupe instead of toString + dupe | **Won't Do** (not in hot path) |
 | PF-NEW-18 | 4 | Name.minimizedName() use toStringBuf instead of toString | **Won't Do** (not in hot path) |
@@ -701,6 +964,8 @@ zig build test -- --filter "sendQuery"
 
 | ID | PerfScore | Fix | Effort |
 |---|---|---|---|
+| PF-NEW-20 + PF-NEW-27 | 35+12 | Transfer ownership / pass borrowed slice in delegation loop + 0x20 path | ~1-2 days |
+| PF-NEW-21 | 18 | Add buildQueryBuf using stack buffer or BoundedArray for bounded-size queries | ~1-2 days |
 | PF-10 | 24 | Replace allocPrint with bufPrint across 13 remaining IP formatting sites | ~2 days |
 | PF-NEW-19 | 23 | Receive directly into heap buffer in sendQuery; eliminate stack-to-heap memcpy | ~1 day |
 | PF-02c | 20 | Add dedup check in cache.zig put() (if not migrating to DnsCache) | ~1 day |
@@ -710,7 +975,7 @@ zig build test -- --filter "sendQuery"
 | ID | PerfScore | Fix | Effort |
 |---|---|---|---|
 | PF-18 | 400 | Benchmark suite + CI regression detection | ~5-10 days |
-| PF-24-dual-cache | 324 | Consolidate cache implementations; migrate resolvers to DnsCache | ~5-10 days |
+| PF-24-dual-cache | 324 | Consolidate cache implementations; migrate resolvers to DnsCache (auto-fixes PF-NEW-22) | ~5-10 days |
 | PF-03b | 252 | Parallel server dispatch in queryWithRetry via spice ThreadPool | ~3-5 days |
 | PF-02 | 189 | Migrate core resolvers from Cache to DnsCache (subsumed by PF-24-dual-cache) | ~5-10 days |
 | PF-03 | 160 | Wire ConnectionPool into stub/recursive resolvers | ~5-10 days |
