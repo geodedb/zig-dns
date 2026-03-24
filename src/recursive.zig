@@ -116,23 +116,24 @@ pub const RecursiveResolver = struct {
     config: RecursiveConfig,
     cache: Cache,
     root_servers: []ServerAddress,
-    prng: std.Random.DefaultPrng,
 
     const Self = @This();
 
+    /// CSPRNG for security-sensitive operations (transaction IDs, 0x20 randomization).
+    /// Uses the OS cryptographic random source directly instead of a seeded PRNG.
+    /// This prevents transaction ID prediction attacks (RFC 5452, CWE-330, SEC-C24).
+    const csprng = std.crypto.random;
+
     /// Error type for resolver initialization failures
     pub const InitError = error{
-        /// Failed to obtain cryptographically secure entropy from the OS.
-        /// This is required for secure transaction ID generation and 0x20 randomization.
-        EntropyUnavailable,
         OutOfMemory,
     };
 
     /// Create a new recursive resolver
     ///
-    /// SECURITY: Requires OS entropy for secure transaction ID generation.
-    /// Fails if cryptographically secure random numbers are unavailable,
-    /// as predictable IDs enable DNS cache poisoning attacks.
+    /// SECURITY: Uses OS CSPRNG (std.crypto.random) for transaction ID generation
+    /// and 0x20 case randomization. This prevents DNS cache poisoning attacks that
+    /// exploit predictable transaction IDs (RFC 5452, SEC-C24, CWE-330).
     pub fn init(allocator: std.mem.Allocator, config: RecursiveConfig) InitError!Self {
         // Initialize root servers
         const root_ips = RootServers.all();
@@ -144,21 +145,11 @@ pub const RecursiveResolver = struct {
                 return error.OutOfMemory;
         }
 
-        // Initialize PRNG for 0x20 case randomization and transaction IDs
-        // SECURITY: Fail-fast if entropy is unavailable - do NOT fall back to timestamps
-        // Predictable seeds enable transaction ID prediction attacks (RFC 5452, CWE-330)
-        var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
-            allocator.free(root_servers);
-            return error.EntropyUnavailable;
-        };
-
         return Self{
             .allocator = allocator,
             .config = config,
             .cache = Cache.init(allocator, config.cache_size),
             .root_servers = root_servers,
-            .prng = std.Random.DefaultPrng.init(seed),
         };
     }
 
@@ -212,18 +203,20 @@ pub const RecursiveResolver = struct {
             else
                 state.qtype;
 
-            // Build and send query
-            const response = try self.queryWithRetry(
+            // Build and send query; receives both raw bytes and pre-parsed
+            // Message to avoid redundant parsing (PF-19).
+            const qr = try self.queryWithRetry(
                 query_name,
                 query_type,
                 current_servers,
                 state,
             );
+            const response = qr.response;
             defer self.allocator.free(response);
             state.query_count += 1;
 
-            // Parse the response
-            const msg = try Message.parse(response);
+            // Reuse the already-parsed Message from queryWithRetry (PF-19)
+            const msg = qr.msg;
 
             // Verify 0x20 case randomization if enabled
             if (self.config.case_randomization) {
@@ -395,28 +388,18 @@ pub const RecursiveResolver = struct {
         return error.MaxQueriesExceeded;
     }
 
-    /// Get minimized QNAME for a given zone depth
+    /// Get minimized QNAME for a given zone depth.
+    ///
+    /// Returns the rightmost `depth + 1` labels of `original`.
+    /// Single-pass: collects labels into a stack array once, then builds
+    /// the result from the appropriate suffix (PF-23).
     fn getMinimizedQname(self: *Self, original: []const u8, current_zone: []const u8, depth: usize) ![]u8 {
         _ = current_zone;
 
-        // Count labels in original name
-        var label_count: usize = 0;
-        var iter = std.mem.splitScalar(u8, original, '.');
-        while (iter.next()) |label| {
-            if (label.len > 0) {
-                label_count += 1;
-            }
-        }
-
-        // If depth covers all labels, return full name
-        if (depth >= label_count) {
-            return try self.allocator.dupe(u8, original);
-        }
-
-        // Return rightmost (depth+1) labels
+        // Single pass: collect non-empty labels into a stack-local array.
         var labels: [128][]const u8 = undefined;
         var count: usize = 0;
-        iter = std.mem.splitScalar(u8, original, '.');
+        var iter = std.mem.splitScalar(u8, original, '.');
         while (iter.next()) |label| {
             if (label.len > 0 and count < 128) {
                 labels[count] = label;
@@ -424,6 +407,12 @@ pub const RecursiveResolver = struct {
             }
         }
 
+        // If depth covers all labels, return full name
+        if (depth >= count) {
+            return try self.allocator.dupe(u8, original);
+        }
+
+        // Return rightmost (depth+1) labels
         const start = count - @min(depth + 1, count);
         var result: std.ArrayList(u8) = .empty;
         errdefer result.deinit(self.allocator);
@@ -438,20 +427,29 @@ pub const RecursiveResolver = struct {
         return try result.toOwnedSlice(self.allocator);
     }
 
-    /// Query servers with retry logic
+    /// Result of queryWithRetry: raw response bytes and already-parsed Message.
+    /// Parsing once here eliminates redundant Message.parse calls downstream (PF-19).
+    const QueryResult = struct {
+        response: []u8,
+        msg: Message,
+    };
+
+    /// Query servers with retry logic.
+    /// Returns both the raw response and the parsed Message to avoid
+    /// redundant parsing in callers (PF-19).
     fn queryWithRetry(
         self: *Self,
         domain: []const u8,
         qtype: Type,
         servers: []const ServerAddress,
         state: *ResolutionState,
-    ) ![]u8 {
-        // Generate query ID
-        const id = self.prng.random().int(u16);
+    ) !QueryResult {
+        // Generate query ID using OS CSPRNG (SEC-C24: prevents cache poisoning)
+        const id = csprng.int(u16);
 
-        // Apply 0x20 case randomization if enabled
+        // Apply 0x20 case randomization if enabled (using CSPRNG for unpredictability)
         const query_name = if (self.config.case_randomization)
-            try name_mod.applyCase0x20(self.allocator, domain, self.prng.random())
+            try name_mod.applyCase0x20(self.allocator, domain, csprng)
         else
             try self.allocator.dupe(u8, domain);
         defer self.allocator.free(query_name);
@@ -472,8 +470,15 @@ pub const RecursiveResolver = struct {
 
             if (response.len >= 2) {
                 const resp_id = std.mem.readInt(u16, response[0..2], .big);
-                if (resp_id == id and responseMatchesQuery(response, query_name, qtype, .in)) {
-                    return response;
+                if (resp_id == id) {
+                    // Parse once here; reuse the parsed Message in callers (PF-19)
+                    const msg = Message.parse(response) catch {
+                        self.allocator.free(response);
+                        continue;
+                    };
+                    if (responseMatchesQuery(msg, query_name, qtype, .in)) {
+                        return QueryResult{ .response = response, .msg = msg };
+                    }
                 }
             }
             self.allocator.free(response);
@@ -564,6 +569,9 @@ pub const RecursiveResolver = struct {
         }
 
         // Single pass over additional section: collect all A glue records
+        // SECURITY (SEC-C27): Only accept glue records whose names are within
+        // the delegated zone's bailiwick. Out-of-bailiwick glue can be used
+        // to inject forged addresses for unrelated domains.
         var glue_records: std.ArrayList(GlueRecord) = .{};
         defer {
             for (glue_records.items) |gr| {
@@ -577,6 +585,14 @@ pub const RecursiveResolver = struct {
             if (add_rr.rtype == .a) {
                 const add_name = try add_rr.getName(self.allocator, response);
                 errdefer self.allocator.free(add_name);
+
+                // Bailiwick check: glue record name must be within the delegated zone
+                if (zone_name) |zn| {
+                    if (!isSubdomainOf(add_name, zn)) {
+                        self.allocator.free(add_name);
+                        continue;
+                    }
+                }
 
                 const addr = try add_rr.parseA();
                 var ip_buf: [15]u8 = undefined; // max "255.255.255.255"
@@ -655,12 +671,14 @@ pub const RecursiveResolver = struct {
             while (ans_iter.next() catch null) |rr| {
                 if (rr.rtype == .a) {
                     const addr = rr.parseA() catch continue;
-                    const ip_str = std.fmt.allocPrint(
-                        self.allocator,
+                    // Use stack buffer instead of heap allocation for IPv4 string (PF-20).
+                    // IPv4 addresses are at most 15 chars ("255.255.255.255").
+                    var ip_buf: [15]u8 = undefined;
+                    const ip_str = std.fmt.bufPrint(
+                        &ip_buf,
                         "{d}.{d}.{d}.{d}",
                         .{ addr[0], addr[1], addr[2], addr[3] },
                     ) catch continue;
-                    defer self.allocator.free(ip_str);
 
                     return ServerAddress.fromIpv4(ip_str, types_mod.dns_port) catch continue;
                 }
@@ -674,13 +692,16 @@ pub const RecursiveResolver = struct {
     fn cacheResponse(self: *Self, response: []const u8, msg: Message) !void {
         var q_iter = msg.questions();
         const q = (try q_iter.next()) orelse return;
-        const qname = q.getName(self.allocator, msg.data) catch return;
-        defer self.allocator.free(qname);
+
+        // Use stack buffer instead of heap allocation for question name (PF-29).
+        // DNS names are at most 253 chars; 256-byte buffer always suffices.
+        var qname_buf: [256]u8 = undefined;
+        const qname = q.qname.toStringBuf(&qname_buf, msg.data) catch return;
 
         var ans_iter = msg.answers();
+        var rr_name_buf: [256]u8 = undefined;
         while (try ans_iter.next()) |rr| {
-            const name_str = try rr.getName(self.allocator, response);
-            defer self.allocator.free(name_str);
+            const name_str = try rr.name.toStringBuf(&rr_name_buf, response);
             try self.cache.putWithBailiwick(name_str, rr, qname);
         }
     }
@@ -691,13 +712,14 @@ pub const RecursiveResolver = struct {
     }
 };
 
+/// Validate that a pre-parsed DNS response matches the original query parameters.
+/// Accepts an already-parsed Message to avoid redundant parsing (PF-19).
 fn responseMatchesQuery(
-    response: []const u8,
+    msg: Message,
     expected_name: []const u8,
     expected_type: Type,
     expected_class: Class,
 ) bool {
-    const msg = Message.parse(response) catch return false;
     if (!msg.header.qr) return false;
     if (msg.header.opcode != .query) return false;
     if (msg.header.qdcount == 0) return false;
@@ -711,6 +733,36 @@ fn responseMatchesQuery(
     var buf: [name_mod.max_name_length + 1]u8 = undefined;
     const expected_wire = Name.encodeBuf(expected_name, &buf) catch return false;
     return q.qname.eql(expected_wire, msg.data, null);
+}
+
+/// Check if `name` is a subdomain of (or equal to) `zone`.
+/// Both names are in dotted string form (e.g., "ns1.example.com" / "example.com").
+/// Comparison is case-insensitive per DNS conventions (RFC 4343).
+///
+/// SECURITY (SEC-C27): Used for bailiwick validation of glue records.
+/// A glue record for "ns1.example.com" is valid in a referral from "example.com"
+/// but NOT in a referral from "attacker.com".
+fn isSubdomainOf(name: []const u8, zone: []const u8) bool {
+    // Strip trailing dots for uniform comparison
+    const clean_name = if (name.len > 0 and name[name.len - 1] == '.') name[0 .. name.len - 1] else name;
+    const clean_zone = if (zone.len > 0 and zone[zone.len - 1] == '.') zone[0 .. zone.len - 1] else zone;
+
+    // Root zone is parent of everything
+    if (clean_zone.len == 0) return true;
+
+    // Exact match (case-insensitive)
+    if (std.ascii.eqlIgnoreCase(clean_name, clean_zone)) return true;
+
+    // name must be longer than zone and end with ".zone"
+    if (clean_name.len <= clean_zone.len) return false;
+
+    // Check that name ends with zone
+    const suffix_start = clean_name.len - clean_zone.len;
+    if (!std.ascii.eqlIgnoreCase(clean_name[suffix_start..], clean_zone)) return false;
+
+    // Ensure the character before the suffix is a dot (label boundary)
+    if (suffix_start == 0) return true;
+    return clean_name[suffix_start - 1] == '.';
 }
 
 /// Internal resolution state
@@ -1110,4 +1162,157 @@ test "PF-04: GlueRecord matching pattern (single-pass additional)" {
     try std.testing.expect(servers[0].address != null);
     try std.testing.expect(servers[1].address != null);
     try std.testing.expect(servers[2].address == null);
+}
+
+test "SEC-C27: isSubdomainOf bailiwick validation" {
+    // Exact match
+    try std.testing.expect(isSubdomainOf("example.com", "example.com"));
+    // Subdomain
+    try std.testing.expect(isSubdomainOf("ns1.example.com", "example.com"));
+    // Deep subdomain
+    try std.testing.expect(isSubdomainOf("a.b.c.example.com", "example.com"));
+    // Trailing dots normalized
+    try std.testing.expect(isSubdomainOf("ns1.example.com.", "example.com."));
+    try std.testing.expect(isSubdomainOf("ns1.example.com.", "example.com"));
+    try std.testing.expect(isSubdomainOf("ns1.example.com", "example.com."));
+    // Case insensitive
+    try std.testing.expect(isSubdomainOf("NS1.EXAMPLE.COM", "example.com"));
+    // Root zone is parent of everything
+    try std.testing.expect(isSubdomainOf("example.com", "."));
+    try std.testing.expect(isSubdomainOf("example.com", ""));
+
+    // Out-of-bailiwick: completely different domain
+    try std.testing.expect(!isSubdomainOf("ns1.attacker.com", "example.com"));
+    // Out-of-bailiwick: suffix match but not at label boundary
+    try std.testing.expect(!isSubdomainOf("fakeexample.com", "example.com"));
+    // Out-of-bailiwick: zone is longer than name
+    try std.testing.expect(!isSubdomainOf("com", "example.com"));
+    // Out-of-bailiwick: unrelated TLDs
+    try std.testing.expect(!isSubdomainOf("ns1.example.org", "example.com"));
+}
+
+test "PF-31: max_ns_resolve_depth constant" {
+    // Verify the depth limit constant exists and is reasonable.
+    // 8 levels of nested NS delegation is sufficient for all legitimate zones
+    // while preventing amplification attacks.
+    try std.testing.expect(RecursiveResolver.max_ns_resolve_depth > 0);
+    try std.testing.expect(RecursiveResolver.max_ns_resolve_depth <= 16);
+}
+
+test "PF-31: resolveNsAddress respects depth guard" {
+    // Verify that resolveNsAddress returns null when the parent state's depth
+    // has already reached the maximum. This prevents infinite NS resolution loops.
+    const allocator = std.testing.allocator;
+
+    var resolver = try RecursiveResolver.init(allocator, .{});
+    defer resolver.deinit();
+
+    // Create a parent state at maximum depth
+    var parent_state = ResolutionState{
+        .original_qname = "example.com",
+        .qtype = .a,
+        .depth = RecursiveResolver.max_ns_resolve_depth, // at max
+        .query_count = 0,
+        .current_zone = ".",
+        .cname_chain = .{},
+    };
+    defer parent_state.deinit(allocator);
+
+    // resolveNsAddress should return null due to depth exceeded
+    const result = resolver.resolveNsAddress("ns1.example.com", &parent_state);
+    try std.testing.expect(result == null);
+}
+
+test "PF-31: resolveNsAddress respects query budget" {
+    // Verify that resolveNsAddress returns null when query budget is exhausted.
+    const allocator = std.testing.allocator;
+
+    var resolver = try RecursiveResolver.init(allocator, .{});
+    defer resolver.deinit();
+
+    // Create a parent state with exhausted query budget
+    var parent_state = ResolutionState{
+        .original_qname = "example.com",
+        .qtype = .a,
+        .depth = 0,
+        .query_count = resolver.config.max_queries, // exhausted
+        .current_zone = ".",
+        .cname_chain = .{},
+    };
+    defer parent_state.deinit(allocator);
+
+    // resolveNsAddress should return null due to budget exhausted
+    const result = resolver.resolveNsAddress("ns1.example.com", &parent_state);
+    try std.testing.expect(result == null);
+}
+
+test "SEC-C24: transaction IDs use CSPRNG" {
+    // Verify that the resolver uses OS CSPRNG for transaction IDs.
+    // Generate multiple IDs and check basic properties:
+    // 1. They don't all return the same value (basic randomness sanity)
+    // 2. They don't panic or fail
+    const csprng_rand = RecursiveResolver.csprng;
+
+    var ids: [16]u16 = undefined;
+    for (&ids) |*id| {
+        id.* = csprng_rand.int(u16);
+    }
+
+    // At least 2 different values among 16 samples (probability of all-same: 1/65535^15)
+    var all_same = true;
+    for (ids[1..]) |id| {
+        if (id != ids[0]) {
+            all_same = false;
+            break;
+        }
+    }
+    try std.testing.expect(!all_same);
+}
+
+test "PF-19: responseMatchesQuery accepts pre-parsed Message" {
+    // Verifies that responseMatchesQuery works with a pre-parsed Message
+    // instead of raw bytes, eliminating redundant Message.parse calls.
+    // Before PF-19, responseMatchesQuery would call Message.parse internally;
+    // now it accepts an already-parsed Message, saving ~1-2us per query step.
+    const allocator = std.testing.allocator;
+
+    // Build a valid DNS query and a matching response.
+    // Use buildQuery + modify to create a response-like message.
+    const query = try message_mod.buildQuery(allocator, 0xABCD, "example.com", .a, .in, false);
+    defer allocator.free(query);
+
+    // Create a response by copying the query and flipping the QR bit
+    const response = try allocator.dupe(u8, query);
+    defer allocator.free(response);
+
+    // Set QR=1 (bit 7 of byte 2) to make it a response
+    response[2] |= 0x80;
+
+    // Parse once (as queryWithRetry now does)
+    const msg = try Message.parse(response);
+
+    // responseMatchesQuery should accept the pre-parsed Message
+    try std.testing.expect(responseMatchesQuery(msg, "example.com", .a, .in));
+
+    // Mismatched type should fail
+    try std.testing.expect(!responseMatchesQuery(msg, "example.com", .aaaa, .in));
+
+    // Mismatched name should fail
+    try std.testing.expect(!responseMatchesQuery(msg, "other.com", .a, .in));
+
+    // Mismatched class should fail
+    try std.testing.expect(!responseMatchesQuery(msg, "example.com", .a, .ch));
+}
+
+test "PF-19: QueryResult struct carries both response and parsed Message" {
+    // Verify the QueryResult struct exists and has the expected fields.
+    // This struct is the mechanism by which queryWithRetry returns both
+    // raw bytes and parsed Message, enabling single-parse flow.
+    const QR = RecursiveResolver.QueryResult;
+
+    // Verify it has the expected fields via comptime reflection
+    const info = @typeInfo(QR);
+    try std.testing.expectEqual(@as(usize, 2), info.@"struct".fields.len);
+    try std.testing.expectEqualStrings("response", info.@"struct".fields[0].name);
+    try std.testing.expectEqualStrings("msg", info.@"struct".fields[1].name);
 }

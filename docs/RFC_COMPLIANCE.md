@@ -17,34 +17,34 @@ This document tracks zigdns implementation status for relevant DNS RFCs.
 ## Core DNS Protocol
 
 ### RFC 1034 - Domain Names: Concepts and Facilities
-**Status: Partial**
+**Status: Complete**
 
 | Section | Feature | Status | Notes |
 |---------|---------|--------|-------|
 | 3.1 | Name space | Complete | Full label/name handling |
 | 3.6 | Resource Records | Complete | Common types supported |
 | 4.1 | Name servers | Complete | Full iterative resolution |
-| 4.2 | Zones | Planned | Zone transfer support |
+| 4.2 | Zones | Complete | AXFR/IXFR zone transfer (RFC 5936/1995) |
 | 5.2 | Stub resolver | Complete | UDP/TCP with fallback |
 | 5.3 | Recursive resolver | Complete | QNAME minimization, 0x20 |
 
 ### RFC 1035 - Domain Names: Implementation and Specification
-**Status: Mostly Complete**
+**Status: Complete**
 
 | Section | Feature | Status | Notes |
 |---------|---------|--------|-------|
 | 2.3.1 | Preferred name syntax | Complete | Validation in name.zig |
 | 2.3.4 | Size limits | Complete | 63 byte labels, 255 byte names |
 | 3.1 | Name representation | Complete | Wire format encoding |
-| 3.2 | RR definitions | Partial | Common types only |
-| 3.3 | Standard RRs | Partial | Missing SRV, CAA, etc. |
+| 3.2 | RR definitions | Complete | A, AAAA, CNAME, MX, NS, PTR, SOA, TXT, DNAME, SRV, CAA, TLSA, SVCB, HTTPS, DNSSEC types |
+| 3.3 | Standard RRs | Complete | All common RR types implemented including SRV, CAA, TLSA, SVCB/HTTPS |
 | 4.1.1 | Header format | Complete | Full header parsing |
 | 4.1.2 | Question format | Complete | QNAME/QTYPE/QCLASS |
 | 4.1.3 | RR format | Complete | NAME/TYPE/CLASS/TTL/RDATA |
 | 4.1.4 | Message compression | Complete | Pointer handling |
 | 4.2.1 | UDP usage | Complete | Full implementation |
 | 4.2.2 | TCP usage | Complete | 2-byte length prefix |
-| 7.4 | Caching | Partial | TTL-aware, needs SOA min |
+| 7.4 | Caching | Complete | TTL-aware with SOA minimum negative caching (RFC 2308) |
 
 ---
 
@@ -289,8 +289,8 @@ See [#19](https://gitlab.com/devnw/zig/dns/-/issues/19).
 |------|-----|--------|-------|
 | DNAME | 39 | Complete | parseName() |
 | OPT | 41 | Complete | EDNS pseudo-RR |
-| AXFR | 252 | Planned | Zone transfer |
-| IXFR | 251 | Planned | Incremental transfer |
+| AXFR | 252 | Complete | Full zone transfer (RFC 5936) |
+| IXFR | 251 | Complete | Incremental zone transfer (RFC 1995) |
 
 ---
 

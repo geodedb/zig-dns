@@ -127,6 +127,14 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Internal -- Shared I/O helpers for TCP-based transports (timeout-aware
+    // connect, write, read using poll). Used by stub, tcp, and connection_pool.
+    // Declared early so stub_mod (below) can reference it.
+    const transport_io_mod = b.addModule("transport_io", .{
+        .root_source_file = b.path("src/transports/io.zig"),
+        .target = target,
+    });
+
     // Public API -- RFC 1034 Section 5.3.3: Stub Resolver
     // Simple forwarding resolver
     const stub_mod = b.addModule("stub", .{
@@ -139,6 +147,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "header", .module = header_mod },
             .{ .name = "question", .module = question_mod },
             .{ .name = "record", .module = record_mod },
+            .{ .name = "transport_io", .module = transport_io_mod },
         },
     });
 
@@ -365,6 +374,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "channel", .module = channel_mod },
+            .{ .name = "transport_io", .module = transport_io_mod },
         },
     });
 
@@ -400,6 +410,9 @@ pub fn build(b: *std.Build) void {
     const connection_pool_mod = b.addModule("connection_pool", .{
         .root_source_file = b.path("src/transports/connection_pool.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "transport_io", .module = transport_io_mod },
+        },
     });
 
     // Public API -- Happy Eyeballs (RFC 8305 - Dual-Stack Connection Racing)
@@ -607,6 +620,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "header", .module = header_mod },
                 .{ .name = "question", .module = question_mod },
                 .{ .name = "record", .module = record_mod },
+                .{ .name = "transport_io", .module = transport_io_mod },
             },
         },
         .{
@@ -846,12 +860,26 @@ pub fn build(b: *std.Build) void {
     const run_channel_test = b.addRunArtifact(channel_test);
     test_transport_step.dependOn(&run_channel_test.step);
 
+    // Shared I/O helpers tests
+    const transport_io_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/transports/io.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_transport_io_test = b.addRunArtifact(transport_io_test);
+    test_transport_step.dependOn(&run_transport_io_test.step);
+
     // Connection Pool tests (RFC 7766/7828)
     const connection_pool_test = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/transports/connection_pool.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "transport_io", .module = transport_io_mod },
+            },
         }),
     });
     const run_connection_pool_test = b.addRunArtifact(connection_pool_test);

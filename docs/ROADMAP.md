@@ -4,7 +4,7 @@ This document tracks the implementation status of zigdns features. Each item lin
 
 **Project URL:** https://gitlab.com/devnw/zig/dns
 
-## Phase 1: Core Recursion ✅ COMPLETE
+## Phase 1: Core Recursion -- COMPLETE (code implemented, issue tracker reconciliation pending)
 
 **Milestone:** [Phase 1: Core Recursion](https://gitlab.com/devnw/zig/dns/-/milestones/1)
 
@@ -12,13 +12,13 @@ Foundation for full recursive DNS resolution.
 
 | Feature | Issue | Priority | Status | Notes |
 |---------|-------|----------|--------|-------|
-| Iterative recursion algorithm | [#1](https://gitlab.com/devnw/zig/dns/-/issues/1) | Critical | **Complete** | Full CNAME/referral handling |
-| QNAME minimization (RFC 7816) | [#2](https://gitlab.com/devnw/zig/dns/-/issues/2) | High | **Complete** | Privacy-preserving queries |
-| 0x20 case randomization | [#3](https://gitlab.com/devnw/zig/dns/-/issues/3) | Medium | **Complete** | Cache poisoning protection |
-| SRV record parser (RFC 2782) | [#5](https://gitlab.com/devnw/zig/dns/-/issues/5) | Medium | **Complete** | Service discovery |
-| CAA record parser (RFC 8659) | [#6](https://gitlab.com/devnw/zig/dns/-/issues/6) | Medium | **Complete** | CA authorization |
-| TLSA record parser (RFC 6698) | [#7](https://gitlab.com/devnw/zig/dns/-/issues/7) | Medium | **Complete** | DANE/TLS auth |
-| SVCB/HTTPS parsers (RFC 9460) | [#8](https://gitlab.com/devnw/zig/dns/-/issues/8) | Medium | **Complete** | Service binding |
+| Iterative recursion algorithm | [#1](https://gitlab.com/devnw/zig/dns/-/issues/1) | Critical | **Complete** (code implemented, issue tracker reconciliation pending) | Full CNAME/referral handling |
+| QNAME minimization (RFC 7816) | [#2](https://gitlab.com/devnw/zig/dns/-/issues/2) | High | **Complete** (code implemented, issue tracker reconciliation pending) | Privacy-preserving queries |
+| 0x20 case randomization | [#3](https://gitlab.com/devnw/zig/dns/-/issues/3) | Medium | **Complete** (code implemented, issue tracker reconciliation pending) | Cache poisoning protection |
+| SRV record parser (RFC 2782) | [#5](https://gitlab.com/devnw/zig/dns/-/issues/5) | Medium | **Complete** (code implemented, issue tracker reconciliation pending) | Service discovery |
+| CAA record parser (RFC 8659) | [#6](https://gitlab.com/devnw/zig/dns/-/issues/6) | Medium | **Complete** (code implemented, issue tracker reconciliation pending) | CA authorization |
+| TLSA record parser (RFC 6698) | [#7](https://gitlab.com/devnw/zig/dns/-/issues/7) | Medium | **Complete** (code implemented, issue tracker reconciliation pending) | DANE/TLS auth |
+| SVCB/HTTPS parsers (RFC 9460) | [#8](https://gitlab.com/devnw/zig/dns/-/issues/8) | Medium | **Complete** (code implemented, issue tracker reconciliation pending) | Service binding |
 
 ### Dependencies
 - None (uses existing UDP/TCP transports)
@@ -31,7 +31,7 @@ Foundation for full recursive DNS resolution.
 
 ---
 
-## Phase 2: Production Ready ✅ COMPLETE
+## Phase 2: Production Ready -- COMPLETE (code implemented, issue tracker reconciliation pending)
 
 **Milestone:** [Phase 2: Production Ready](https://gitlab.com/devnw/zig/dns/-/milestones/2)
 
@@ -39,10 +39,10 @@ Features required for production deployment.
 
 | Feature | Issue | Priority | Status | Notes |
 |---------|-------|----------|--------|-------|
-| DoT transport (RFC 7858) | [#9](https://gitlab.com/devnw/zig/dns/-/issues/9) | Critical | **Complete** | TLS backend abstraction |
-| Negative caching (RFC 2308) | [#10](https://gitlab.com/devnw/zig/dns/-/issues/10) | Medium | **Complete** | SOA minimum extraction |
-| Cache poisoning protection | [#11](https://gitlab.com/devnw/zig/dns/-/issues/11) | Medium | **Complete** | Bailiwick checks, TTL capping |
-| Zone transfers (AXFR/IXFR) | [#12](https://gitlab.com/devnw/zig/dns/-/issues/12) | Medium | **Complete** | Full zone transfer support |
+| DoT transport (RFC 7858) | [#9](https://gitlab.com/devnw/zig/dns/-/issues/9) | Critical | **Complete** (interface only -- requires external TLS backend, issue tracker reconciliation pending) | Pluggable TLS backend abstraction |
+| Negative caching (RFC 2308) | [#10](https://gitlab.com/devnw/zig/dns/-/issues/10) | Medium | **Complete** (code implemented, issue tracker reconciliation pending) | SOA minimum extraction |
+| Cache poisoning protection | [#11](https://gitlab.com/devnw/zig/dns/-/issues/11) | Medium | **Complete** (code implemented, issue tracker reconciliation pending) | Bailiwick checks, TTL capping |
+| Zone transfers (AXFR/IXFR) | [#12](https://gitlab.com/devnw/zig/dns/-/issues/12) | Medium | **Complete** (code implemented, issue tracker reconciliation pending) | Full zone transfer support |
 
 ### Dependencies
 - Phase 1 completion ✓
@@ -62,19 +62,19 @@ DoT transport provides a pluggable TLS backend interface. Implementations can us
 
 ---
 
-## Phase 3: DNSSEC ✅ COMPLETE
+## Phase 3: DNSSEC -- PARTIAL (Ed25519/ECDSA complete, RSA pending external crypto, issue tracker reconciliation pending)
 
 **Milestone:** [Phase 3: DNSSEC](https://gitlab.com/devnw/zig/dns/-/milestones/3)
 
-Full DNSSEC validation for authenticated DNS.
+DNSSEC validation for authenticated DNS. Ed25519 and ECDSA algorithms are fully implemented via Zig std.crypto. RSA algorithms (used by ~70-80% of signed domains including the root zone) require an external crypto library and are not yet supported.
 
 | Feature | Issue | Priority | Status | Notes |
 |---------|-------|----------|--------|-------|
-| RRSIG/DNSKEY parsers | [#13](https://gitlab.com/devnw/zig/dns/-/issues/13) | Critical | **Complete** | Full parsing with key tag calculation |
-| DS record validation | [#14](https://gitlab.com/devnw/zig/dns/-/issues/14) | Critical | **Complete** | SHA-1/SHA-256/SHA-384 digests |
-| NSEC/NSEC3 validation | [#15](https://gitlab.com/devnw/zig/dns/-/issues/15) | High | **Complete** | NXDOMAIN/NODATA proofs |
-| Signature validation | [#16](https://gitlab.com/devnw/zig/dns/-/issues/16) | Critical | **Complete** | Ed25519, ECDSA P-256/P-384 |
-| Chain-of-trust validation | [#17](https://gitlab.com/devnw/zig/dns/-/issues/17) | Critical | **Complete** | Trust anchor to leaf |
+| RRSIG/DNSKEY parsers | [#13](https://gitlab.com/devnw/zig/dns/-/issues/13) | Critical | **Complete** (code implemented, issue tracker reconciliation pending) | Full parsing with key tag calculation |
+| DS record validation | [#14](https://gitlab.com/devnw/zig/dns/-/issues/14) | Critical | **Complete** (code implemented, issue tracker reconciliation pending) | SHA-1/SHA-256/SHA-384 digests |
+| NSEC/NSEC3 validation | [#15](https://gitlab.com/devnw/zig/dns/-/issues/15) | High | **Complete** (code implemented, issue tracker reconciliation pending) | NXDOMAIN/NODATA proofs |
+| Signature validation | [#16](https://gitlab.com/devnw/zig/dns/-/issues/16) | Critical | **Partial** (Ed25519/ECDSA complete; RSA-SHA256/512/1 return UnsupportedAlgorithm, issue tracker reconciliation pending) | See Algorithm Support table below |
+| Chain-of-trust validation | [#17](https://gitlab.com/devnw/zig/dns/-/issues/17) | Critical | **Complete** (code implemented, issue tracker reconciliation pending) | Trust anchor to leaf (non-RSA chains only) |
 
 ### Dependencies
 - Phase 2 completion ✓
@@ -100,7 +100,7 @@ Ed25519 and ECDSA algorithms are fully supported via Zig's std.crypto.
 
 ---
 
-## Phase 4: Modern Features ✅ COMPLETE
+## Phase 4: Modern Features -- COMPLETE (code implemented, issue tracker reconciliation pending)
 
 **Milestone:** [Phase 4: Modern Features](https://gitlab.com/devnw/zig/dns/-/milestones/4)
 
@@ -108,11 +108,11 @@ Modern transport protocols and advanced features.
 
 | Feature | Issue | Priority | Status | Notes |
 |---------|-------|----------|--------|-------|
-| DoH transport (RFC 8484) | [#18](https://gitlab.com/devnw/zig/dns/-/issues/18) | Critical | **Complete** | Pluggable HTTP backend |
-| DoQ transport (RFC 9250) | [#19](https://gitlab.com/devnw/zig/dns/-/issues/19) | High | **Complete** | Pluggable QUIC backend |
-| EDNS Client Subnet (RFC 7871) | [#20](https://gitlab.com/devnw/zig/dns/-/issues/20) | Low | **Complete** | Full ECS support |
-| DNS Cookies (RFC 7873) | [#21](https://gitlab.com/devnw/zig/dns/-/issues/21) | Low | **Complete** | SipHash cookie computation |
-| Cache prefetching | [#22](https://gitlab.com/devnw/zig/dns/-/issues/22) | Low | **Complete** | Configurable threshold |
+| DoH transport (RFC 8484) | [#18](https://gitlab.com/devnw/zig/dns/-/issues/18) | Critical | **Complete** (interface only -- requires external HTTP backend, issue tracker reconciliation pending) | Pluggable HTTP backend |
+| DoQ transport (RFC 9250) | [#19](https://gitlab.com/devnw/zig/dns/-/issues/19) | High | **Complete** (interface only -- requires external QUIC backend, issue tracker reconciliation pending) | Pluggable QUIC backend, feature-gated |
+| EDNS Client Subnet (RFC 7871) | [#20](https://gitlab.com/devnw/zig/dns/-/issues/20) | Low | **Complete** (code implemented, issue tracker reconciliation pending) | Full ECS support |
+| DNS Cookies (RFC 7873) | [#21](https://gitlab.com/devnw/zig/dns/-/issues/21) | Low | **Complete** (code implemented, issue tracker reconciliation pending) | SipHash cookie computation |
+| Cache prefetching | [#22](https://gitlab.com/devnw/zig/dns/-/issues/22) | Low | **Complete** (code implemented, issue tracker reconciliation pending) | Configurable threshold |
 
 ### Dependencies
 - Phase 3 completion ✓
@@ -144,7 +144,7 @@ DoH and DoQ transports provide pluggable backend interfaces. Implementations can
 
 ## Current Implementation Status
 
-### Fully Implemented (Phase 1 + Phase 2 + Phase 3 + Phase 4)
+### Fully Implemented (Phase 1 + core features)
 - Core DNS message parsing (RFC 1035)
 - Name compression/decompression
 - A, AAAA, CNAME, MX, NS, PTR, SOA, TXT, DNAME records
@@ -157,25 +157,37 @@ DoH and DoQ transports provide pluggable backend interfaces. Implementations can
 - 0x20 case randomization for cache poisoning protection
 - LRU caching with TTL clamping
 - Negative caching (RFC 2308) with SOA minimum extraction
-- DoT transport with pluggable TLS backend (RFC 7858)
 - Cache poisoning protection (bailiwick checks, TTL capping)
 - Zone transfers (AXFR/IXFR) via RFC 5936/1995
 - Stub resolver with TCP fallback
 - DNSSEC validation (Ed25519, ECDSA P-256/P-384)
-- Chain-of-trust validation from root to leaf
+- Chain-of-trust validation from root to leaf (non-RSA chains)
 - Authenticated denial of existence (NSEC/NSEC3)
-- DoH transport with pluggable HTTP backend (RFC 8484)
-- DoQ transport with pluggable QUIC backend (RFC 9250)
 - EDNS Client Subnet (RFC 7871)
 - DNS Cookies (RFC 7873)
 - Cache prefetching with configurable threshold
+- TSIG transaction signatures (RFC 2845)
+- SIG(0) request/transaction signatures (RFC 2931)
+- Server failover and load balancing
+- Split DNS / policy routing
+- Response Policy Zones (RPZ, RFC 8646)
+- Query/response logging
+- Configuration file support
+- Connection pooling (RFC 7766/7828)
+- Happy Eyeballs dual-stack racing (RFC 8305)
+- Zone file parser (RFC 1035 Section 5)
+- Parallel query support (spice-based)
+
+### Interface Only (requires external backend)
+- DoT transport (RFC 7858) -- pluggable TLS backend interface, no bundled TLS implementation
+- DoH transport (RFC 8484) -- pluggable HTTP backend interface, no bundled HTTP/2 implementation
+- DoQ transport (RFC 9250) -- pluggable QUIC backend interface, no bundled QUIC implementation, feature-gated
 
 ### Partially Implemented
-- DNSSEC RSA algorithms (requires external crypto library)
+- DNSSEC RSA algorithms (8/10/5) -- returns UnsupportedAlgorithm; requires external crypto library (BoringSSL, mbedTLS, or similar)
 
-### Requires External Libraries
-- DoH: Requires HTTP/2 library (provides HttpBackend interface)
-- DoQ: Requires QUIC library (provides QuicBackend interface)
+### Issue Tracker Note
+Many GitLab issues (#9-#22, plus security issues) remain Open despite code being implemented and tested. This is a tracker reconciliation gap tracked by [#78](https://gitlab.com/devnw/zig/dns/-/issues/78) (GAP-0015). The status annotations above reflect the actual code state.
 
 ---
 

@@ -132,17 +132,33 @@ pub const DnsCache = struct {
     }
 
     pub fn get(self: *Self, name: []const u8, qtype: Type, qclass: Class) ?CacheEntry {
-        const key = self.makeKey(name, qtype, qclass) catch return null;
-        defer self.allocator.free(key);
+        // PF-21: Use a stack buffer for the key to avoid a heap allocation
+        // on every lookup.  PF-26: Use getWithHandle + removeByHandle to
+        // avoid re-hashing the key when removing expired entries.
+        var key_buf: [max_key_len]u8 = undefined;
+        const key = self.makeKeyBuf(name, qtype, qclass, &key_buf) orelse {
+            // Name exceeded stack buffer -- fall back to heap allocation.
+            const heap_key = self.makeKey(name, qtype, qclass) catch return null;
+            defer self.allocator.free(heap_key);
+            return self.getWithKey(heap_key);
+        };
 
+        return self.getWithKey(key);
+    }
+
+    /// Internal helper: look up a pre-formatted key and handle expiry.
+    fn getWithKey(self: *Self, key: []const u8) ?CacheEntry {
         const now = self.clock.now();
 
-        if (self.entries.get(key)) |entry| {
-            if (entry.isExpired(now)) {
-                _ = self.entries.remove(key);
+        // PF-26: getWithHandle returns an internal handle so that, if the
+        // entry is expired, we can remove it via removeByHandle without
+        // re-hashing the key string.
+        if (self.entries.getWithHandle(key)) |handle| {
+            if (handle.value.isExpired(now)) {
+                self.entries.removeByHandle(handle);
                 return null;
             }
-            return entry;
+            return handle.value;
         }
         return null;
     }
@@ -299,18 +315,14 @@ pub const DnsCache = struct {
         if (!self.options.zone_nxdomain) return false;
 
         const now = self.clock.now();
+        // PF-25: Use a stack buffer for the zone key to avoid a heap
+        // allocation on every iteration of the parent-zone loop.
+        var key_buf: [max_key_len]u8 = undefined;
 
         // Check each parent zone
         var current = name;
         while (current.len > 0) {
-            const zone_key = self.makeNxdomainZoneKey(current) catch continue;
-            defer self.allocator.free(zone_key);
-
-            if (self.entries.get(zone_key)) |entry| {
-                if (entry.entry_type == .nxdomain and !entry.isExpired(now)) {
-                    return true;
-                }
-            }
+            if (self.checkNxdomainZone(current, &key_buf, now)) return true;
 
             // Move to parent zone
             if (std.mem.indexOf(u8, current, ".")) |dot_idx| {
@@ -323,8 +335,32 @@ pub const DnsCache = struct {
         return false;
     }
 
+    /// Check whether a single zone name is cached as NXDOMAIN.
+    /// Uses the stack buffer first; falls back to heap if needed.
+    fn checkNxdomainZone(self: *Self, zone: []const u8, key_buf: []u8, now: i64) bool {
+        if (self.makeNxdomainZoneKeyBuf(zone, key_buf)) |zone_key| {
+            if (self.entries.get(zone_key)) |entry| {
+                return entry.entry_type == .nxdomain and !entry.isExpired(now);
+            }
+            return false;
+        }
+        // Fallback: heap-allocate for extremely long zone names.
+        const heap_key = self.makeNxdomainZoneKey(zone) catch return false;
+        defer self.allocator.free(heap_key);
+        if (self.entries.get(heap_key)) |entry| {
+            return entry.entry_type == .nxdomain and !entry.isExpired(now);
+        }
+        return false;
+    }
+
     fn makeNxdomainZoneKey(self: *Self, zone: []const u8) ![]u8 {
         return std.fmt.allocPrint(self.allocator, "NXZONE:{s}", .{zone});
+    }
+
+    /// Format an NXDOMAIN zone key into a caller-owned stack buffer.
+    /// Returns null if the formatted key exceeds the buffer.
+    fn makeNxdomainZoneKeyBuf(_: *Self, zone: []const u8, buf: []u8) ?[]const u8 {
+        return std.fmt.bufPrint(buf, "NXZONE:{s}", .{zone}) catch null;
     }
 
     pub fn clear(self: *Self) void {
@@ -335,6 +371,29 @@ pub const DnsCache = struct {
 
     pub fn len(self: *Self) usize {
         return self.entries.len();
+    }
+
+    /// Maximum formatted key length: 255 (name) + 1 (:) + 5 (type) + 1 (:) + 5 (class) = 267.
+    /// Rounded up for safety.  Also covers NXZONE: prefix (7) + 255 = 262.
+    const max_key_len = 280;
+
+    /// Format a lookup key into a caller-owned stack buffer without any
+    /// heap allocation.  Returns null if the formatted key would not fit
+    /// (extremely unlikely given RFC 1035 name limits).
+    fn makeKeyBuf(_: *Self, name: []const u8, qtype: Type, qclass: Class, buf: []u8) ?[]const u8 {
+        // Lowercase the name in-place into the beginning of buf, then
+        // append ":<type>:<class>".
+        var lower_buf: [name_mod.max_name_length]u8 = undefined;
+        const clamped_len = @min(name.len, lower_buf.len);
+        for (name[0..clamped_len], 0..) |c, i| {
+            lower_buf[i] = std.ascii.toLower(c);
+        }
+
+        return std.fmt.bufPrint(buf, "{s}:{d}:{d}", .{
+            lower_buf[0..clamped_len],
+            @intFromEnum(qtype),
+            @intFromEnum(qclass),
+        }) catch null;
     }
 
     fn makeKey(self: *Self, name: []const u8, qtype: Type, qclass: Class) ![]u8 {
@@ -593,6 +652,112 @@ test "DnsCache makeKey case insensitive" {
 
     try std.testing.expectEqualStrings(key1, key2);
     try std.testing.expectEqualStrings(key2, key3);
+}
+
+test "DnsCache get uses stack buffer (PF-21)" {
+    // Verify that get() produces the same results as the heap-allocated
+    // makeKey path by exercising various name lengths and case mixtures.
+    const allocator = std.testing.allocator;
+    var mock_clock = clock_mod.MockClock.init();
+
+    var cache = DnsCache.init(allocator, .{}, mock_clock.clock());
+    defer cache.deinit();
+
+    // Insert with various cases, retrieve with different cases
+    try cache.putPositive("Mixed.CASE.Example.COM.", .a, .in, &[_]u8{ 10, 20, 30, 40 }, 300);
+
+    // get() should find the entry regardless of case (stack-buffered path)
+    const entry1 = cache.get("mixed.case.example.com.", .a, .in);
+    try std.testing.expect(entry1 != null);
+    try std.testing.expectEqual(EntryType.positive, entry1.?.entry_type);
+
+    const entry2 = cache.get("MIXED.CASE.EXAMPLE.COM.", .a, .in);
+    try std.testing.expect(entry2 != null);
+
+    // Different type should not match
+    try std.testing.expect(cache.get("mixed.case.example.com.", .aaaa, .in) == null);
+}
+
+test "DnsCache makeKeyBuf matches makeKey output" {
+    // Verify makeKeyBuf produces identical output to makeKey.
+    const allocator = std.testing.allocator;
+    var mock_clock = clock_mod.MockClock.init();
+
+    var cache = DnsCache.init(allocator, .{}, mock_clock.clock());
+    defer cache.deinit();
+
+    const test_names = [_][]const u8{
+        "example.com.",
+        "UPPER.CASE.",
+        "MiXeD.cAsE.123.",
+        "a.",
+    };
+
+    for (test_names) |name| {
+        const heap_key = try cache.makeKey(name, .a, .in);
+        defer allocator.free(heap_key);
+
+        var buf: [DnsCache.max_key_len]u8 = undefined;
+        const stack_key = cache.makeKeyBuf(name, .a, .in, &buf);
+        try std.testing.expect(stack_key != null);
+        try std.testing.expectEqualStrings(heap_key, stack_key.?);
+    }
+}
+
+test "DnsCache isUnderNxdomainZone stack buffer (PF-25)" {
+    // Verify isUnderNxdomainZone works correctly with the stack-buffered
+    // zone key path instead of the heap-allocating path.
+    const allocator = std.testing.allocator;
+    var mock_clock = clock_mod.MockClock.init();
+
+    var cache = DnsCache.init(allocator, .{}, mock_clock.clock());
+    defer cache.deinit();
+
+    // Manually insert an NXDOMAIN zone entry for "example.com."
+    const zone = try allocator.dupe(u8, "example.com.");
+    const zone_key = try cache.makeNxdomainZoneKey("example.com.");
+    defer allocator.free(zone_key);
+
+    try cache.entries.put(zone_key, CacheEntry{
+        .entry_type = .nxdomain,
+        .rdata = &[_]u8{},
+        .cached_at = mock_clock.clock().now(),
+        .original_ttl = 300,
+        .zone_name = zone,
+    });
+
+    // Subdomains should be detected as under the NXDOMAIN zone
+    try std.testing.expect(cache.isUnderNxdomainZone("foo.example.com."));
+    try std.testing.expect(cache.isUnderNxdomainZone("bar.baz.example.com."));
+
+    // Unrelated zone should not match
+    try std.testing.expect(!cache.isUnderNxdomainZone("other.net."));
+}
+
+test "DnsCache expired removal uses removeByHandle (PF-26)" {
+    // Verify that expired entries are correctly removed via the
+    // handle-based path (no re-hash).  The testing allocator will
+    // detect any leaked memory from zone_name or rdata.
+    const allocator = std.testing.allocator;
+    var mock_clock = clock_mod.MockClock.init();
+
+    var cache = DnsCache.init(allocator, .{}, mock_clock.clock());
+    defer cache.deinit();
+
+    // Insert an entry with allocated rdata that will expire
+    try cache.putPositive("expire-me.test.", .a, .in, &[_]u8{ 1, 2, 3, 4 }, 5);
+
+    // Should be present initially
+    try std.testing.expect(cache.get("expire-me.test.", .a, .in) != null);
+
+    // Advance past expiry
+    mock_clock.advance(6);
+
+    // get() should return null and remove the expired entry
+    try std.testing.expect(cache.get("expire-me.test.", .a, .in) == null);
+
+    // Entry should be gone from the cache
+    try std.testing.expectEqual(@as(usize, 0), cache.len());
 }
 
 test "SoaCacheData negativeTtl calculation" {

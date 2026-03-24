@@ -18,6 +18,10 @@
 
 const std = @import("std");
 
+/// SOA record type value (RFC 1035 Section 3.2.2)
+/// Used to identify SOA records in zone transfer boundary detection.
+const soa_rtype: u16 = 6;
+
 /// Zone transfer types
 pub const TransferType = enum(u16) {
     /// RFC 5936: Full zone transfer
@@ -42,8 +46,10 @@ pub const ZoneTransferConfig = struct {
     // SECURITY: Authentication enforcement options (SEC-001)
 
     /// If true, zone transfers without TSIG authentication will fail.
-    /// RECOMMENDED: Set to true in production environments.
-    require_auth: bool = false,
+    /// SECURITY (SEC-C28): Defaults to true to enforce authenticated zone transfers.
+    /// Unauthenticated AXFR/IXFR can expose full zone contents to unauthorized parties.
+    /// Set to false explicitly only in trusted networks or testing environments.
+    require_auth: bool = true,
 
     /// If true, log a warning when performing unauthenticated zone transfers.
     /// Default true to alert operators of potential security risks.
@@ -289,7 +295,7 @@ pub const ZoneTransferClient = struct {
 
             for (records) |record| {
                 // Check for SOA records (transfer boundaries)
-                if (record.rtype == 6) { // SOA
+                if (record.rtype == soa_rtype) {
                     if (!first_soa_seen) {
                         first_soa_seen = true;
                         zone.soa = try self.parseSoaRdata(record.rdata);
@@ -385,7 +391,7 @@ pub const ZoneTransferClient = struct {
                 .success = true,
                 .is_full_zone = true,
                 .changeset = null,
-                .new_serial = if (records.len > 0 and records[0].rtype == 6)
+                .new_serial = if (records.len > 0 and records[0].rtype == soa_rtype)
                     self.extractSerial(records[0].rdata)
                 else
                     current_serial,
@@ -727,33 +733,10 @@ pub const ZoneTransferClient = struct {
         };
     }
 
-    fn extractSerial(_: *Self, rdata: []const u8) u32 {
-        // Same logic as parseSoaRdata but just returns serial
-        var offset: usize = 0;
-
-        // Skip MNAME
-        while (offset < rdata.len and rdata[offset] != 0) {
-            if (rdata[offset] & 0xC0 == 0xC0) {
-                offset += 2;
-                break;
-            }
-            offset += 1 + rdata[offset];
-        }
-        if (offset < rdata.len and rdata[offset] == 0) offset += 1;
-
-        // Skip RNAME
-        while (offset < rdata.len and rdata[offset] != 0) {
-            if (rdata[offset] & 0xC0 == 0xC0) {
-                offset += 2;
-                break;
-            }
-            offset += 1 + rdata[offset];
-        }
-        if (offset < rdata.len and rdata[offset] == 0) offset += 1;
-
-        if (offset + 4 > rdata.len) return 0;
-
-        return std.mem.readInt(u32, rdata[offset..][0..4], .big);
+    fn extractSerial(self: *Self, rdata: []const u8) u32 {
+        // Delegate to parseSoaRdata to avoid duplicating name-skipping logic
+        const soa = self.parseSoaRdata(rdata) catch return 0;
+        return soa.serial;
     }
 
     fn isAxfrResponse(_: *Self, records: []const ZoneRecord) bool {
@@ -761,7 +744,7 @@ pub const ZoneTransferClient = struct {
         // IXFR has exactly 2 SOA records per changeset
         var soa_count: usize = 0;
         for (records) |r| {
-            if (r.rtype == 6) soa_count += 1;
+            if (r.rtype == soa_rtype) soa_count += 1;
         }
         // If we see many records and SOAs at start/end, it's likely AXFR
         return records.len > 10 and soa_count >= 2;
@@ -774,7 +757,7 @@ pub const ZoneTransferClient = struct {
         if (records.len == 0) return;
 
         // First SOA is the new serial
-        if (records[0].rtype == 6) {
+        if (records[0].rtype == soa_rtype) {
             changeset.new_serial = self.extractSerial(records[0].rdata);
         }
 
@@ -784,7 +767,7 @@ pub const ZoneTransferClient = struct {
         while (i < records.len) {
             const record = records[i];
 
-            if (record.rtype == 6) {
+            if (record.rtype == soa_rtype) {
                 // SOA toggles between deletion and addition mode
                 in_deletion = !in_deletion;
                 i += 1;
@@ -850,8 +833,8 @@ test "ZoneTransferConfig defaults" {
     try std.testing.expectEqual(@as(usize, 100000), config.max_records);
     try std.testing.expectEqual(@as(u32, 300000), config.timeout_ms);
     try std.testing.expect(config.verify_serial);
-    // Security defaults
-    try std.testing.expect(!config.require_auth); // Default false for backward compat
+    // Security defaults (SEC-C28)
+    try std.testing.expect(config.require_auth); // Default true to enforce authentication
     try std.testing.expect(config.warn_unauthenticated); // Default true for security
     try std.testing.expect(config.tsig_key == null);
 }
@@ -890,4 +873,22 @@ test "IxfrChangeset basic" {
 test "TransferType values" {
     try std.testing.expectEqual(@as(u16, 252), @intFromEnum(TransferType.axfr));
     try std.testing.expectEqual(@as(u16, 251), @intFromEnum(TransferType.ixfr));
+}
+
+test "SEC-C28: default config requires authentication" {
+    // Verify that the default ZoneTransferConfig enforces authentication.
+    // This prevents accidental exposure of zone data over unauthenticated AXFR/IXFR.
+    const config = ZoneTransferConfig{};
+    try std.testing.expect(config.require_auth);
+    try std.testing.expect(config.tsig_key == null);
+    // With no TSIG key and require_auth=true, transfers should be blocked.
+    // This is verified by the axfr/ixfr methods checking require_auth first.
+}
+
+test "SEC-C28: explicit opt-out for unauthenticated transfers" {
+    // Verify that callers can explicitly disable auth for testing/trusted networks.
+    const config = ZoneTransferConfig{
+        .require_auth = false,
+    };
+    try std.testing.expect(!config.require_auth);
 }

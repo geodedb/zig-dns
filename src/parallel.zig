@@ -186,29 +186,86 @@ fn parallelZoneParseTask(t: *spice.Task, ctx: ZoneParseContext) void {
     }
 }
 
+/// Parse a single resource record from a minimal wire-format slice.
+///
+/// Expected wire layout (simplified, non-compressed):
+///   [0..name_end]  name bytes (length-prefixed labels terminated by 0x00)
+///   [name_end+0..+2]  rtype  (u16 big-endian)
+///   [name_end+2..+4]  rclass (u16 big-endian)
+///   [name_end+4..+8]  ttl    (u32 big-endian)
+///   [name_end+8..+10] rdlength (u16 big-endian)
+///   [name_end+10..+10+rdlength] rdata
+///
+/// Returns `.valid = false` when the slice is too short or the name
+/// encoding is malformed.  This function never allocates.
 fn parseRecord(allocator: std.mem.Allocator, raw: []const u8) ParsedRecord {
     _ = allocator;
-    // Minimal validation - real parsing would decode wire format
-    if (raw.len < 12) {
-        return .{
-            .name = "",
-            .rtype = 0,
-            .rclass = 0,
-            .ttl = 0,
-            .rdata = "",
-            .valid = false,
-        };
+
+    // Walk length-prefixed labels to find the end of the name section.
+    // A valid name consists of labels (1-byte length + that many bytes)
+    // terminated by a zero-length label (0x00).
+    var pos: usize = 0;
+    const name_start: usize = 0;
+    var name_end: usize = 0;
+    var found_name_end = false;
+
+    while (pos < raw.len) {
+        const label_len = raw[pos];
+        if (label_len == 0) {
+            // Zero-length label marks end of name
+            name_end = pos + 1;
+            found_name_end = true;
+            break;
+        }
+        // Guard against compressed names (pointer: top two bits set).
+        // Compressed names are not supported in this simplified format.
+        if (label_len & 0xC0 != 0) {
+            return invalid_record;
+        }
+        if (label_len > 63) {
+            return invalid_record; // Label exceeds max 63 bytes
+        }
+        pos += 1 + @as(usize, label_len);
+    }
+
+    if (!found_name_end) {
+        return invalid_record;
+    }
+
+    // Need at least 10 more bytes after the name: type(2) + class(2) + ttl(4) + rdlength(2)
+    const fixed_start = name_end;
+    if (raw.len < fixed_start + 10) {
+        return invalid_record;
+    }
+
+    const rtype = std.mem.readInt(u16, raw[fixed_start..][0..2], .big);
+    const rclass = std.mem.readInt(u16, raw[fixed_start + 2 ..][0..2], .big);
+    const ttl = std.mem.readInt(u32, raw[fixed_start + 4 ..][0..4], .big);
+    const rdlength = std.mem.readInt(u16, raw[fixed_start + 8 ..][0..2], .big);
+
+    const rdata_start = fixed_start + 10;
+    if (raw.len < rdata_start + rdlength) {
+        return invalid_record; // Truncated rdata
     }
 
     return .{
-        .name = raw[0..1],
-        .rtype = std.mem.readInt(u16, raw[2..4], .big),
-        .rclass = std.mem.readInt(u16, raw[4..6], .big),
-        .ttl = std.mem.readInt(u32, raw[6..10], .big),
-        .rdata = if (raw.len > 12) raw[12..] else "",
+        .name = raw[name_start..name_end],
+        .rtype = rtype,
+        .rclass = rclass,
+        .ttl = ttl,
+        .rdata = raw[rdata_start .. rdata_start + rdlength],
         .valid = true,
     };
 }
+
+const invalid_record = ParsedRecord{
+    .name = "",
+    .rtype = 0,
+    .rclass = 0,
+    .ttl = 0,
+    .rdata = "",
+    .valid = false,
+};
 
 // ============================================================================
 // Parallel DNSSEC Validation
@@ -294,15 +351,28 @@ fn parallelDnssecTask(t: *spice.Task, ctx: DnssecValidateContext) void {
     }
 }
 
+/// Validate a single DNSSEC signature.
+///
+/// Error codes:
+///   1 -- missing RRSIG or DNSKEY (invalid input)
+///   2 -- empty RRset (nothing to validate)
+///   3 -- not implemented (no cryptographic backend available)
+///
+/// Full DNSSEC validation requires cryptographic signature verification
+/// (RSA, ECDSA, or Ed25519 depending on the algorithm field in the RRSIG).
+/// This library does not yet include a crypto backend, so after input
+/// validation the function returns error_code 3 ("not implemented")
+/// rather than fabricating a success result.
 fn validateDnssec(input: DnssecValidateInput) DnssecValidateResult {
-    // Actual DNSSEC validation would verify signature here
     if (input.rrsig.len == 0 or input.dnskey.len == 0) {
         return .{ .valid = false, .error_code = 1 };
     }
     if (input.rrset.len == 0) {
         return .{ .valid = false, .error_code = 2 };
     }
-    return .{ .valid = true, .error_code = null };
+    // No cryptographic backend available -- return "not implemented"
+    // instead of fabricating a valid result.
+    return .{ .valid = false, .error_code = 3 };
 }
 
 // ============================================================================
@@ -402,14 +472,26 @@ fn parallelBatchQueryTask(t: *spice.Task, ctx: BatchQueryContext) void {
     }
 }
 
+/// Execute a single DNS query against a server.
+///
+/// Error codes:
+///   1 -- empty domain (invalid input)
+///   2 -- not implemented (no query transport wired)
+///
+/// Sending an actual DNS query requires a transport (UDP/TCP) and an
+/// allocator for building the wire-format request.  The parallel batch
+/// query API does not yet wire through a transport or allocator, so
+/// after input validation this function returns error_code 2 ("not
+/// implemented") rather than fabricating a success result.
 fn executeQuery(query: QuerySpec, server: []const u8, timeout_ms: u32) QueryResult {
     _ = server;
     _ = timeout_ms;
-    // Actual query would send DNS request over UDP/TCP
     if (query.domain.len == 0) {
         return .{ .success = false, .response = null, .error_code = 1 };
     }
-    return .{ .success = true, .response = null, .error_code = null };
+    // No transport wired -- return "not implemented" instead of
+    // fabricating a success result.
+    return .{ .success = false, .response = null, .error_code = 2 };
 }
 
 // ============================================================================
@@ -502,13 +584,20 @@ fn parallelPrefetchTask(t: *spice.Task, ctx: CachePrefetchContext) void {
     }
 }
 
+/// Prefetch a single cache entry by querying the DNS server.
+///
+/// Refreshing a cache entry requires a transport and cache reference.
+/// The parallel prefetch API does not yet wire through these
+/// dependencies, so this function returns `.refreshed = false`
+/// rather than fabricating a success result.
 fn prefetchEntry(entry: PrefetchEntry, server: []const u8) PrefetchResult {
     _ = server;
-    // Actual prefetch would query DNS and update cache
     if (entry.domain.len == 0) {
         return .{ .refreshed = false, .new_ttl = 0 };
     }
-    return .{ .refreshed = true, .new_ttl = 300 };
+    // No transport or cache wired -- return "not refreshed" instead of
+    // fabricating a success result with a made-up TTL.
+    return .{ .refreshed = false, .new_ttl = 0 };
 }
 
 // ============================================================================
@@ -522,8 +611,16 @@ test "parallel zone record parse" {
     var raw_records: [100][]const u8 = undefined;
     var results: [100]ParsedRecord = undefined;
 
-    // Create minimal valid records
-    const record_data = [_]u8{0} ** 12 ++ [_]u8{ 'r', 'd', 'a', 't', 'a' };
+    // Wire-format record: name \x03com\x00, type=A(1), class=IN(1),
+    // ttl=300, rdlength=4, rdata=1.2.3.4
+    const record_data = [_]u8{
+        3, 'c', 'o', 'm', 0, // name: com.
+        0, 1, // rtype: A
+        0, 1, // rclass: IN
+        0, 0, 1, 44, // ttl: 300
+        0, 4, // rdlength: 4
+        1, 2, 3, 4, // rdata
+    };
     for (&raw_records) |*r| {
         r.* = &record_data;
     }
@@ -532,10 +629,14 @@ test "parallel zone record parse" {
 
     for (results) |result| {
         try std.testing.expect(result.valid);
+        try std.testing.expectEqual(@as(u16, 1), result.rtype);
+        try std.testing.expectEqual(@as(u16, 1), result.rclass);
+        try std.testing.expectEqual(@as(u32, 300), result.ttl);
+        try std.testing.expectEqual(@as(usize, 4), result.rdata.len);
     }
 }
 
-test "parallel dnssec validate" {
+test "parallel dnssec validate - not implemented" {
     if (!build_options.enable_spice) return error.SkipZigTest;
 
     var inputs: [4]DnssecValidateInput = undefined;
@@ -551,8 +652,10 @@ test "parallel dnssec validate" {
 
     parallelDnssecValidate(&inputs, &results);
 
+    // With valid inputs but no crypto backend, error_code 3 (not implemented)
     for (results) |result| {
-        try std.testing.expect(result.valid);
+        try std.testing.expect(!result.valid);
+        try std.testing.expectEqual(@as(?u8, 3), result.error_code);
     }
 }
 
@@ -569,7 +672,8 @@ test "parallel zone record parse - invalid records" {
     var raw_records: [64][]const u8 = undefined;
     var results: [64]ParsedRecord = undefined;
 
-    // Short records that should fail validation
+    // Name terminator at byte 0 (\x00) but only 7 bytes remain after it,
+    // which is less than the 10 required for type+class+ttl+rdlength.
     const short_record = [_]u8{0} ** 8;
     for (&raw_records) |*r| {
         r.* = &short_record;
@@ -580,6 +684,69 @@ test "parallel zone record parse - invalid records" {
     for (results) |result| {
         try std.testing.expect(!result.valid);
     }
+}
+
+test "parseRecord rejects compressed name pointers" {
+    const allocator = std.testing.allocator;
+
+    // Compressed name pointer (0xC0 0x0C) is not supported in this format
+    const compressed = [_]u8{
+        0xC0, 0x0C, // compressed name pointer
+        0, 1, // rtype
+        0, 1, // rclass
+        0, 0, 0, 60, // ttl
+        0, 4, // rdlength
+        1, 2, 3, 4, // rdata
+    };
+    var raw_records = [_][]const u8{&compressed};
+    var results: [1]ParsedRecord = undefined;
+
+    parallelZoneRecordParse(allocator, &raw_records, &results);
+
+    try std.testing.expect(!results[0].valid);
+}
+
+test "parseRecord rejects truncated rdata" {
+    const allocator = std.testing.allocator;
+
+    // rdlength says 4 but only 2 bytes follow
+    const truncated = [_]u8{
+        0, // root name
+        0, 1, // rtype: A
+        0, 1, // rclass: IN
+        0, 0, 0, 60, // ttl: 60
+        0, 4, // rdlength: 4 (but only 2 bytes follow)
+        1, 2, // incomplete rdata
+    };
+    var raw_records = [_][]const u8{&truncated};
+    var results: [1]ParsedRecord = undefined;
+
+    parallelZoneRecordParse(allocator, &raw_records, &results);
+
+    try std.testing.expect(!results[0].valid);
+}
+
+test "parseRecord multi-label name" {
+    const allocator = std.testing.allocator;
+
+    // Wire-format: \x03www\x07example\x03com\x00 type=AAAA(28)
+    // class=IN(1) ttl=3600 rdlength=0
+    const record = [_]u8{
+        3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, // name
+        0, 28, // rtype: AAAA
+        0, 1, // rclass: IN
+        0, 0, 14, 16, // ttl: 3600
+        0, 0, // rdlength: 0
+    };
+    var raw_records = [_][]const u8{&record};
+    var results: [1]ParsedRecord = undefined;
+
+    parallelZoneRecordParse(allocator, &raw_records, &results);
+
+    try std.testing.expect(results[0].valid);
+    try std.testing.expectEqual(@as(u16, 28), results[0].rtype);
+    try std.testing.expectEqual(@as(u32, 3600), results[0].ttl);
+    try std.testing.expectEqual(@as(usize, 0), results[0].rdata.len);
 }
 
 test "parallel dnssec validate - empty rrsig" {
@@ -626,7 +793,7 @@ test "parallel dnssec validate - empty rrset" {
     }
 }
 
-test "parallel batch query" {
+test "parallel batch query - not implemented" {
     if (!build_options.enable_spice) return error.SkipZigTest;
 
     var queries: [8]QuerySpec = undefined;
@@ -642,8 +809,10 @@ test "parallel batch query" {
 
     parallelBatchQuery(&queries, &results, "8.8.8.8", 5000);
 
+    // With valid inputs but no transport wired, error_code 2 (not implemented)
     for (results) |result| {
-        try std.testing.expect(result.success);
+        try std.testing.expect(!result.success);
+        try std.testing.expectEqual(@as(?u8, 2), result.error_code);
     }
 }
 
@@ -668,7 +837,7 @@ test "parallel batch query - empty domain" {
     }
 }
 
-test "parallel cache prefetch" {
+test "parallel cache prefetch - not implemented" {
     if (!build_options.enable_spice) return error.SkipZigTest;
 
     var entries: [16]PrefetchEntry = undefined;
@@ -684,9 +853,10 @@ test "parallel cache prefetch" {
 
     parallelCachePrefetch(&entries, &results, "8.8.8.8");
 
+    // No transport or cache wired -- entries are not refreshed
     for (results) |result| {
-        try std.testing.expect(result.refreshed);
-        try std.testing.expectEqual(@as(u32, 300), result.new_ttl);
+        try std.testing.expect(!result.refreshed);
+        try std.testing.expectEqual(@as(u32, 0), result.new_ttl);
     }
 }
 
@@ -704,7 +874,8 @@ test "parallel cache prefetch - below threshold" {
 
     parallelCachePrefetch(&entries, &results, "1.1.1.1");
 
+    // No transport or cache wired -- entries are not refreshed
     for (results) |result| {
-        try std.testing.expect(result.refreshed);
+        try std.testing.expect(!result.refreshed);
     }
 }

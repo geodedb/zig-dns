@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const io = @import("transport_io");
 
 /// Cross-platform dummy fd for testing (not a real connection)
 /// On Windows fd_t is *anyopaque, on POSIX it's an integer
@@ -81,6 +82,8 @@ pub const PooledConnection = struct {
     server: ServerKey,
     /// Connection state
     state: ConnectionState,
+    /// Whether the TCP socket has completed its connect handshake
+    is_connected: bool,
     /// Time connection was established
     created_at: i64,
     /// Time of last activity
@@ -99,6 +102,7 @@ pub const PooledConnection = struct {
             .fd = fd,
             .server = server,
             .state = .idle,
+            .is_connected = false,
             .created_at = now,
             .last_used = now,
             .pending_queries = 0,
@@ -382,12 +386,12 @@ pub const ConnectionPool = struct {
         );
         errdefer std.posix.close(fd);
 
-        // Set TCP_NODELAY to reduce latency
+        // Set TCP_NODELAY to reduce latency (best-effort, non-fatal)
         const one: c_int = 1;
-        _ = std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one));
+        std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {};
 
-        // Set SO_KEEPALIVE
-        _ = std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&one));
+        // Set SO_KEEPALIVE (best-effort, non-fatal)
+        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.KEEPALIVE, std.mem.asBytes(&one)) catch {};
 
         // Note: Actual connection happens when the address is provided
         // For now, we just return the configured socket
@@ -458,8 +462,8 @@ pub const PipelinedBatch = struct {
             var length_prefix: [2]u8 = undefined;
             std.mem.writeInt(u16, &length_prefix, @intCast(q.wire_data.len), .big);
 
-            try writeAllWithTimeout(fd, &length_prefix, timeout_ms);
-            try writeAllWithTimeout(fd, q.wire_data, timeout_ms);
+            try io.writeAllWithTimeout(fd, &length_prefix, timeout_ms);
+            try io.writeAllWithTimeout(fd, q.wire_data, timeout_ms);
         }
 
         // Receive all responses in order
@@ -468,7 +472,7 @@ pub const PipelinedBatch = struct {
             var resp_len_buf: [2]u8 = undefined;
             var len_read: usize = 0;
             while (len_read < 2) {
-                const n = readWithTimeout(fd, resp_len_buf[len_read..], timeout_ms) catch |err| {
+                const n = io.readWithTimeout(fd, resp_len_buf[len_read..], timeout_ms) catch |err| {
                     q.err = err;
                     q.completed = true;
                     continue :outer;
@@ -496,7 +500,7 @@ pub const PipelinedBatch = struct {
 
             var total_read: usize = 0;
             while (total_read < resp_len) {
-                const n = readWithTimeout(fd, response[total_read..], timeout_ms) catch |err| {
+                const n = io.readWithTimeout(fd, response[total_read..], timeout_ms) catch |err| {
                     q.err = err;
                     q.completed = true;
                     self.allocator.free(response);
@@ -552,19 +556,23 @@ pub const PooledTcpTransport = struct {
         const conn = try self.pool.acquire(self.server_key, timeout_ms);
         errdefer self.pool.release(conn, false, 0, 0);
 
-        // Connect if needed (socket was created non-blocking)
-        try connectWithTimeout(conn.fd, self.address, timeout_ms);
+        // Only connect if the socket hasn't completed its TCP handshake yet.
+        // Reused pooled connections are already connected.
+        if (!conn.is_connected) {
+            try io.connectWithTimeout(conn.fd, self.address, timeout_ms);
+            conn.is_connected = true;
+        }
 
         // Send query with TCP length prefix
         var length_prefix: [2]u8 = undefined;
         std.mem.writeInt(u16, &length_prefix, @intCast(wire_req.len), .big);
 
-        try writeAllWithTimeout(conn.fd, &length_prefix, timeout_ms);
-        try writeAllWithTimeout(conn.fd, wire_req, timeout_ms);
+        try io.writeAllWithTimeout(conn.fd, &length_prefix, timeout_ms);
+        try io.writeAllWithTimeout(conn.fd, wire_req, timeout_ms);
 
         // Read response length
         var resp_len_buf: [2]u8 = undefined;
-        try readExactWithTimeout(conn.fd, &resp_len_buf, timeout_ms);
+        try io.readExactWithTimeout(conn.fd, &resp_len_buf, timeout_ms);
         const resp_len = std.mem.readInt(u16, &resp_len_buf, .big);
         if (resp_len == 0 or resp_len > max_message_size) {
             return error.MessageTooLarge;
@@ -576,7 +584,7 @@ pub const PooledTcpTransport = struct {
 
         var total_read: usize = 0;
         while (total_read < resp_len) {
-            const n = try readWithTimeout(conn.fd, response[total_read..], timeout_ms);
+            const n = try io.readWithTimeout(conn.fd, response[total_read..], timeout_ms);
             if (n == 0) return error.ConnectionClosed;
             total_read += n;
         }
@@ -590,8 +598,11 @@ pub const PooledTcpTransport = struct {
         const conn = try self.pool.acquire(self.server_key, timeout_ms);
         errdefer self.pool.release(conn, false, 0, 0);
 
-        // Connect if needed
-        try connectWithTimeout(conn.fd, self.address, timeout_ms);
+        // Only connect if the socket hasn't completed its TCP handshake yet.
+        if (!conn.is_connected) {
+            try io.connectWithTimeout(conn.fd, self.address, timeout_ms);
+            conn.is_connected = true;
+        }
 
         var total_sent: u64 = 0;
         var total_recv: u64 = 0;
@@ -601,8 +612,8 @@ pub const PooledTcpTransport = struct {
             var length_prefix: [2]u8 = undefined;
             std.mem.writeInt(u16, &length_prefix, @intCast(q.len), .big);
 
-            try writeAllWithTimeout(conn.fd, &length_prefix, timeout_ms);
-            try writeAllWithTimeout(conn.fd, q, timeout_ms);
+            try io.writeAllWithTimeout(conn.fd, &length_prefix, timeout_ms);
+            try io.writeAllWithTimeout(conn.fd, q, timeout_ms);
             total_sent += q.len + 2;
         }
 
@@ -619,7 +630,7 @@ pub const PooledTcpTransport = struct {
         for (responses) |*resp| {
             // Read response length
             var resp_len_buf: [2]u8 = undefined;
-            try readExactWithTimeout(conn.fd, &resp_len_buf, timeout_ms);
+            try io.readExactWithTimeout(conn.fd, &resp_len_buf, timeout_ms);
             const resp_len = std.mem.readInt(u16, &resp_len_buf, .big);
             if (resp_len == 0 or resp_len > max_message_size) {
                 return error.MessageTooLarge;
@@ -631,7 +642,7 @@ pub const PooledTcpTransport = struct {
 
             var total_read: usize = 0;
             while (total_read < resp_len) {
-                const n = try readWithTimeout(conn.fd, response[total_read..], timeout_ms);
+                const n = try io.readWithTimeout(conn.fd, response[total_read..], timeout_ms);
                 if (n == 0) return error.ConnectionClosed;
                 total_read += n;
             }
@@ -645,90 +656,21 @@ pub const PooledTcpTransport = struct {
     }
 };
 
-fn connectWithTimeout(sock: std.posix.socket_t, address: std.net.Address, timeout_ms: u32) !void {
-    std.posix.connect(sock, &address.any, address.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock, error.InProgress => {},
-        error.IsConnected => return,
-        else => return err,
-    };
-
-    var poll_fds = [_]std.posix.pollfd{.{
-        .fd = sock,
-        .events = std.posix.POLL.OUT,
-        .revents = 0,
-    }};
-    const rc = try std.posix.poll(&poll_fds, @intCast(timeout_ms));
-    if (rc == 0) return error.Timeout;
-    if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
-        return error.ConnectionClosed;
-    }
-    try std.posix.getsockoptError(sock);
-}
-
-fn writeAllWithTimeout(sock: std.posix.socket_t, data: []const u8, timeout_ms: u32) !void {
-    var sent: usize = 0;
-    const deadline = std.time.milliTimestamp() + timeout_ms;
-    while (sent < data.len) {
-        const now = std.time.milliTimestamp();
-        if (now >= deadline) return error.Timeout;
-        const remaining: i32 = @intCast(@max(@as(i64, 0), deadline - now));
-
-        var poll_fds = [_]std.posix.pollfd{.{
-            .fd = sock,
-            .events = std.posix.POLL.OUT,
-            .revents = 0,
-        }};
-        const rc = try std.posix.poll(&poll_fds, remaining);
-        if (rc == 0) return error.Timeout;
-        if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
-            return error.ConnectionClosed;
-        }
-
-        const n = std.posix.write(sock, data[sent..]) catch |err| switch (err) {
-            error.WouldBlock => continue,
-            else => return err,
-        };
-        sent += n;
-    }
-}
-
-fn readWithTimeout(sock: std.posix.socket_t, buffer: []u8, timeout_ms: u32) !usize {
-    const deadline = std.time.milliTimestamp() + timeout_ms;
-    while (true) {
-        const now = std.time.milliTimestamp();
-        if (now >= deadline) return error.Timeout;
-        const remaining: i32 = @intCast(@max(@as(i64, 0), deadline - now));
-
-        var poll_fds = [_]std.posix.pollfd{.{
-            .fd = sock,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        const rc = try std.posix.poll(&poll_fds, remaining);
-        if (rc == 0) return error.Timeout;
-        if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
-            return error.ConnectionClosed;
-        }
-
-        return std.posix.read(sock, buffer) catch |err| switch (err) {
-            error.WouldBlock => continue,
-            else => return err,
-        };
-    }
-}
-
-fn readExactWithTimeout(sock: std.posix.socket_t, buffer: []u8, timeout_ms: u32) !void {
-    var read_total: usize = 0;
-    while (read_total < buffer.len) {
-        const n = try readWithTimeout(sock, buffer[read_total..], timeout_ms);
-        if (n == 0) return error.ConnectionClosed;
-        read_total += n;
-    }
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
+
+/// Create a UNIX socketpair for testing. Returns [2]fd_t.
+/// std.posix does not expose socketpair, so we use the Linux syscall directly.
+fn testSocketPair() ![2]std.posix.fd_t {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+    const sock_type: i32 = std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK;
+    var fds: [2]i32 = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, sock_type, 0, &fds);
+    const errno = std.posix.errno(rc);
+    if (errno != .SUCCESS) return error.SocketPairFailed;
+    return fds;
+}
 
 test "ServerKey equality" {
     const key1 = ServerKey.init("8.8.8.8", 53, .tcp);
@@ -816,4 +758,228 @@ test "PipelinedBatch add query" {
     try std.testing.expectEqual(@as(usize, 2), batch.queries.items.len);
     try std.testing.expectEqual(@as(u16, 1234), batch.queries.items[0].id);
     try std.testing.expectEqual(@as(u16, 5678), batch.queries.items[1].id);
+}
+
+test "PooledConnection is_connected defaults to false" {
+    const server = ServerKey.init("test", 53, .tcp);
+    const conn = PooledConnection.init(testing_dummy_fd, server, 0);
+
+    // New connections should not be marked as connected
+    try std.testing.expect(!conn.is_connected);
+}
+
+test "PooledConnection is_connected tracks state" {
+    const server = ServerKey.init("test", 53, .tcp);
+    var conn = PooledConnection.init(testing_dummy_fd, server, 0);
+
+    try std.testing.expect(!conn.is_connected);
+    conn.is_connected = true;
+    try std.testing.expect(conn.is_connected);
+
+    // Simulate close by setting state directly (avoids closing dummy fd 0)
+    conn.state = .closed;
+    try std.testing.expectEqual(ConnectionState.closed, conn.state);
+    // is_connected remains true because close does not reset it;
+    // the state field governs whether the connection is usable.
+    try std.testing.expect(conn.is_connected);
+}
+
+test "PipelinedBatch execute with empty batch succeeds" {
+    // Verify the execute signature accepts a timeout_ms parameter
+    // (Bug 4 fix: blocking reads without timeout).
+    // With no queries, both for loops are empty, so execute succeeds.
+    const allocator = std.testing.allocator;
+    var batch = PipelinedBatch.init(allocator);
+    defer batch.deinit();
+
+    // Empty batch with any fd should succeed (no I/O performed)
+    try batch.execute(testing_dummy_fd, 1000);
+}
+
+test "PipelinedBatch execute with socketpair completes all queries" {
+    // Integration test using a real socketpair to verify:
+    // - Bug 1: writeAll loop (no partial write data loss)
+    // - Bug 2: outer loop label (continue :outer on connection close)
+    // - Bug 4: timeout-based reads (no infinite blocking)
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    // Create a socketpair for testing
+    const fds = try testSocketPair();
+    const client_fd = fds[0];
+    const server_fd = fds[1];
+    defer std.posix.close(client_fd);
+    defer std.posix.close(server_fd);
+
+    // Build a batch with one query
+    var batch = PipelinedBatch.init(allocator);
+    defer batch.deinit();
+
+    const query_data = [_]u8{ 0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    try batch.addQuery(0xABCD, &query_data);
+
+    // Simulate server in a separate thread that reads the query and sends a response
+    const ServerThread = struct {
+        fn run(fd: std.posix.fd_t) void {
+            // Read the 2-byte length prefix + query from client
+            var len_buf: [2]u8 = undefined;
+            var read_total: usize = 0;
+            while (read_total < 2) {
+                var poll_fds = [_]std.posix.pollfd{.{
+                    .fd = fd,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                }};
+                _ = std.posix.poll(&poll_fds, 5000) catch return;
+                const n = std.posix.read(fd, len_buf[read_total..]) catch return;
+                if (n == 0) return;
+                read_total += n;
+            }
+            const msg_len = std.mem.readInt(u16, &len_buf, .big);
+
+            // Read the query body
+            var query_buf: [512]u8 = undefined;
+            var body_read: usize = 0;
+            while (body_read < msg_len) {
+                var poll_fds = [_]std.posix.pollfd{.{
+                    .fd = fd,
+                    .events = std.posix.POLL.IN,
+                    .revents = 0,
+                }};
+                _ = std.posix.poll(&poll_fds, 5000) catch return;
+                const n = std.posix.read(fd, query_buf[body_read .. body_read + (msg_len - body_read)]) catch return;
+                if (n == 0) return;
+                body_read += n;
+            }
+
+            // Send a response: 2-byte length prefix + response body
+            const response = [_]u8{ 0xAB, 0xCD, 0x81, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+            var resp_prefix: [2]u8 = undefined;
+            std.mem.writeInt(u16, &resp_prefix, response.len, .big);
+
+            // Write with poll to handle non-blocking
+            var sent: usize = 0;
+            const full_resp = resp_prefix ++ response;
+            while (sent < full_resp.len) {
+                var poll_fds = [_]std.posix.pollfd{.{
+                    .fd = fd,
+                    .events = std.posix.POLL.OUT,
+                    .revents = 0,
+                }};
+                _ = std.posix.poll(&poll_fds, 5000) catch return;
+                const n = std.posix.write(fd, full_resp[sent..]) catch return;
+                sent += n;
+            }
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{server_fd});
+
+    // Execute the batch with a 5 second timeout
+    try batch.execute(client_fd, 5000);
+
+    server_thread.join();
+
+    // Verify the response was received
+    try std.testing.expect(batch.queries.items[0].completed);
+    try std.testing.expect(batch.queries.items[0].err == null);
+    try std.testing.expect(batch.queries.items[0].response != null);
+
+    const resp = batch.queries.items[0].response.?;
+    // First two bytes should be the query ID
+    try std.testing.expectEqual(@as(u8, 0xAB), resp[0]);
+    try std.testing.expectEqual(@as(u8, 0xCD), resp[1]);
+}
+
+test "PipelinedBatch execute handles connection closed gracefully" {
+    // Test Bug 2 fix: continue :outer label prevents infinite loop
+    // when connection is closed mid-batch
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    // Create a socketpair
+    const fds = try testSocketPair();
+    const client_fd = fds[0];
+    const server_fd = fds[1];
+    defer std.posix.close(client_fd);
+
+    // Build a batch with two queries
+    var batch = PipelinedBatch.init(allocator);
+    defer batch.deinit();
+
+    try batch.addQuery(0x0001, &[_]u8{ 0x00, 0x01, 0x01, 0x00 });
+    try batch.addQuery(0x0002, &[_]u8{ 0x00, 0x02, 0x01, 0x00 });
+
+    // Close the server end immediately so the client sees EOF
+    // after writing. This tests that the outer: label works.
+    const ServerThread = struct {
+        fn run(fd: std.posix.fd_t) void {
+            // Read just enough to let the writes complete, then close
+            var buf: [512]u8 = undefined;
+            var poll_fds = [_]std.posix.pollfd{.{
+                .fd = fd,
+                .events = std.posix.POLL.IN,
+                .revents = 0,
+            }};
+            _ = std.posix.poll(&poll_fds, 2000) catch {};
+            _ = std.posix.read(fd, &buf) catch {};
+            // Close immediately - no response sent
+            std.posix.close(fd);
+        }
+    };
+
+    const server_thread = try std.Thread.spawn(.{}, ServerThread.run, .{server_fd});
+
+    // Execute should NOT hang (Bug 2: infinite loop fix) and should NOT
+    // return an unrecoverable error -- individual queries get errors.
+    const result = batch.execute(client_fd, 2000);
+
+    server_thread.join();
+
+    // The execute may return an error from writeAllWithTimeout if the
+    // peer closed before all writes complete, or individual queries may
+    // have errors set. Either way, it must not hang.
+    if (result) |_| {
+        // If execute succeeded, check that queries have appropriate errors
+        for (batch.queries.items) |q| {
+            if (q.completed and q.err != null) {
+                // ConnectionClosed or Timeout are acceptable per-query errors
+                try std.testing.expect(q.err.? == error.ConnectionClosed or q.err.? == error.Timeout);
+            }
+        }
+    } else |_| {
+        // A transport-level error during write is also acceptable
+    }
+}
+
+test "ConnectionPool acquire releases mutex on all paths" {
+    // Test Bug 3 fix: mutex race in acquire
+    // Verify the pool is usable after various acquire outcomes.
+    const allocator = std.testing.allocator;
+    var pool = ConnectionPool.init(allocator, .{
+        .max_connections_per_server = 1,
+    });
+    defer pool.deinit();
+
+    const server = ServerKey.init("127.0.0.1", 53, .tcp);
+
+    // Pool is empty, acquire will try to create a new connection.
+    // createConnection creates a socket but doesn't connect it.
+    // This verifies the mutex is properly released on all code paths.
+    const result = pool.acquire(server, 1000);
+    if (result) |conn| {
+        // Got a connection - verify pool state is consistent
+        pool.release(conn, false, 0, 0);
+    } else |_| {
+        // Error is acceptable (socket creation may fail in test env)
+    }
+
+    // Pool should still be usable (mutex not deadlocked)
+    const stats = pool.getStats();
+    _ = stats;
+
+    // Verify cleanup works (would deadlock if mutex is broken)
+    pool.cleanup();
 }

@@ -112,7 +112,7 @@ See `src/transports/doh.zig` for detailed backend requirements.
 For zone transfers and authenticated queries:
 
 ```zig
-const tsig = @import("security/tsig");
+const tsig = @import("dns").tsig;
 
 // Use strong algorithms (NOT hmac_md5 or hmac_sha1)
 const key = tsig.TsigKey.init(
@@ -136,7 +136,7 @@ const key = tsig.TsigKey.init(
 Always enable authentication for zone transfers:
 
 ```zig
-const zt = @import("resolver/zone_transfer");
+const zt = @import("dns").zone_transfer;
 
 const config = zt.ZoneTransferConfig{
     .tsig_key = my_tsig_key,

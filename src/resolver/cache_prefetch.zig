@@ -260,15 +260,19 @@ pub const CachePrefetcher = struct {
     }
 
     fn makeKey(self: *Self, name: []const u8, qtype: Type, qclass: Class) ![]u8 {
-        // Lowercase for case-insensitive matching
-        const lower = try self.allocator.alloc(u8, name.len);
-        defer self.allocator.free(lower);
-        for (name, 0..) |c, i| {
-            lower[i] = std.ascii.toLower(c);
+        // Lowercase into a stack buffer for case-insensitive matching.
+        // DNS names are at most 255 bytes (RFC 1035 Section 2.3.4).
+        // This avoids the extra heap allocation that the old code performed
+        // (PF-22: apply PF-15 stack-buffer pattern from DnsCache.makeKey).
+        var lower_buf: [types.max_name_length]u8 = undefined;
+        const clamped_len = @min(name.len, lower_buf.len);
+        for (name[0..clamped_len], 0..) |c, i| {
+            lower_buf[i] = std.ascii.toLower(c);
         }
 
+        // Single heap allocation for the final key string
         return std.fmt.allocPrint(self.allocator, "PF:{s}:{d}:{d}", .{
-            lower,
+            lower_buf[0..clamped_len],
             @intFromEnum(qtype),
             @intFromEnum(qclass),
         });

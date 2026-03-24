@@ -60,6 +60,46 @@ pub fn LruCache(comptime V: type) type {
             return null;
         }
 
+        /// Handle returned by getWithHandle() that allows O(1) removal
+        /// without re-hashing the key.
+        pub const EntryHandle = struct {
+            value: V,
+            key_ptr: *[]const u8,
+            node_ptr: *Node,
+        };
+
+        /// Like get(), but returns an EntryHandle containing the value
+        /// plus internal pointers.  The caller can pass the handle to
+        /// removeByHandle() to delete the entry without a second hash.
+        /// The handle is invalidated by any mutation to the cache.
+        pub fn getWithHandle(self: *Self, key: []const u8) ?EntryHandle {
+            if (self.map.getEntry(key)) |entry| {
+                self.moveToFront(entry.value_ptr);
+                return .{
+                    .value = entry.value_ptr.value,
+                    .key_ptr = entry.key_ptr,
+                    .node_ptr = entry.value_ptr,
+                };
+            }
+            return null;
+        }
+
+        /// Remove an entry using its handle (obtained from getWithHandle).
+        /// This avoids re-hashing the key because we already have the
+        /// internal pointers from the initial lookup.
+        /// The handle MUST have been obtained from a prior getWithHandle
+        /// call with no intervening map mutations.
+        pub fn removeByHandle(self: *Self, handle: EntryHandle) void {
+            if (self.on_evict) |cb| {
+                cb(self.allocator, handle.node_ptr.value);
+            }
+            self.removeFromList(handle.node_ptr);
+            const key_slice = handle.key_ptr.*;
+            self.map.removeByPtr(handle.key_ptr);
+            self.allocator.free(key_slice);
+            self.count -= 1;
+        }
+
         pub fn put(self: *Self, key: []const u8, value: V) !void {
             if (self.map.getPtr(key)) |node| {
                 if (self.on_evict) |cb| {
@@ -190,6 +230,77 @@ test "LruCache basic" {
 
     try std.testing.expectEqual(@as(?i32, 1), cache.get("a"));
     try std.testing.expectEqual(@as(?i32, 2), cache.get("b"));
+}
+
+test "LruCache getWithHandle returns value and handle" {
+    const allocator = std.testing.allocator;
+    var cache = LruCache(i32).init(allocator, 3);
+    defer cache.deinit();
+
+    try cache.put("x", 42);
+    try cache.put("y", 99);
+
+    // getWithHandle should return the value
+    if (cache.getWithHandle("x")) |handle| {
+        try std.testing.expectEqual(@as(i32, 42), handle.value);
+    } else {
+        return error.TestUnexpectedResult;
+    }
+
+    // Non-existent key returns null
+    try std.testing.expect(cache.getWithHandle("z") == null);
+}
+
+test "LruCache removeByHandle removes without re-hashing" {
+    const allocator = std.testing.allocator;
+    var cache = LruCache(i32).init(allocator, 3);
+    defer cache.deinit();
+
+    try cache.put("a", 1);
+    try cache.put("b", 2);
+    try cache.put("c", 3);
+
+    // Get handle for "b"
+    const handle = cache.getWithHandle("b") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i32, 2), handle.value);
+
+    // Remove using the handle
+    cache.removeByHandle(handle);
+
+    // "b" should be gone
+    try std.testing.expect(cache.get("b") == null);
+    try std.testing.expectEqual(@as(usize, 2), cache.len());
+
+    // Other entries should still be present
+    try std.testing.expectEqual(@as(?i32, 1), cache.get("a"));
+    try std.testing.expectEqual(@as(?i32, 3), cache.get("c"));
+}
+
+test "LruCache removeByHandle calls on_evict" {
+    const allocator = std.testing.allocator;
+
+    // Track eviction via a simple counter using a struct with a static var
+    const Tracker = struct {
+        var evict_count: usize = 0;
+
+        fn onEvict(_: std.mem.Allocator, _: i32) void {
+            evict_count += 1;
+        }
+    };
+    Tracker.evict_count = 0;
+
+    var cache = LruCache(i32).init(allocator, 3);
+    cache.on_evict = &Tracker.onEvict;
+    defer cache.deinit();
+
+    try cache.put("a", 10);
+    try cache.put("b", 20);
+
+    const handle = cache.getWithHandle("a") orelse return error.TestUnexpectedResult;
+    cache.removeByHandle(handle);
+
+    // on_evict should have been called once (for removeByHandle)
+    try std.testing.expectEqual(@as(usize, 1), Tracker.evict_count);
 }
 
 test "LruCache eviction" {

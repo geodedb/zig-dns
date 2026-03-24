@@ -49,13 +49,13 @@ pub const CacheEntry = struct {
     const Self = @This();
 
     /// Check if this entry has expired
-    pub fn isExpired(self: Self, now: i64) bool {
+    pub inline fn isExpired(self: Self, now: i64) bool {
         const age = now - self.cached_at;
         return age < 0 or age >= self.original_ttl;
     }
 
     /// Get remaining TTL
-    pub fn remainingTtl(self: Self, now: i64) u32 {
+    pub inline fn remainingTtl(self: Self, now: i64) u32 {
         const age = now - self.cached_at;
         if (age < 0 or age >= self.original_ttl) {
             return 0;
@@ -162,29 +162,40 @@ pub const Cache = struct {
         try self.put(domain, rr);
     }
 
-    /// Get cached records for a domain and type
+    /// Get cached records for a domain and type.
+    /// Compacts matching entries so the returned slice is contiguous and
+    /// contains only records that match (domain, rtype, class) and are
+    /// not expired. Returns null if no matching records exist.
     pub fn get(self: *Self, domain: []const u8, rtype: Type, class: Class) ?[]const CacheEntry {
         const now = std.time.timestamp();
 
-        // Find matching entries
-        var start: ?usize = null;
-        var end: usize = 0;
+        // Compact matching entries to the front of a contiguous run.
+        // We swap each matching entry forward so all matches are adjacent.
+        var match_count: usize = 0;
+        var first_match: ?usize = null;
 
-        for (self.entries[0..self.count], 0..) |entry, i| {
+        for (0..self.count) |i| {
+            const entry = self.entries[i];
             if (entry.rtype == rtype and entry.class == class and
                 std.ascii.eqlIgnoreCase(entry.name, domain) and
                 !entry.isExpired(now))
             {
-                if (start == null) {
-                    start = i;
+                if (first_match == null) {
+                    first_match = i;
                 }
-                end = i + 1;
+                const target = first_match.? + match_count;
+                if (i != target) {
+                    // Swap so matching entries are contiguous
+                    const tmp = self.entries[target];
+                    self.entries[target] = self.entries[i];
+                    self.entries[i] = tmp;
+                }
+                match_count += 1;
             }
         }
 
-        if (start) |s| {
-            // Return slice of matching entries (they may not be contiguous, so just return first match)
-            return self.entries[s..end];
+        if (first_match) |s| {
+            return self.entries[s .. s + match_count];
         }
 
         return null;
@@ -360,4 +371,114 @@ test "Cache bailiwick validation" {
 
     try cache.putWithBailiwick("www.example.com", rr, "example.com");
     try std.testing.expect(cache.get("www.example.com", .a, .in) != null);
+}
+
+test "Cache get returns only matching entries (non-contiguous fix)" {
+    // Regression test for PF-02b: Cache.get used to return entries[start..end]
+    // which could include unrelated records between the first and last match.
+    const allocator = std.testing.allocator;
+    var cache = Cache.init(allocator, 100);
+    defer cache.deinit();
+
+    const rdata_a = [_]u8{ 1, 2, 3, 4 };
+    const rdata_b = [_]u8{ 5, 6, 7, 8 };
+    const rdata_c = [_]u8{ 9, 10, 11, 12 };
+
+    // Insert: example.com A, other.com A, example.com A
+    // This creates a non-contiguous pattern for "example.com A"
+    const rr_a = ResourceRecord{
+        .name = undefined,
+        .rtype = .a,
+        .class = .in,
+        .ttl = 300,
+        .rdlength = 4,
+        .rdata = &rdata_a,
+        .wire_length = 0,
+    };
+    const rr_b = ResourceRecord{
+        .name = undefined,
+        .rtype = .a,
+        .class = .in,
+        .ttl = 300,
+        .rdlength = 4,
+        .rdata = &rdata_b,
+        .wire_length = 0,
+    };
+    const rr_c = ResourceRecord{
+        .name = undefined,
+        .rtype = .a,
+        .class = .in,
+        .ttl = 300,
+        .rdlength = 4,
+        .rdata = &rdata_c,
+        .wire_length = 0,
+    };
+
+    try cache.put("example.com", rr_a); // index 0: match
+    try cache.put("other.com", rr_b); // index 1: non-match
+    try cache.put("example.com", rr_c); // index 2: match
+
+    const entries = cache.get("example.com", .a, .in);
+    try std.testing.expect(entries != null);
+
+    // The returned slice must contain exactly 2 entries, both for example.com.
+    // Before the fix, entries[start..end] would be entries[0..3] which
+    // included the "other.com" record in the middle.
+    try std.testing.expectEqual(@as(usize, 2), entries.?.len);
+
+    // Verify every entry in the slice actually matches
+    for (entries.?) |entry| {
+        try std.testing.expect(std.ascii.eqlIgnoreCase(entry.name, "example.com"));
+        try std.testing.expectEqual(Type.a, entry.rtype);
+        try std.testing.expectEqual(Class.in, entry.class);
+    }
+}
+
+test "Cache get with interleaved types returns only requested type" {
+    const allocator = std.testing.allocator;
+    var cache = Cache.init(allocator, 100);
+    defer cache.deinit();
+
+    const rdata_v4 = [_]u8{ 1, 2, 3, 4 };
+    const rdata_v6 = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+
+    const rr_a = ResourceRecord{
+        .name = undefined,
+        .rtype = .a,
+        .class = .in,
+        .ttl = 300,
+        .rdlength = 4,
+        .rdata = &rdata_v4,
+        .wire_length = 0,
+    };
+    const rr_aaaa = ResourceRecord{
+        .name = undefined,
+        .rtype = .aaaa,
+        .class = .in,
+        .ttl = 300,
+        .rdlength = 16,
+        .rdata = &rdata_v6,
+        .wire_length = 0,
+    };
+
+    // Interleave A and AAAA records for same domain
+    try cache.put("example.com", rr_a);
+    try cache.put("example.com", rr_aaaa);
+    try cache.put("example.com", rr_a);
+
+    // Query for A records only
+    const a_entries = cache.get("example.com", .a, .in);
+    try std.testing.expect(a_entries != null);
+    try std.testing.expectEqual(@as(usize, 2), a_entries.?.len);
+
+    // Every returned entry must be an A record
+    for (a_entries.?) |entry| {
+        try std.testing.expectEqual(Type.a, entry.rtype);
+    }
+
+    // Query for AAAA records only
+    const aaaa_entries = cache.get("example.com", .aaaa, .in);
+    try std.testing.expect(aaaa_entries != null);
+    try std.testing.expectEqual(@as(usize, 1), aaaa_entries.?.len);
+    try std.testing.expectEqual(Type.aaaa, aaaa_entries.?[0].rtype);
 }

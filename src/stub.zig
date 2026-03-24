@@ -16,6 +16,7 @@ const types_mod = @import("types");
 const header_mod = @import("header");
 const question_mod = @import("question");
 const record_mod = @import("record");
+const io = @import("transport_io");
 
 pub const Message = message_mod.Message;
 pub const Name = name_mod.Name;
@@ -253,19 +254,19 @@ pub const StubResolver = struct {
         );
         defer std.posix.close(sock);
 
-        try connectWithTimeout(sock, server.address, self.config.timeout_ms);
+        try io.connectWithTimeout(sock, server.address, self.config.timeout_ms);
 
         // TCP DNS messages are prefixed with 2-byte length
         var length_prefix: [2]u8 = undefined;
         std.mem.writeInt(u16, &length_prefix, @intCast(query.len), .big);
 
         // Send length prefix and query
-        try writeAllWithTimeout(sock, &length_prefix, self.config.timeout_ms);
-        try writeAllWithTimeout(sock, query, self.config.timeout_ms);
+        try io.writeAllWithTimeout(sock, &length_prefix, self.config.timeout_ms);
+        try io.writeAllWithTimeout(sock, query, self.config.timeout_ms);
 
         // Read response length
         var resp_len_buf: [2]u8 = undefined;
-        try readExactWithTimeout(sock, &resp_len_buf, self.config.timeout_ms);
+        try io.readExactWithTimeout(sock, &resp_len_buf, self.config.timeout_ms);
         const resp_len = std.mem.readInt(u16, &resp_len_buf, .big);
         if (resp_len == 0 or resp_len > 65535) {
             return error.MessageTooLarge;
@@ -277,7 +278,7 @@ pub const StubResolver = struct {
 
         var total_read: usize = 0;
         while (total_read < resp_len) {
-            const n = try readWithTimeout(sock, response[total_read..], self.config.timeout_ms);
+            const n = try io.readWithTimeout(sock, response[total_read..], self.config.timeout_ms);
             if (n == 0) {
                 return error.ConnectionClosed;
             }
@@ -287,86 +288,6 @@ pub const StubResolver = struct {
         return response;
     }
 };
-
-fn connectWithTimeout(sock: std.posix.socket_t, address: std.net.Address, timeout_ms: u32) !void {
-    std.posix.connect(sock, &address.any, address.getOsSockLen()) catch |err| switch (err) {
-        error.WouldBlock, error.InProgress => {},
-        else => return err,
-    };
-
-    var poll_fds = [_]std.posix.pollfd{.{
-        .fd = sock,
-        .events = std.posix.POLL.OUT,
-        .revents = 0,
-    }};
-    const rc = try std.posix.poll(&poll_fds, @intCast(timeout_ms));
-    if (rc == 0) return error.Timeout;
-    if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
-        return error.ConnectionClosed;
-    }
-    try std.posix.getsockoptError(sock);
-}
-
-fn writeAllWithTimeout(sock: std.posix.socket_t, data: []const u8, timeout_ms: u32) !void {
-    var sent: usize = 0;
-    const deadline = std.time.milliTimestamp() + timeout_ms;
-    while (sent < data.len) {
-        const now = std.time.milliTimestamp();
-        if (now >= deadline) return error.Timeout;
-        const remaining: i32 = @intCast(@max(@as(i64, 0), deadline - now));
-
-        var poll_fds = [_]std.posix.pollfd{.{
-            .fd = sock,
-            .events = std.posix.POLL.OUT,
-            .revents = 0,
-        }};
-        const rc = try std.posix.poll(&poll_fds, remaining);
-        if (rc == 0) return error.Timeout;
-        if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
-            return error.ConnectionClosed;
-        }
-
-        const n = std.posix.write(sock, data[sent..]) catch |err| switch (err) {
-            error.WouldBlock => continue,
-            else => return err,
-        };
-        sent += n;
-    }
-}
-
-fn readWithTimeout(sock: std.posix.socket_t, buffer: []u8, timeout_ms: u32) !usize {
-    const deadline = std.time.milliTimestamp() + timeout_ms;
-    while (true) {
-        const now = std.time.milliTimestamp();
-        if (now >= deadline) return error.Timeout;
-        const remaining: i32 = @intCast(@max(@as(i64, 0), deadline - now));
-
-        var poll_fds = [_]std.posix.pollfd{.{
-            .fd = sock,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        const rc = try std.posix.poll(&poll_fds, remaining);
-        if (rc == 0) return error.Timeout;
-        if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
-            return error.ConnectionClosed;
-        }
-
-        return std.posix.read(sock, buffer) catch |err| switch (err) {
-            error.WouldBlock => continue,
-            else => return err,
-        };
-    }
-}
-
-fn readExactWithTimeout(sock: std.posix.socket_t, buffer: []u8, timeout_ms: u32) !void {
-    var read_total: usize = 0;
-    while (read_total < buffer.len) {
-        const n = try readWithTimeout(sock, buffer[read_total..], timeout_ms);
-        if (n == 0) return error.ConnectionClosed;
-        read_total += n;
-    }
-}
 
 /// Read system DNS servers from /etc/resolv.conf (Unix) or registry (Windows)
 pub fn getSystemServers(allocator: std.mem.Allocator) ![]ServerAddress {

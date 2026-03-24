@@ -368,6 +368,10 @@ pub const MockTlsBackend = struct {
     tls_version: TlsVersion,
     connect_should_fail: bool,
     is_connected: bool,
+    /// Per-instance write buffer for mock connection (moved from mutable statics
+    /// to per-instance state for thread safety -- QL-05).
+    write_buffer: [65535]u8,
+    write_len: usize,
 
     const Self = @This();
 
@@ -380,6 +384,8 @@ pub const MockTlsBackend = struct {
             .tls_version = .tls_1_3,
             .connect_should_fail = false,
             .is_connected = false,
+            .write_buffer = undefined,
+            .write_len = 0,
         };
     }
 
@@ -436,17 +442,16 @@ pub const MockTlsBackend = struct {
         .deinit = deinitImpl,
     };
 
-    // Mock connection vtable
-    var write_buffer: [65535]u8 = undefined;
-    var write_len: usize = 0;
+    // Mock connection vtable -- write_buffer and write_len are per-instance
+    // fields (see struct definition above) rather than mutable statics.
 
     fn writeImpl(ctx: *anyopaque, data: []const u8) anyerror!usize {
-        _ = ctx;
-        if (write_len + data.len > write_buffer.len) {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        if (self.write_len + data.len > self.write_buffer.len) {
             return error.BufferOverflow;
         }
-        @memcpy(write_buffer[write_len..][0..data.len], data);
-        write_len += data.len;
+        @memcpy(self.write_buffer[self.write_len..][0..data.len], data);
+        self.write_len += data.len;
         return data.len;
     }
 
@@ -461,9 +466,9 @@ pub const MockTlsBackend = struct {
         const response = self.responses.items[self.response_index];
 
         // Check if we need to send length prefix
-        if (buffer.len >= 2 and write_len > 0) {
+        if (buffer.len >= 2 and self.write_len > 0) {
             // Reset write buffer for next query
-            write_len = 0;
+            self.write_len = 0;
 
             // Send length prefix
             var len_buf: [2]u8 = undefined;

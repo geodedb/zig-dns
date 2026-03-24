@@ -119,7 +119,27 @@ pub const Sig0KeyPair = struct {
         }
     }
 
+    /// SECURITY: Zeros private key material before releasing memory to prevent
+    /// key leakage through uncleared memory (SEC-C25, CWE-244).
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        // Zero private key material before struct goes out of scope
+        switch (self.algorithm) {
+            .ed25519 => {
+                std.crypto.secureZero(u8, &self.private_key.ed25519.bytes);
+            },
+            .ecdsa_p256_sha256 => {
+                const key_ptr: *[@sizeOf(std.crypto.sign.ecdsa.EcdsaP256Sha256.SecretKey)]u8 =
+                    @ptrCast(&self.private_key.ecdsa_p256_sha256);
+                std.crypto.secureZero(u8, key_ptr);
+            },
+            .ecdsa_p384_sha384 => {
+                const key_ptr: *[@sizeOf(std.crypto.sign.ecdsa.EcdsaP384Sha384.SecretKey)]u8 =
+                    @ptrCast(&self.private_key.ecdsa_p384_sha384);
+                std.crypto.secureZero(u8, key_ptr);
+            },
+            .rsa_sha256, .rsa_sha512 => {}, // void -- no key material
+            _ => {}, // Unknown algorithm -- no key material to zero
+        }
         allocator.free(self.public_key);
     }
 };
@@ -443,6 +463,7 @@ pub const Sig0Context = struct {
                 return try self.allocator.dupe(u8, &sig.toBytes());
             },
             .rsa_sha256, .rsa_sha512 => return error.UnsupportedAlgorithm,
+            _ => return error.UnsupportedAlgorithm,
         }
     }
 
@@ -476,6 +497,7 @@ pub const Sig0Context = struct {
                 return true;
             },
             .rsa_sha256, .rsa_sha512 => return error.UnsupportedAlgorithm,
+            _ => return error.UnsupportedAlgorithm,
         }
     }
 
@@ -702,4 +724,91 @@ test "Sig0Context sign and verify" {
     // Verify
     const result = try ctx.verify(signed, &public_key);
     try std.testing.expect(result.valid);
+}
+
+test "SEC-C20: Sig0Record.parse does not panic on unknown algorithm" {
+    const allocator = std.testing.allocator;
+
+    // Build minimal SIG(0) RDATA with unknown algorithm value 99
+    var rdata: [32]u8 = .{0} ** 32;
+    // type_covered = 0 (bytes 0-1)
+    std.mem.writeInt(u16, rdata[0..2], 0, .big);
+    // algorithm = 99 (unknown) (byte 2)
+    rdata[2] = 99;
+    // labels = 0 (byte 3)
+    rdata[3] = 0;
+    // original_ttl = 0 (bytes 4-7)
+    // sig_expiration (bytes 8-11)
+    // sig_inception (bytes 12-15)
+    // key_tag = 0 (bytes 16-17)
+    // signer name: root (single zero byte at byte 18)
+    rdata[18] = 0;
+    // signature: remaining bytes (19..32)
+
+    // This must NOT panic -- it should parse successfully with the unknown algorithm
+    var sig0 = try Sig0Record.parse(allocator, &rdata);
+    defer sig0.deinit(allocator);
+
+    // The algorithm should be preserved as the raw value 99
+    try std.testing.expectEqual(@as(u8, 99), @intFromEnum(sig0.algorithm));
+
+    // isSupported should return false for unknown algorithms
+    try std.testing.expect(!sig0.algorithm.isSupported());
+
+    // signatureLength should return null for unknown algorithms
+    try std.testing.expect(sig0.algorithm.signatureLength() == null);
+}
+
+test "SEC-C20: Sig0KeyPair.generate rejects unknown algorithm" {
+    const allocator = std.testing.allocator;
+    const unknown_alg: Algorithm = @enumFromInt(99);
+    const result = Sig0KeyPair.generate(allocator, "test.example.com", unknown_alg);
+    try std.testing.expectError(error.UnsupportedAlgorithm, result);
+}
+
+test "SEC-C20: Sig0PublicKey.fromDnskey rejects unknown algorithm" {
+    const unknown_alg: Algorithm = @enumFromInt(99);
+    const key_data = [_]u8{0} ** 32;
+    const result = Sig0PublicKey.fromDnskey("test.example.com", unknown_alg, &key_data);
+    try std.testing.expectError(error.UnsupportedAlgorithm, result);
+}
+
+test "SEC-C25: Sig0KeyPair.deinit zeroes private key material (Ed25519)" {
+    const allocator = std.testing.allocator;
+
+    var key_pair = try Sig0KeyPair.generate(allocator, "test.example.com", .ed25519);
+
+    // Verify key has non-zero bytes before deinit
+    var has_nonzero = false;
+    for (key_pair.private_key.ed25519.bytes) |b| {
+        if (b != 0) {
+            has_nonzero = true;
+            break;
+        }
+    }
+    try std.testing.expect(has_nonzero);
+
+    // deinit should securely zero the private key
+    key_pair.deinit(allocator);
+
+    // After deinit, private key bytes should be zeroed
+    for (key_pair.private_key.ed25519.bytes) |b| {
+        try std.testing.expectEqual(@as(u8, 0), b);
+    }
+}
+
+test "SEC-C25: Sig0KeyPair.deinit zeroes private key material (ECDSA P-256)" {
+    const allocator = std.testing.allocator;
+
+    var key_pair = try Sig0KeyPair.generate(allocator, "test.example.com", .ecdsa_p256_sha256);
+
+    // deinit should securely zero the private key
+    key_pair.deinit(allocator);
+
+    // After deinit, private key struct bytes should be zeroed
+    const key_ptr: *const [@sizeOf(std.crypto.sign.ecdsa.EcdsaP256Sha256.SecretKey)]u8 =
+        @ptrCast(&key_pair.private_key.ecdsa_p256_sha256);
+    for (key_ptr) |b| {
+        try std.testing.expectEqual(@as(u8, 0), b);
+    }
 }

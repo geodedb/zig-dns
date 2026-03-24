@@ -301,6 +301,9 @@ pub fn reverseIPv6Name(allocator: std.mem.Allocator, ip: IPv6) ![]u8 {
     var result = std.ArrayList(u8).empty;
     errdefer result.deinit(allocator);
 
+    // Pre-allocate exact capacity: 32 nibbles * 2 (nibble + dot) + "ip6.arpa" (8) = 72 bytes
+    try result.ensureTotalCapacity(allocator, 72);
+
     // Add each nibble in reverse order
     var i: usize = 16;
     while (i > 0) {

@@ -7,7 +7,7 @@ A comprehensive pure Zig implementation of the Domain Name System (DNS) protocol
 | Aspect | Info |
 |--------|------|
 | API Stability | Beta |
-| Zig Version | 0.14.0+ |
+| Zig Version | 0.15.1+ |
 | Platforms | Linux, macOS, Windows |
 
 ## Features
@@ -41,7 +41,7 @@ See [ROADMAP.md](docs/ROADMAP.md) and [GitLab Issues](https://gitlab.com/devnw/z
 |-------|-------------|--------|
 | Phase 1 | Core Recursion | **Complete** |
 | Phase 2 | Production Ready (DoT, caching, zone transfers) | **Complete** |
-| Phase 3 | DNSSEC Validation | **Complete** |
+| Phase 3 | DNSSEC Validation | **Partial** (Ed25519/ECDSA complete, RSA pending) |
 | Phase 4 | Modern Features (DoH, DoQ, ECS, Cookies, Prefetch) | **Complete** |
 
 ## Requirements
@@ -172,9 +172,7 @@ src/
 │   ├── cache_prefetch.zig   # Proactive cache refresh
 │   ├── zone_transfer.zig    # RFC 5936/1995 AXFR/IXFR
 │   ├── dnssec.zig       # RFC 4033/4034/4035 DNSSEC validation
-│   ├── edns.zig         # EDNS handling
-│   ├── stub.zig         # Enhanced stub resolver
-│   └── recursive.zig    # Enhanced recursive resolver
+│   └── edns.zig         # EDNS handling
 ├── transports/          # Transport implementations
 │   ├── udp.zig          # UDP transport
 │   ├── tcp.zig          # TCP transport
@@ -225,8 +223,8 @@ See [GitLab Issues](https://gitlab.com/devnw/zig/dns/-/issues) for open tasks.
 
 | RFC | Description | Status |
 |-----|-------------|--------|
-| [RFC 1034](https://tools.ietf.org/html/rfc1034) | Domain Names - Concepts | Partial |
-| [RFC 1035](https://tools.ietf.org/html/rfc1035) | Domain Names - Implementation | Mostly Complete |
+| [RFC 1034](https://tools.ietf.org/html/rfc1034) | Domain Names - Concepts | Complete |
+| [RFC 1035](https://tools.ietf.org/html/rfc1035) | Domain Names - Implementation | Complete |
 | [RFC 2308](https://tools.ietf.org/html/rfc2308) | Negative Caching | Complete |
 | [RFC 3596](https://tools.ietf.org/html/rfc3596) | IPv6 (AAAA) | Complete |
 | [RFC 4033](https://tools.ietf.org/html/rfc4033) | DNSSEC Introduction | Complete |

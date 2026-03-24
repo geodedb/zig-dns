@@ -618,7 +618,7 @@ pub fn encodeWithCase0x20(allocator: std.mem.Allocator, domain: []const u8, rand
 
 /// Verify that a response name matches the query name (case-sensitive for 0x20)
 /// Returns true if the names match exactly (same case)
-pub fn verifyCase0x20(query_name: []const u8, response_name: []const u8) bool {
+pub inline fn verifyCase0x20(query_name: []const u8, response_name: []const u8) bool {
     return std.mem.eql(u8, query_name, response_name);
 }
 
@@ -632,6 +632,9 @@ pub fn extractQname(allocator: std.mem.Allocator, message: []const u8) ![]u8 {
     var pos: usize = 12;
     var result: std.ArrayList(u8) = .empty;
     defer result.deinit(allocator);
+
+    // Pre-allocate for typical DNS name (max 253 chars in dotted form)
+    try result.ensureTotalCapacity(allocator, max_name_length);
 
     var first = true;
     while (pos < message.len) {
@@ -1203,4 +1206,95 @@ test "Name.eql performs zero allocations" {
     // an allocator parameter. Our new implementation has no allocator parameter
     // and works entirely on wire-format data -- zero allocations by construction.
     try std.testing.expect(name1.eql(name2, null, null));
+}
+
+// ============================================================
+// Tests for Name.toStringBuf() zero-allocation name formatting
+// ============================================================
+
+test "Name.toStringBuf simple domain" {
+    const wire_data = [_]u8{
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        3, 'c', 'o', 'm', 0,
+    };
+    const name = try Name.parse(&wire_data, 0);
+
+    var buf: [256]u8 = undefined;
+    const str = try name.toStringBuf(&buf, null);
+    try std.testing.expectEqualStrings("example.com", str);
+}
+
+test "Name.toStringBuf matches toString" {
+    const allocator = std.testing.allocator;
+    const wire_data = [_]u8{
+        3,   'w', 'w', 'w',
+        7,   'e', 'x', 'a',
+        'm', 'p', 'l', 'e',
+        3,   'c', 'o', 'm',
+        0,
+    };
+
+    const name = try Name.parse(&wire_data, 0);
+
+    // Compare heap-allocated toString with stack toStringBuf
+    const heap_str = try name.toString(allocator, null);
+    defer allocator.free(heap_str);
+
+    var buf: [256]u8 = undefined;
+    const buf_str = try name.toStringBuf(&buf, null);
+
+    try std.testing.expectEqualStrings(heap_str, buf_str);
+}
+
+test "Name.toStringBuf root domain" {
+    const wire_data = [_]u8{0};
+    const name = try Name.parse(&wire_data, 0);
+
+    var buf: [256]u8 = undefined;
+    const str = try name.toStringBuf(&buf, null);
+    try std.testing.expectEqualStrings(".", str);
+}
+
+test "Name.toStringBuf with compression" {
+    const wire_data = [_]u8{
+        // Name 1: example.com at offset 0
+        7,   'e',  'x',  'a', 'm', 'p', 'l', 'e',
+        3,   'c',  'o',  'm', 0,
+        // Name 2: www.<pointer to offset 0> at offset 13
+          3,   'w', 'w',
+        'w', 0xC0, 0x00,
+    };
+
+    const name = try Name.parse(&wire_data, 13);
+
+    var buf: [256]u8 = undefined;
+    const str = try name.toStringBuf(&buf, &wire_data);
+    try std.testing.expectEqualStrings("www.example.com", str);
+}
+
+test "Name.toStringBuf performs zero allocations" {
+    // Use no allocator at all -- toStringBuf takes only a stack buffer.
+    // If it tried to allocate, it wouldn't compile (no allocator parameter).
+    const wire_data = [_]u8{
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        3, 'c', 'o', 'm', 0,
+    };
+    const name = try Name.parse(&wire_data, 0);
+
+    var buf: [256]u8 = undefined;
+    const str = try name.toStringBuf(&buf, null);
+    try std.testing.expectEqualStrings("example.com", str);
+}
+
+test "Name.toStringBuf buffer too small" {
+    const wire_data = [_]u8{
+        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        3, 'c', 'o', 'm', 0,
+    };
+    const name = try Name.parse(&wire_data, 0);
+
+    // Buffer too small for "example.com" (11 chars)
+    var small_buf: [5]u8 = undefined;
+    const result = name.toStringBuf(&small_buf, null);
+    try std.testing.expectError(error.NameTooLong, result);
 }

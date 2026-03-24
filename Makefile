@@ -7,7 +7,7 @@
 #   make clean        - Clean build artifacts
 #   make help         - Show this help message
 
-.PHONY: all build test test-unit test-vectors clean check fmt help
+.PHONY: all build test test-unit test-vectors clean check fmt fmt-check help
 
 # Default target - build and run all tests
 all: build test-unit test-vectors
@@ -62,8 +62,14 @@ check:
 # Format all Zig source files
 fmt:
 	@echo "Formatting source files..."
-	@zig fmt src/ tests/ build.zig
+	@zig fmt src/ cmd/ tests/ build.zig
 	@echo "Format complete"
+
+# Check formatting without modifying files (mirrors CI)
+fmt-check:
+	@echo "Checking formatting..."
+	@zig fmt --check src/ cmd/ build.zig
+	@echo "Format check passed"
 
 # Run tests with optimization levels
 test-release-safe:
@@ -114,6 +120,7 @@ help:
 	@echo "  clean            - Remove build artifacts"
 	@echo "  check            - Check syntax without building"
 	@echo "  fmt              - Format all Zig source files"
+	@echo "  fmt-check        - Check formatting without modifying (mirrors CI)"
 	@echo "  dev              - Quick development workflow (fmt + check + test-unit)"
 	@echo ""
 	@echo "Optimization Testing:"

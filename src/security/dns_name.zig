@@ -58,6 +58,11 @@ pub fn parseName(allocator: std.mem.Allocator, data: []const u8, start: usize) !
             }
             if (offset + 1 >= data.len) return error.InvalidName;
             const ptr = (@as(u16, len & 0x3F) << 8) | data[offset + 1];
+            // SECURITY (SEC-C30): Reject forward compression pointers.
+            // RFC 1035 compression pointers must point backwards in the message.
+            // Forward pointers enable crafted packets to bypass loop detection
+            // and cause excessive processing. Matches core name.zig behavior.
+            if (ptr >= offset) return error.ForwardPointer;
             if (!followed_ptr) final_offset = offset + 2;
             followed_ptr = true;
             offset = ptr;
@@ -198,4 +203,34 @@ test "encodeNameLower - lowercases labels" {
     defer buffer.deinit(allocator);
     try encodeNameLower(allocator, &buffer, "EXAMPLE.COM");
     try std.testing.expectEqualSlices(u8, "\x07example\x03com\x00", buffer.items);
+}
+
+test "SEC-C30: parseName rejects forward compression pointers" {
+    const allocator = std.testing.allocator;
+    // Build a packet with a forward pointer: at offset 0 put a compression pointer
+    // that points to offset 2 (which is forward, since current offset is 0).
+    // Byte 0: 0xC0 (compression marker), Byte 1: 0x02 (points to offset 2)
+    // Byte 2+: valid name "\x03com\x00"
+    const data = "\xC0\x02\x03com\x00";
+    const result = parseName(allocator, data, 0);
+    try std.testing.expectError(error.ForwardPointer, result);
+}
+
+test "SEC-C30: parseName rejects self-referencing compression pointers" {
+    const allocator = std.testing.allocator;
+    // Self-referencing pointer: points to itself at offset 0
+    const data = "\xC0\x00";
+    const result = parseName(allocator, data, 0);
+    // ptr (0) >= offset (0), so this is rejected as a forward pointer
+    try std.testing.expectError(error.ForwardPointer, result);
+}
+
+test "SEC-C30: parseName allows backward compression pointers" {
+    const allocator = std.testing.allocator;
+    // Valid backward pointer: name at offset 0, pointer at offset 13 pointing back to 0
+    // "\x07example\x03com\x00" is 13 bytes, then "\xC0\x00" points back to offset 0
+    const data = "\x07example\x03com\x00\xC0\x00";
+    const result = try parseName(allocator, data, 13);
+    defer allocator.free(result.name);
+    try std.testing.expectEqualStrings("example.com", result.name);
 }

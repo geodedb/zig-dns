@@ -95,6 +95,8 @@ pub const Algorithm = enum {
 };
 
 /// TSIG Error codes (RFC 2845 Section 4.3)
+/// Non-exhaustive to safely handle unknown error codes from wire data
+/// without panicking (SEC-C21, CWE-704).
 pub const TsigError = enum(u16) {
     /// No error
     no_error = 0,
@@ -106,6 +108,8 @@ pub const TsigError = enum(u16) {
     bad_time = 18,
     /// Bad truncation (BADTRUNC)
     bad_trunc = 22,
+    /// Unknown/unrecognized error codes from wire data
+    _,
 
     pub fn toResponseCode(self: TsigError) u16 {
         return @intFromEnum(self);
@@ -363,8 +367,22 @@ pub const TsigContext = struct {
         const expected_mac = try self.computeMac(msg_without_tsig, tsig_vars);
         defer self.allocator.free(expected_mac);
 
-        // Constant-time comparison
-        if (!std.crypto.timing_safe.eql(u8, tsig.mac, expected_mac)) {
+        // Constant-time MAC comparison using known algorithm output sizes.
+        // std.crypto.timing_safe.eql requires fixed-size arrays, so we convert
+        // based on the expected MAC length for the configured algorithm.
+        const mac_valid = switch (self.key.algorithm) {
+            .hmac_md5 => tsig.mac.len == 16 and expected_mac.len == 16 and
+                std.crypto.timing_safe.eql([16]u8, tsig.mac[0..16].*, expected_mac[0..16].*),
+            .hmac_sha1 => tsig.mac.len == 20 and expected_mac.len == 20 and
+                std.crypto.timing_safe.eql([20]u8, tsig.mac[0..20].*, expected_mac[0..20].*),
+            .hmac_sha256 => tsig.mac.len == 32 and expected_mac.len == 32 and
+                std.crypto.timing_safe.eql([32]u8, tsig.mac[0..32].*, expected_mac[0..32].*),
+            .hmac_sha384 => tsig.mac.len == 48 and expected_mac.len == 48 and
+                std.crypto.timing_safe.eql([48]u8, tsig.mac[0..48].*, expected_mac[0..48].*),
+            .hmac_sha512 => tsig.mac.len == 64 and expected_mac.len == 64 and
+                std.crypto.timing_safe.eql([64]u8, tsig.mac[0..64].*, expected_mac[0..64].*),
+        };
+        if (!mac_valid) {
             return VerifyResult{ .valid = false, .error_code = .bad_sig };
         }
 
@@ -419,87 +437,56 @@ pub const TsigContext = struct {
 
     /// Compute HMAC over message and TSIG variables
     ///
-    /// SECURITY: Implements proper RFC 2104 key handling:
-    /// - Keys longer than block size are hashed first (not truncated)
-    /// - Keys shorter than or equal to block size are used directly
-    /// This fixes SEC-002 (CWE-326).
+    /// SECURITY: Delegates key handling to Zig's std.crypto.auth.hmac which
+    /// implements RFC 2104 correctly: keys longer than block size are hashed
+    /// first, keys shorter are zero-padded internally. Previous manual key
+    /// handling truncated keys between hash-output-length and block-size,
+    /// producing wrong MACs (SEC-C23, CWE-326).
     fn computeMac(self: *Self, message: []const u8, tsig_vars: []const u8) ![]u8 {
         const mac_len = self.key.algorithm.macLength();
         const result = try self.allocator.alloc(u8, mac_len);
         errdefer self.allocator.free(result);
 
+        // Pass the raw secret directly to HMAC init. Zig's HMAC implementation
+        // handles RFC 2104 key sizing internally (hash if > block size, zero-pad
+        // if shorter). This avoids the previous bug where manual pre-processing
+        // truncated keys between hash-output-length and block-size.
+        //
+        // SECURITY: Each HMAC instance is securely zeroed after use via defer
+        // to prevent key-derived material from leaking through stack memory
+        // (SEC-C25, CWE-244).
         switch (self.key.algorithm) {
             .hmac_md5 => {
-                // Block size for MD5 is 64 bytes, output is 16 bytes
-                const block_size = 64;
-                var key: [block_size]u8 = .{0} ** block_size;
-                if (self.key.secret.len > block_size) {
-                    // RFC 2104: Hash key if longer than block size
-                    std.crypto.hash.Md5.hash(self.key.secret, key[0..16], .{});
-                } else {
-                    @memcpy(key[0..self.key.secret.len], self.key.secret);
-                }
-                var hmac = std.crypto.auth.hmac.HmacMd5.init(key[0..16]);
+                var hmac = std.crypto.auth.hmac.HmacMd5.init(self.key.secret);
+                defer secureZeroHmac(@TypeOf(hmac), &hmac);
                 hmac.update(message);
                 hmac.update(tsig_vars);
                 hmac.final(result[0..16]);
             },
             .hmac_sha1 => {
-                // Block size for SHA1 is 64 bytes, output is 20 bytes
-                const block_size = 64;
-                var key: [block_size]u8 = .{0} ** block_size;
-                if (self.key.secret.len > block_size) {
-                    // RFC 2104: Hash key if longer than block size
-                    std.crypto.hash.Sha1.hash(self.key.secret, key[0..20], .{});
-                } else {
-                    @memcpy(key[0..self.key.secret.len], self.key.secret);
-                }
-                var hmac = std.crypto.auth.hmac.HmacSha1.init(key[0..20]);
+                var hmac = std.crypto.auth.hmac.HmacSha1.init(self.key.secret);
+                defer secureZeroHmac(@TypeOf(hmac), &hmac);
                 hmac.update(message);
                 hmac.update(tsig_vars);
                 hmac.final(result[0..20]);
             },
             .hmac_sha256 => {
-                // Block size for SHA256 is 64 bytes, output is 32 bytes
-                const block_size = 64;
-                var key: [block_size]u8 = .{0} ** block_size;
-                if (self.key.secret.len > block_size) {
-                    // RFC 2104: Hash key if longer than block size
-                    std.crypto.hash.sha2.Sha256.hash(self.key.secret, key[0..32], .{});
-                } else {
-                    @memcpy(key[0..self.key.secret.len], self.key.secret);
-                }
-                var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(key[0..32]);
+                var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(self.key.secret);
+                defer secureZeroHmac(@TypeOf(hmac), &hmac);
                 hmac.update(message);
                 hmac.update(tsig_vars);
                 hmac.final(result[0..32]);
             },
             .hmac_sha384 => {
-                // Block size for SHA384 is 128 bytes, output is 48 bytes
-                const block_size = 128;
-                var key: [block_size]u8 = .{0} ** block_size;
-                if (self.key.secret.len > block_size) {
-                    // RFC 2104: Hash key if longer than block size
-                    std.crypto.hash.sha2.Sha384.hash(self.key.secret, key[0..48], .{});
-                } else {
-                    @memcpy(key[0..self.key.secret.len], self.key.secret);
-                }
-                var hmac = std.crypto.auth.hmac.sha2.HmacSha384.init(key[0..48]);
+                var hmac = std.crypto.auth.hmac.sha2.HmacSha384.init(self.key.secret);
+                defer secureZeroHmac(@TypeOf(hmac), &hmac);
                 hmac.update(message);
                 hmac.update(tsig_vars);
                 hmac.final(result[0..48]);
             },
             .hmac_sha512 => {
-                // Block size for SHA512 is 128 bytes, output is 64 bytes
-                const block_size = 128;
-                var key: [block_size]u8 = .{0} ** block_size;
-                if (self.key.secret.len > block_size) {
-                    // RFC 2104: Hash key if longer than block size
-                    std.crypto.hash.sha2.Sha512.hash(self.key.secret, key[0..64], .{});
-                } else {
-                    @memcpy(key[0..self.key.secret.len], self.key.secret);
-                }
-                var hmac = std.crypto.auth.hmac.sha2.HmacSha512.init(key[0..64]);
+                var hmac = std.crypto.auth.hmac.sha2.HmacSha512.init(self.key.secret);
+                defer secureZeroHmac(@TypeOf(hmac), &hmac);
                 hmac.update(message);
                 hmac.update(tsig_vars);
                 hmac.final(result[0..64]);
@@ -675,6 +662,13 @@ pub const VerifyResult = struct {
     original_id: u16 = 0,
 };
 
+/// Securely zero an HMAC state struct to prevent key-derived material from
+/// leaking through stack memory (SEC-C25, CWE-244).
+fn secureZeroHmac(comptime T: type, hmac_ptr: *T) void {
+    const hmac_bytes: *[@sizeOf(T)]u8 = @ptrCast(hmac_ptr);
+    std.crypto.secureZero(u8, hmac_bytes);
+}
+
 // Helper functions -- delegated to shared dns_name module to avoid duplication
 const dns_name = @import("dns_name");
 const parseName_ = dns_name.parseName;
@@ -735,6 +729,59 @@ test "TsigError values" {
     try std.testing.expectEqual(@as(u16, 18), TsigError.bad_time.toResponseCode());
 }
 
+test "SEC-C21: TsigError handles unknown error codes without panic" {
+    // Unknown error code from wire data must not panic
+    const unknown_err: TsigError = @enumFromInt(999);
+    try std.testing.expectEqual(@as(u16, 999), unknown_err.toResponseCode());
+
+    // Known values still work
+    const no_err: TsigError = @enumFromInt(0);
+    try std.testing.expectEqual(TsigError.no_error, no_err);
+}
+
+test "SEC-C21: TsigRecord.parse does not panic on unknown error code" {
+    const allocator = std.testing.allocator;
+
+    // Build minimal TSIG RDATA with unknown error code
+    // Structure: algorithm_name (wire format) + time(6) + fudge(2) + mac_size(2) + mac + original_id(2) + error(2) + other_len(2)
+    var rdata_buf: [32]u8 = .{0} ** 32;
+    var offset: usize = 0;
+
+    // Algorithm name: "." (root) = single zero byte
+    rdata_buf[offset] = 0;
+    offset += 1;
+
+    // Time signed (6 bytes)
+    offset += 6;
+
+    // Fudge (2 bytes)
+    std.mem.writeInt(u16, rdata_buf[offset..][0..2], 300, .big);
+    offset += 2;
+
+    // MAC size = 0 (2 bytes)
+    std.mem.writeInt(u16, rdata_buf[offset..][0..2], 0, .big);
+    offset += 2;
+
+    // Original ID (2 bytes)
+    std.mem.writeInt(u16, rdata_buf[offset..][0..2], 0x1234, .big);
+    offset += 2;
+
+    // Error code = 999 (unknown) (2 bytes)
+    std.mem.writeInt(u16, rdata_buf[offset..][0..2], 999, .big);
+    offset += 2;
+
+    // Other length = 0 (2 bytes)
+    std.mem.writeInt(u16, rdata_buf[offset..][0..2], 0, .big);
+    offset += 2;
+
+    // Parse -- must NOT panic
+    var tsig = try TsigRecord.parse(allocator, rdata_buf[0..offset]);
+    defer tsig.deinit(allocator);
+
+    // Error code should be preserved as raw value 999
+    try std.testing.expectEqual(@as(u16, 999), tsig.error_code.toResponseCode());
+}
+
 test "TsigContext sign creates valid message" {
     const allocator = std.testing.allocator;
 
@@ -770,4 +817,100 @@ test "TsigContext sign creates valid message" {
 
     // Signed message should be larger
     try std.testing.expect(signed.len > message.len);
+}
+
+test "SEC-C23: HMAC key between hash-output-length and block-size produces correct MAC" {
+    const allocator = std.testing.allocator;
+
+    // 50-byte key: between SHA-256 output (32) and block size (64)
+    // Previously this was silently truncated to 32 bytes, producing wrong MACs.
+    var key_50: [50]u8 = undefined;
+    @memset(&key_50, 0xAB);
+
+    const key = TsigKey.init("test-key.example.com", .hmac_sha256, &key_50);
+    var ctx = TsigContext.initNoWarn(allocator, key);
+
+    const message = [_]u8{
+        0x12, 0x34, // ID
+        0x01, 0x00, // Flags
+        0x00, 0x01, // QDCOUNT
+        0x00, 0x00, // ANCOUNT
+        0x00, 0x00, // NSCOUNT
+        0x00, 0x00, // ARCOUNT
+        0x07, 'e',
+        'x',  'a',
+        'm',  'p',
+        'l',  'e',
+        0x03, 'c',
+        'o',  'm',
+        0x00,
+        0x00, 0x01, // A
+        0x00, 0x01, // IN
+    };
+
+    // Sign and verify: this exercises the full HMAC path with the 50-byte key
+    const signed = try ctx.sign(&message);
+    defer allocator.free(signed);
+
+    // Verify the signed message is self-consistent
+    const result = try ctx.verify(signed);
+    try std.testing.expect(result.valid);
+    try std.testing.expectEqual(TsigError.no_error, result.error_code);
+}
+
+test "SEC-C23: HMAC with key longer than block size produces correct MAC" {
+    const allocator = std.testing.allocator;
+
+    // 100-byte key: longer than any HMAC block size (64 for SHA-256, 128 for SHA-384/512)
+    var key_100: [100]u8 = undefined;
+    @memset(&key_100, 0xCD);
+
+    const key = TsigKey.init("test-key.example.com", .hmac_sha256, &key_100);
+    var ctx = TsigContext.initNoWarn(allocator, key);
+
+    const message = [_]u8{
+        0x56, 0x78, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x07, 'e',  'x',  'a',
+        'm',  'p',  'l',  'e',  0x03, 'c',  'o',  'm',
+        0x00, 0x00, 0x01, 0x00, 0x01,
+    };
+
+    const signed = try ctx.sign(&message);
+    defer allocator.free(signed);
+
+    const result = try ctx.verify(signed);
+    try std.testing.expect(result.valid);
+}
+
+test "SEC-C23: Different key sizes produce different MACs" {
+    const allocator = std.testing.allocator;
+
+    const message = [_]u8{
+        0xAB, 0xCD, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x07, 'e',  'x',  'a',
+        'm',  'p',  'l',  'e',  0x03, 'c',  'o',  'm',
+        0x00, 0x00, 0x01, 0x00, 0x01,
+    };
+
+    // 32-byte key (SHA-256 output length)
+    var key_32: [32]u8 = undefined;
+    @memset(&key_32, 0xAB);
+    const k32 = TsigKey.init("test-key.example.com", .hmac_sha256, &key_32);
+    var ctx32 = TsigContext.initNoWarn(allocator, k32);
+    const signed_32 = try ctx32.sign(&message);
+    defer allocator.free(signed_32);
+
+    // 50-byte key (same first 32 bytes as key_32, but longer)
+    // Previously this would have been truncated to 32 bytes and produced the SAME MAC.
+    var key_50: [50]u8 = undefined;
+    @memset(key_50[0..32], 0xAB);
+    @memset(key_50[32..], 0xEF); // Different trailing bytes
+    const k50 = TsigKey.init("test-key.example.com", .hmac_sha256, &key_50);
+    var ctx50 = TsigContext.initNoWarn(allocator, k50);
+    const signed_50 = try ctx50.sign(&message);
+    defer allocator.free(signed_50);
+
+    // The signed messages should differ because the keys differ.
+    // Before the fix, truncation to 32 bytes made them identical.
+    try std.testing.expect(!std.mem.eql(u8, signed_32, signed_50));
 }

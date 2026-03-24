@@ -210,9 +210,11 @@ pub const Client = struct {
 
         // Extract answers
         var ans_iter = response.answers();
+        var owner_buf: [256]u8 = undefined;
         while (try ans_iter.next()) |rr| {
-            const owner = rr.getName(self.allocator, response.data) catch continue;
-            defer self.allocator.free(owner);
+            // Use stack buffer instead of heap allocation for owner name (PF-30).
+            // DNS names are at most 253 chars; 256-byte buffer always suffices.
+            const owner = rr.name.toStringBuf(&owner_buf, response.data) catch continue;
 
             if (!nameInChain(cname_chain.items, owner)) {
                 continue;
