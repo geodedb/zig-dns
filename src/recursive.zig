@@ -477,11 +477,15 @@ pub const RecursiveResolver = struct {
             try self.allocator.dupe(u8, domain);
         defer self.allocator.free(query_name);
 
-        // Store for verification
-        if (state.last_query_name) |old| {
-            self.allocator.free(old);
+        // Store for 0x20 verification (PF-NEW-12: skip the dupe when case
+        // randomization is disabled -- last_query_name is only checked under
+        // the case_randomization branch, so the extra copy is wasted).
+        if (self.config.case_randomization) {
+            if (state.last_query_name) |old| {
+                self.allocator.free(old);
+            }
+            state.last_query_name = try self.allocator.dupe(u8, query_name);
         }
-        state.last_query_name = try self.allocator.dupe(u8, query_name);
 
         const query = try message_mod.buildQuery(self.allocator, id, query_name, qtype, .in, self.config.dnssec);
         defer self.allocator.free(query);
@@ -574,16 +578,18 @@ pub const RecursiveResolver = struct {
         // into the Referral.servers slice and freed by Referral.deinit).
         errdefer for (ns_names.items) |ns_str| self.allocator.free(ns_str);
 
-        var zone_name: ?[]const u8 = null;
-        // Free zone_name on error paths to prevent leaks (PF-NEW-02).
-        errdefer if (zone_name) |zn| self.allocator.free(zn);
+        // PF-NEW-07: Use a stack buffer for the zone name during iteration.
+        // The zone name is only needed for isSubdomainOf comparisons until
+        // we dupe it into the final Referral at the end.
+        var zone_buf: [256]u8 = undefined;
+        var zone_str: ?[]const u8 = null; // slice into zone_buf (not heap-allocated)
 
         // Get NS records from authority section
         var auth_iter = msg.authority();
         while (try auth_iter.next()) |rr| {
             if (rr.rtype == .ns) {
-                if (zone_name == null) {
-                    zone_name = try rr.getName(self.allocator, response);
+                if (zone_str == null) {
+                    zone_str = try rr.name.toStringBuf(&zone_buf, response);
                 }
 
                 const ns_name = try rr.parseName(response);
@@ -596,66 +602,61 @@ pub const RecursiveResolver = struct {
             return null;
         }
 
-        // Single pass over additional section: collect all A glue records
-        // SECURITY (SEC-C27): Only accept glue records whose names are within
-        // the delegated zone's bailiwick. Out-of-bailiwick glue can be used
-        // to inject forged addresses for unrelated domains.
-        var glue_records: std.ArrayList(GlueRecord) = .{};
-        defer {
-            for (glue_records.items) |gr| {
-                self.allocator.free(gr.name);
-            }
-            glue_records.deinit(self.allocator);
-        }
-
-        var add_iter = msg.additional();
-        while (try add_iter.next()) |add_rr| {
-            if (add_rr.rtype == .a) {
-                const add_name = try add_rr.getName(self.allocator, response);
-                errdefer self.allocator.free(add_name);
-
-                // Bailiwick check: glue record name must be within the delegated zone
-                if (zone_name) |zn| {
-                    if (!isSubdomainOf(add_name, zn)) {
-                        self.allocator.free(add_name);
-                        continue;
-                    }
-                }
-
-                const addr = try add_rr.parseA();
-                var ip_buf: [15]u8 = undefined; // max "255.255.255.255"
-                const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] }) catch continue;
-
-                const server_addr = ServerAddress.fromIpv4(ip_str, types_mod.dns_port) catch continue;
-                try glue_records.append(self.allocator, .{
-                    .name = add_name,
-                    .address = server_addr,
-                });
-            }
-        }
-
-        // Build server info by matching NS names against pre-collected glue
+        // Build server info array up front so glue can be matched inline
+        // (PF-NEW-09: avoids heap-allocating glue record names).
         var servers = try self.allocator.alloc(Referral.ServerInfo, ns_names.items.len);
+        errdefer self.allocator.free(servers);
         for (ns_names.items, 0..) |ns, i| {
             servers[i] = .{
                 .name = ns,
                 .address = null,
             };
+        }
 
-            // Look up glue from pre-collected records
-            for (glue_records.items) |gr| {
-                if (std.ascii.eqlIgnoreCase(gr.name, ns)) {
-                    servers[i].address = gr.address;
-                    break;
+        // Single pass over additional section: match A glue records directly
+        // against NS names using stack buffers for name comparisons.
+        // SECURITY (SEC-C27): Only accept glue records whose names are within
+        // the delegated zone's bailiwick. Out-of-bailiwick glue can be used
+        // to inject forged addresses for unrelated domains.
+        var add_iter = msg.additional();
+        while (try add_iter.next()) |add_rr| {
+            if (add_rr.rtype == .a) {
+                // PF-NEW-09: Use stack buffer instead of heap allocation.
+                // The name is only needed for bailiwick and NS name comparisons.
+                var glue_buf: [256]u8 = undefined;
+                const add_name = try add_rr.name.toStringBuf(&glue_buf, response);
+
+                // Bailiwick check: glue record name must be within the delegated zone
+                if (zone_str) |zn| {
+                    if (!isSubdomainOf(add_name, zn)) {
+                        continue;
+                    }
+                }
+
+                const addr = add_rr.parseA() catch continue;
+                var ip_buf: [15]u8 = undefined; // max "255.255.255.255"
+                const ip_str = std.fmt.bufPrint(&ip_buf, "{d}.{d}.{d}.{d}", .{ addr[0], addr[1], addr[2], addr[3] }) catch continue;
+
+                const server_addr = ServerAddress.fromIpv4(ip_str, types_mod.dns_port) catch continue;
+
+                // Match directly against NS names (avoiding GlueRecord storage)
+                for (servers) |*srv| {
+                    if (std.ascii.eqlIgnoreCase(add_name, srv.name)) {
+                        srv.address = server_addr;
+                        break;
+                    }
                 }
             }
         }
 
+        // PF-NEW-07: Only heap-dupe the zone name now for the final Referral.
+        const zone_owned = if (zone_str) |zs|
+            try self.allocator.dupe(u8, zs)
+        else
+            try self.allocator.dupe(u8, ".");
+
         return Referral{
-            // zone_name is always set when ns_names is non-empty (the early
-            // return at line 581 guards this), but dupe a fallback for safety
-            // so that Referral.deinit can unconditionally free .zone (PF-NEW-02).
-            .zone = zone_name orelse try self.allocator.dupe(u8, "."),
+            .zone = zone_owned,
             .servers = servers,
         };
     }

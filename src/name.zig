@@ -211,6 +211,9 @@ pub const Name = struct {
     }
 
     /// Convert wire format name to human-readable string (e.g., "example.com")
+    ///
+    /// SECURITY: Limits compression pointer hops to prevent infinite loops
+    /// from maliciously crafted packets with circular pointers (CWE-835).
     pub fn toString(self: Self, allocator: std.mem.Allocator, full_message: ?[]const u8) ![]u8 {
         var result: std.ArrayList(u8) = .empty;
         defer result.deinit(allocator);
@@ -218,6 +221,7 @@ pub const Name = struct {
         var pos: usize = 0;
         var data = self.labels;
         var first = true;
+        var pointer_hops: u8 = 0;
 
         while (pos < data.len) {
             const len_byte = data[pos];
@@ -231,6 +235,10 @@ pub const Name = struct {
                 if (full_message) |msg| {
                     if (pos + 1 >= data.len) {
                         return error.InvalidCompression;
+                    }
+                    pointer_hops += 1;
+                    if (pointer_hops > max_compression_hops) {
+                        return error.CompressionLoopDetected;
                     }
                     const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | data[pos + 1];
                     data = msg[ptr_offset..];
@@ -329,10 +337,14 @@ pub const Name = struct {
     }
 
     /// Get the number of labels in the name
-    pub fn labelCount(self: Self, full_message: ?[]const u8) usize {
+    ///
+    /// SECURITY: Limits compression pointer hops to prevent infinite loops
+    /// from maliciously crafted packets with circular pointers (CWE-835).
+    pub fn labelCount(self: Self, full_message: ?[]const u8) error{CompressionLoopDetected}!usize {
         var count: usize = 0;
         var pos: usize = 0;
         var data = self.labels;
+        var pointer_hops: u8 = 0;
 
         while (pos < data.len) {
             const len_byte = data[pos];
@@ -343,6 +355,10 @@ pub const Name = struct {
 
             if ((len_byte & compression_marker) == compression_marker) {
                 if (full_message) |msg| {
+                    pointer_hops += 1;
+                    if (pointer_hops > max_compression_hops) {
+                        return error.CompressionLoopDetected;
+                    }
                     const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | data[pos + 1];
                     data = msg[ptr_offset..];
                     pos = 0;
@@ -439,10 +455,14 @@ pub const Name = struct {
 
     /// Get the parent domain by removing the leftmost label
     /// Returns null if this is already the root domain
+    ///
+    /// SECURITY: Limits compression pointer hops to prevent infinite loops
+    /// from maliciously crafted packets with circular pointers (CWE-835).
     pub fn parent(self: Self, allocator: std.mem.Allocator, full_message: ?[]const u8) !?[]u8 {
         var pos: usize = 0;
         var data = self.labels;
         var first_label_len: usize = 0;
+        var pointer_hops: u8 = 0;
 
         // Handle compression first
         while (pos < data.len) {
@@ -456,6 +476,10 @@ pub const Name = struct {
                 if (full_message) |msg| {
                     if (pos + 1 >= data.len) {
                         return error.InvalidCompression;
+                    }
+                    pointer_hops += 1;
+                    if (pointer_hops > max_compression_hops) {
+                        return error.CompressionLoopDetected;
                     }
                     const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | data[pos + 1];
                     data = msg[ptr_offset..];
@@ -781,7 +805,7 @@ test "Name.labelCount" {
     };
 
     const name = try Name.parse(&wire_data, 0);
-    try std.testing.expectEqual(@as(usize, 3), name.labelCount(null));
+    try std.testing.expectEqual(@as(usize, 3), try name.labelCount(null));
 }
 
 test "Name.parse with compression" {
@@ -1342,4 +1366,60 @@ test "Name.toStringBuf buffer too small" {
     var small_buf: [5]u8 = undefined;
     const result = name.toStringBuf(&small_buf, null);
     try std.testing.expectError(error.NameTooLong, result);
+}
+
+// ============================================================
+// SECURITY TESTS: GAP-0037 -- Compression loop detection in
+// toString(), labelCount(), and parent() (CWE-835)
+// ============================================================
+
+test "GAP-0037: toString detects self-referencing compression pointer" {
+    // SECURITY TEST: A self-referencing compression pointer at offset 0
+    // (0xC0, 0x00 points back to offset 0) must return
+    // error.CompressionLoopDetected rather than looping forever.
+    const allocator = std.testing.allocator;
+
+    // Craft a buffer with a self-referencing pointer at offset 0
+    const circular = [_]u8{ 0xC0, 0x00 };
+
+    // Build a Name that starts at offset 0 in a message whose first two
+    // bytes form a compression pointer back to offset 0.
+    const name = Name{
+        .labels = &circular,
+        .wire_length = 2,
+        .compressed = true,
+    };
+
+    // toString must detect the loop and return the appropriate error
+    const res = name.toString(allocator, &circular);
+    try std.testing.expectError(error.CompressionLoopDetected, res);
+}
+
+test "GAP-0037: labelCount detects self-referencing compression pointer" {
+    // SECURITY TEST: labelCount must not loop forever on a circular pointer.
+    const circular = [_]u8{ 0xC0, 0x00 };
+
+    const name = Name{
+        .labels = &circular,
+        .wire_length = 2,
+        .compressed = true,
+    };
+
+    const res = name.labelCount(&circular);
+    try std.testing.expectError(error.CompressionLoopDetected, res);
+}
+
+test "GAP-0037: parent detects self-referencing compression pointer" {
+    // SECURITY TEST: parent must not loop forever on a circular pointer.
+    const allocator = std.testing.allocator;
+    const circular = [_]u8{ 0xC0, 0x00 };
+
+    const name = Name{
+        .labels = &circular,
+        .wire_length = 2,
+        .compressed = true,
+    };
+
+    const res = name.parent(allocator, &circular);
+    try std.testing.expectError(error.CompressionLoopDetected, res);
 }

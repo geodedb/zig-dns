@@ -226,7 +226,9 @@ pub const TsigRecord = struct {
         offset += 2;
 
         var other_data: []const u8 = &[_]u8{};
-        if (other_len > 0 and offset + other_len <= rdata.len) {
+        if (other_len > 0) {
+            // SECURITY (SEC-NEW-04): Reject truncated other_data instead of silently ignoring
+            if (offset + other_len > rdata.len) return error.InvalidTsigRecord;
             other_data = try allocator.dupe(u8, rdata[offset .. offset + other_len]);
         }
 
@@ -345,16 +347,9 @@ pub const TsigContext = struct {
             return VerifyResult{ .valid = false, .error_code = .bad_key };
         }
 
-        // Verify time
-        const now: u48 = @intCast(@as(u64, @bitCast(std.time.timestamp())));
-        const time_diff = if (now > tsig.time_signed)
-            now - tsig.time_signed
-        else
-            tsig.time_signed - now;
-
-        if (time_diff > tsig.fudge) {
-            return VerifyResult{ .valid = false, .error_code = .bad_time };
-        }
+        // SECURITY (SEC-C101): Verify MAC BEFORE time check to prevent
+        // timing oracle attacks. An attacker could manipulate fudge/time_signed
+        // to learn whether the MAC was valid by observing different error codes.
 
         // Recompute MAC
         const tsig_vars = try self.buildTsigVariables(tsig.time_signed, null);
@@ -384,6 +379,24 @@ pub const TsigContext = struct {
         };
         if (!mac_valid) {
             return VerifyResult{ .valid = false, .error_code = .bad_sig };
+        }
+
+        // SECURITY (SEC-C100): Reject excessively large fudge values.
+        // An attacker-controlled fudge could bypass time validation entirely.
+        // Limit to twice the verifier's configured fudge as a reasonable upper bound.
+        if (tsig.fudge > self.fudge * 2) {
+            return VerifyResult{ .valid = false, .error_code = .bad_time };
+        }
+
+        // Verify time (now safe -- MAC is already verified above)
+        const now: u48 = @intCast(@as(u64, @bitCast(std.time.timestamp())));
+        const time_diff = if (now > tsig.time_signed)
+            now - tsig.time_signed
+        else
+            tsig.time_signed - now;
+
+        if (time_diff > tsig.fudge) {
+            return VerifyResult{ .valid = false, .error_code = .bad_time };
         }
 
         return VerifyResult{
@@ -584,6 +597,8 @@ pub const TsigContext = struct {
         var i: u16 = 0;
         while (i < qdcount) : (i += 1) {
             offset = try skipName(message, offset);
+            // SECURITY (SEC-NEW-06): Validate room for QTYPE + QCLASS after name
+            if (offset + 4 > message.len) return error.InvalidMessage;
             offset += 4; // QTYPE + QCLASS
         }
 
@@ -617,6 +632,9 @@ pub const TsigContext = struct {
             offset += 4; // TTL
             const rdlength = std.mem.readInt(u16, message[offset..][0..2], .big);
             offset += 2;
+
+            // SECURITY (SEC-NEW-01): Validate rdlength does not exceed message
+            if (offset + rdlength > message.len) return error.InvalidMessage;
 
             if (rtype == 250) { // TSIG
                 // Found TSIG
@@ -913,4 +931,82 @@ test "SEC-C23: Different key sizes produce different MACs" {
     // The signed messages should differ because the keys differ.
     // Before the fix, truncation to 32 bytes made them identical.
     try std.testing.expect(!std.mem.eql(u8, signed_32, signed_50));
+}
+
+test "SEC-NEW-01: extractTsig rejects rdlength exceeding message" {
+    const allocator = std.testing.allocator;
+
+    // Build a minimal DNS message with 1 additional record that has a TSIG type
+    // but rdlength that extends past the end of the message.
+    var msg: [64]u8 = .{0} ** 64;
+    // ID
+    msg[0] = 0x12;
+    msg[1] = 0x34;
+    // Flags: standard query
+    msg[2] = 0x01;
+    msg[3] = 0x00;
+    // QDCOUNT: 0
+    // ANCOUNT: 0
+    // NSCOUNT: 0
+    // ARCOUNT: 1
+    msg[11] = 0x01;
+
+    // Additional section starts at offset 12
+    // RR Name: root (\x00)
+    msg[12] = 0x00;
+    // Type: TSIG (250)
+    msg[13] = 0x00;
+    msg[14] = 0xFA;
+    // Class: ANY (255)
+    msg[15] = 0x00;
+    msg[16] = 0xFF;
+    // TTL: 0
+    // rdlength: 0x00FF = 255, but only a few bytes remain in the message
+    msg[21] = 0x00;
+    msg[22] = 0xFF;
+    // Message ends at byte 64, but rdlength claims 255 bytes from offset 23
+
+    const key = TsigKey.init("test-key.example.com", .hmac_sha256, &[_]u8{0} ** 32);
+    var ctx = TsigContext.initNoWarn(allocator, key);
+
+    const result = ctx.verify(msg[0 .. 23 + 5]); // Only 5 bytes of rdata available
+    try std.testing.expectError(error.InvalidMessage, result);
+}
+
+test "SEC-NEW-04: TsigRecord.parse rejects truncated other_data" {
+    const allocator = std.testing.allocator;
+
+    // Build TSIG RDATA where other_len claims more data than available
+    var rdata_buf: [32]u8 = .{0} ** 32;
+    var offset: usize = 0;
+
+    // Algorithm name: root
+    rdata_buf[offset] = 0;
+    offset += 1;
+
+    // Time signed (6 bytes)
+    offset += 6;
+
+    // Fudge (2 bytes)
+    std.mem.writeInt(u16, rdata_buf[offset..][0..2], 300, .big);
+    offset += 2;
+
+    // MAC size = 0
+    std.mem.writeInt(u16, rdata_buf[offset..][0..2], 0, .big);
+    offset += 2;
+
+    // Original ID
+    std.mem.writeInt(u16, rdata_buf[offset..][0..2], 0x1234, .big);
+    offset += 2;
+
+    // Error code
+    std.mem.writeInt(u16, rdata_buf[offset..][0..2], 0, .big);
+    offset += 2;
+
+    // Other length = 100 (but no data follows)
+    std.mem.writeInt(u16, rdata_buf[offset..][0..2], 100, .big);
+    offset += 2;
+
+    const result = TsigRecord.parse(allocator, rdata_buf[0..offset]);
+    try std.testing.expectError(error.InvalidTsigRecord, result);
 }

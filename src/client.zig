@@ -148,20 +148,22 @@ pub const Client = struct {
 
                 for (entries) |entry| {
                     if (!entry.isExpired(now)) {
-                        // Format based on type
+                        // Format based on type using stack buffers (PF-NEW-10)
                         if (qtype == .a and entry.rdata.len == 4) {
-                            const formatted = try std.fmt.allocPrint(self.allocator, "{d}.{d}.{d}.{d}", .{
+                            var a_buf: [15]u8 = undefined;
+                            const formatted = std.fmt.bufPrint(&a_buf, "{d}.{d}.{d}.{d}", .{
                                 entry.rdata[0], entry.rdata[1], entry.rdata[2], entry.rdata[3],
-                            });
-                            try results.append(self.allocator, formatted);
+                            }) catch unreachable;
+                            try results.append(self.allocator, try self.allocator.dupe(u8, formatted));
                         } else if (qtype == .aaaa and entry.rdata.len == 16) {
-                            const formatted = try std.fmt.allocPrint(self.allocator, "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}", .{
+                            var aaaa_buf: [39]u8 = undefined;
+                            const formatted = std.fmt.bufPrint(&aaaa_buf, "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}", .{
                                 entry.rdata[0],  entry.rdata[1],  entry.rdata[2],  entry.rdata[3],
                                 entry.rdata[4],  entry.rdata[5],  entry.rdata[6],  entry.rdata[7],
                                 entry.rdata[8],  entry.rdata[9],  entry.rdata[10], entry.rdata[11],
                                 entry.rdata[12], entry.rdata[13], entry.rdata[14], entry.rdata[15],
-                            });
-                            try results.append(self.allocator, formatted);
+                            }) catch unreachable;
+                            try results.append(self.allocator, try self.allocator.dupe(u8, formatted));
                         }
                     }
                 }
@@ -402,21 +404,25 @@ fn buildCnameChain(
         if (rr.rtype != .cname) continue;
         if (mapping_count >= max_cname_mappings) break;
 
-        const owner = rr.getName(allocator, response) catch continue;
-        errdefer allocator.free(owner);
+        // Use stack buffers for temporary name formatting (PF-NEW-08).
+        // Only dupe into heap for the mapping arrays that outlive this iteration.
+        var owner_stack_buf: [256]u8 = undefined;
+        const owner_str = rr.name.toStringBuf(&owner_stack_buf, response) catch continue;
 
-        const target_name = rr.parseName(response) catch {
-            allocator.free(owner);
-            continue;
-        };
-        const target_str = target_name.toString(allocator, response) catch {
+        var target_stack_buf: [256]u8 = undefined;
+        const target_name = rr.parseName(response) catch continue;
+        const target_str = target_name.toStringBuf(&target_stack_buf, response) catch continue;
+
+        const owner = allocator.dupe(u8, owner_str) catch continue;
+        errdefer allocator.free(owner);
+        const target = allocator.dupe(u8, target_str) catch {
             allocator.free(owner);
             continue;
         };
 
         mapping_owners[mapping_count] = owner;
-        mapping_targets[mapping_count] = target_str;
-        mappings[mapping_count] = .{ .owner = owner, .target = target_str };
+        mapping_targets[mapping_count] = target;
+        mappings[mapping_count] = .{ .owner = owner, .target = target };
         mapping_count += 1;
     }
 

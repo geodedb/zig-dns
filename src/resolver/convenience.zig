@@ -190,67 +190,37 @@ pub const SimpleResolver = struct {
         };
     }
 
-    /// Lookup IPv4 addresses for a hostname
+    /// Lookup IPv4 addresses for a hostname.
+    ///
+    /// Not yet implemented -- returns `error.NotImplemented` so callers
+    /// get a clear signal instead of silently empty results (QH-NEW-01).
+    /// Use `client.Client.resolveA` for working A-record resolution.
     pub fn lookupA(self: *Self, hostname: []const u8) !LookupResult {
-        self.stats.total_lookups += 1;
-        self.stats.ipv4_lookups += 1;
-
-        const result = LookupResult{
-            .addresses = .empty,
-            .allocator = self.allocator,
-        };
-
-        // Simulate lookup - in real implementation, this would query DNS
+        _ = self;
         _ = hostname;
-
-        return result;
+        return error.NotImplemented;
     }
 
-    /// Lookup IPv6 addresses for a hostname
+    /// Lookup IPv6 addresses for a hostname.
+    ///
+    /// Not yet implemented -- returns `error.NotImplemented` so callers
+    /// get a clear signal instead of silently empty results (QH-NEW-01).
+    /// Use `client.Client.resolveAAAA` for working AAAA-record resolution.
     pub fn lookupAAAA(self: *Self, hostname: []const u8) !LookupResult {
-        self.stats.total_lookups += 1;
-        self.stats.ipv6_lookups += 1;
-
-        const result = LookupResult{
-            .addresses = .empty,
-            .allocator = self.allocator,
-        };
-
+        _ = self;
         _ = hostname;
-
-        return result;
+        return error.NotImplemented;
     }
 
-    /// Lookup both IPv4 and IPv6 addresses
+    /// Lookup both IPv4 and IPv6 addresses.
+    ///
+    /// Not yet implemented -- returns `error.NotImplemented` so callers
+    /// get a clear signal instead of silently empty results (QH-NEW-01).
+    /// Use `client.Client.resolve` for working dual-stack resolution.
     pub fn lookup(self: *Self, hostname: []const u8) !LookupResult {
-        var result = LookupResult{
-            .addresses = .empty,
-            .allocator = self.allocator,
-        };
-
-        // Try IPv4
-        if (self.lookupA(hostname)) |a_result| {
-            defer {
-                var mut_result = a_result;
-                mut_result.deinit();
-            }
-            for (a_result.addresses.items) |addr| {
-                try result.addresses.append(self.allocator, addr);
-            }
-        } else |_| {}
-
-        // Try IPv6
-        if (self.lookupAAAA(hostname)) |aaaa_result| {
-            defer {
-                var mut_result = aaaa_result;
-                mut_result.deinit();
-            }
-            for (aaaa_result.addresses.items) |addr| {
-                try result.addresses.append(self.allocator, addr);
-            }
-        } else |_| {}
-
-        return result;
+        _ = self;
+        _ = hostname;
+        return error.NotImplemented;
     }
 
     /// Get statistics
@@ -505,6 +475,22 @@ test "LookupResult methods" {
     try std.testing.expect(result.hasIPv6());
     try std.testing.expect(result.firstIPv4() != null);
     try std.testing.expect(result.firstIPv6() != null);
+}
+
+test "SimpleResolver lookup stubs return NotImplemented" {
+    const allocator = std.testing.allocator;
+    var resolver = SimpleResolver.init(allocator);
+
+    try std.testing.expectError(error.NotImplemented, resolver.lookupA("example.com"));
+    try std.testing.expectError(error.NotImplemented, resolver.lookupAAAA("example.com"));
+    try std.testing.expectError(error.NotImplemented, resolver.lookup("example.com"));
+}
+
+test "resolveHost returns NotImplemented" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.NotImplemented, resolveHost(allocator, "example.com"));
+    try std.testing.expectError(error.NotImplemented, resolveHostIPv4(allocator, "example.com"));
+    try std.testing.expectError(error.NotImplemented, resolveHostIPv6(allocator, "example.com"));
 }
 
 test "QueryType enum" {

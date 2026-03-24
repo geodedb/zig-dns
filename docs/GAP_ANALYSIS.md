@@ -41,25 +41,18 @@ Last updated: 2026-03-24 (adversarial security review -- 9 new findings added, 3
 
 ---
 
-### GAP-0037: Name.toString() missing compression hop limit
+### GAP-0037: Name.toString() missing compression hop limit -- **RESOLVED**
 - **Issue:** (not yet filed -- skip-issues mode)
 - **Category:** Security
 - **Severity:** Medium
+- **Status:** Resolved (2026-03-24)
 - **Requirement source:** CWE-835 (Loop with Unreachable Exit Condition); RFC 1035 Section 4.1.4 (message compression)
-- **Current state (evidence):**
-  - `src/name.zig:214-264` -- `toString()` follows compression pointers without any hop counter; a crafted self-referencing pointer causes an infinite loop
-  - `src/name.zig:332-360` -- `labelCount()` follows compression pointers without hop limit (same pattern)
-  - `src/name.zig:442-492` -- `parent()` follows compression pointers without hop limit, and also calls `toString()` internally
-  - `src/name.zig:270-329` -- `toStringBuf()` has the correct fix: `pointer_hops` counter checked against `max_compression_hops` (16)
-  - `src/recursive.zig:590` -- `toString()` called on names parsed from untrusted DNS responses in `extractReferral()`
-- **Why this is a gap:** `toStringBuf()` was hardened with a compression hop limit during GAP-0036, but the original `toString()`, `labelCount()`, and `parent()` methods were not updated. A crafted DNS response with a self-referencing compression pointer can cause an infinite loop in any code path that calls these unhardened methods. The `eql()` method (line 364) is already correctly protected.
-- **Impact/Risk:** Denial of service against any resolver or client calling `toString()`, `labelCount()`, or `parent()` on attacker-controlled DNS response data. Reachable from network input via `recursive.zig:590`.
-- **Recommended fix:** Add `pointer_hops` counter and `max_compression_hops` check to `toString()`, `labelCount()`, and `parent()`, matching the pattern already used in `toStringBuf()` and `eql()`.
+- **Resolution:** Added `pointer_hops` counter with `max_compression_hops` check to `toString()`, `labelCount()`, and `parent()` in `src/name.zig`, matching the pattern already used in `toStringBuf()` and `eql()`. `labelCount()` return type changed from `usize` to `error{CompressionLoopDetected}!usize`. Three security tests added verifying all three methods detect self-referencing compression pointers (`0xC0, 0x00`) and return `error.CompressionLoopDetected`.
 - **Acceptance criteria:**
-  - [ ] `toString()` returns `error.CompressionLoopDetected` after exceeding `max_compression_hops`
-  - [ ] `labelCount()` breaks or returns error after exceeding `max_compression_hops`
-  - [ ] `parent()` returns `error.CompressionLoopDetected` after exceeding `max_compression_hops`
-  - [ ] Tests verify infinite-loop protection for all three methods with self-referencing compression pointers
+  - [x] `toString()` returns `error.CompressionLoopDetected` after exceeding `max_compression_hops`
+  - [x] `labelCount()` returns `error.CompressionLoopDetected` after exceeding `max_compression_hops`
+  - [x] `parent()` returns `error.CompressionLoopDetected` after exceeding `max_compression_hops`
+  - [x] Tests verify infinite-loop protection for all three methods with self-referencing compression pointers
 
 ---
 
@@ -267,7 +260,7 @@ The following security findings were identified in Phase 3 review and the subseq
 |----------|-------|----------|------|-------------------|
 | Critical | 2 | 2 | 0 | GAP-0027/SEC-C26, GAP-0028/SEC-C22 |
 | High | 9 | 7 | 2 | **Resolved:** GAP-0026, GAP-0029, GAP-0030, GAP-0033/SEC-C20, GAP-0034/SEC-C21, SEC-C23, SEC-C05/C24. **Open:** SEC-NEW-01, SEC-NEW-02 |
-| Medium | 16 | 9 | 7 | **Resolved:** GAP-0015 (partial), GAP-0031, GAP-0032, GAP-0035, GAP-0036, SEC-C27, SEC-C28, SEC-C30, SEC-C06/C25. **Open:** GAP-0017, GAP-0037, SEC-NEW-03, SEC-NEW-06, SEC-C100, SEC-C29, SEC-C14/C31 |
+| Medium | 16 | 10 | 6 | **Resolved:** GAP-0015 (partial), GAP-0031, GAP-0032, GAP-0035, GAP-0036, GAP-0037, SEC-C27, SEC-C28, SEC-C30, SEC-C06/C25. **Open:** GAP-0017, SEC-NEW-03, SEC-NEW-06, SEC-C100, SEC-C29, SEC-C14/C31 |
 | Low | 11 | 6 | 5 | **Resolved:** GAP-0021, GAP-0022, GAP-0023, GAP-0024, GAP-0025, SEC-C33. **Open:** SEC-NEW-07, SEC-C101, SEC-NEW-04, SEC-NEW-05, SEC-C32 |
 
 ## Production Readiness Assessment
@@ -278,7 +271,7 @@ The following security findings were identified in Phase 3 review and the subseq
 |-----------------|----------------------|-----------|
 | GAP-0015 | No (partially resolved) | Docs updated; tracker reconciliation is administrative |
 | GAP-0017 | No (partially resolved) | Transports exposed in API; resolver wiring is future refactor |
-| GAP-0037 | Recommended fix before production | DoS via crafted compression pointer in untrusted responses; straightforward fix exists in `toStringBuf` |
+| GAP-0037 | **Resolved** | Compression hop limit added to `toString()`, `labelCount()`, and `parent()` |
 | SEC-NEW-01 | **Recommended fix before production** | OOB read remotely triggerable by any DNS peer via crafted TSIG response; one-line bounds check fix |
 | SEC-NEW-02 | **Recommended fix before production** | OOB read remotely triggerable via crafted SIG(0) response; one-line bounds check fix |
 | SEC-NEW-03 | **Recommended fix before production** | OOB via skipRR on crafted response; one-line bounds check fix |
@@ -294,4 +287,4 @@ The following security findings were identified in Phase 3 review and the subseq
 
 ### Production Blockers
 
-GAP-0037 (compression loop DoS in `toString`/`labelCount`/`parent`) and the four adversarial-review OOB findings (SEC-NEW-01, SEC-NEW-02, SEC-NEW-03, SEC-NEW-06) are recommended to be fixed before production deployment. All five are quick wins -- each requires a single bounds-check line. All Critical and previously-known High severity bugs have been resolved; the two new High findings (SEC-NEW-01, SEC-NEW-02) are in triage with straightforward fixes.
+~~GAP-0037~~ (compression loop DoS in `toString`/`labelCount`/`parent`) is now **resolved**. The four adversarial-review OOB findings (SEC-NEW-01, SEC-NEW-02, SEC-NEW-03, SEC-NEW-06) are recommended to be fixed before production deployment. All four are quick wins -- each requires a single bounds-check line. All Critical and previously-known High severity bugs have been resolved; the two new High findings (SEC-NEW-01, SEC-NEW-02) are in triage with straightforward fixes.

@@ -13,7 +13,7 @@
 //! - Full recursive resolver for complete name resolution
 //! - EDNS0 support (RFC 6891)
 //! - Cross-platform: Linux, macOS, Windows
-//! - Zero external dependencies
+//! - Minimal dependencies (optional spice for parallelism)
 //!
 //! ## Quick Start
 //!

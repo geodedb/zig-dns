@@ -97,7 +97,11 @@ pub fn skipName(data: []const u8, start: usize) !usize {
     while (offset < data.len) {
         const len = data[offset];
         if (len == 0) return offset + 1;
-        if (len & 0xC0 == 0xC0) return offset + 2;
+        if (len & 0xC0 == 0xC0) {
+            // SECURITY (SEC-NEW-07): Validate compression pointer fits in data
+            if (offset + 1 >= data.len) return error.InvalidName;
+            return offset + 2;
+        }
         offset += 1 + len;
     }
     return error.InvalidName;
@@ -109,7 +113,10 @@ pub fn skipRR(data: []const u8, start: usize) !usize {
     const offset = try skipName(data, start);
     if (offset + 10 > data.len) return error.InvalidRR;
     const rdlength = std.mem.readInt(u16, data[offset + 8 ..][0..2], .big);
-    return offset + 10 + rdlength;
+    // SECURITY (SEC-NEW-03): Validate rdlength does not exceed remaining data
+    const end = offset + 10 + rdlength;
+    if (end > data.len) return error.InvalidRR;
+    return end;
 }
 
 /// Encode a DNS name in wire format (preserving case).
@@ -233,4 +240,25 @@ test "SEC-C30: parseName allows backward compression pointers" {
     const result = try parseName(allocator, data, 13);
     defer allocator.free(result.name);
     try std.testing.expectEqualStrings("example.com", result.name);
+}
+
+test "SEC-NEW-07: skipName rejects truncated compression pointer" {
+    // Compression pointer marker at the last byte with no second byte
+    const data = "\xC0";
+    const result = skipName(data, 0);
+    try std.testing.expectError(error.InvalidName, result);
+}
+
+test "SEC-NEW-03: skipRR rejects rdlength exceeding data" {
+    // Name: root (\x00), then header with rdlength=100 but no actual rdata
+    const data = "\x00" ++ "\x00\x01" ++ "\x00\x01" ++ "\x00\x00\x00\x00" ++ "\x00\x64";
+    const result = skipRR(data, 0);
+    try std.testing.expectError(error.InvalidRR, result);
+}
+
+test "SEC-NEW-03: skipRR accepts valid rdlength" {
+    // Name: root (\x00), header with rdlength=4, then 4 bytes of rdata
+    const data = "\x00" ++ "\x00\x01" ++ "\x00\x01" ++ "\x00\x00\x00\x00" ++ "\x00\x04" ++ "\xDE\xAD\xBE\xEF";
+    const offset = try skipRR(data, 0);
+    try std.testing.expectEqual(@as(usize, 15), offset);
 }
