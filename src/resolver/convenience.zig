@@ -12,20 +12,11 @@
 //! - Text record lookup (TXT)
 
 const std = @import("std");
+const types_mod = @import("types");
 
-/// DNS query type
-pub const QueryType = enum(u16) {
-    A = 1,
-    AAAA = 28,
-    CNAME = 5,
-    MX = 15,
-    NS = 2,
-    PTR = 12,
-    SOA = 6,
-    SRV = 33,
-    TXT = 16,
-    ANY = 255,
-};
+/// DNS Resource Record Type (canonical definition in types.zig).
+/// Re-exported here for convenience API users.
+pub const Type = types_mod.Type;
 
 /// IPv4 address
 pub const IPv4 = struct {
@@ -83,11 +74,8 @@ pub const Address = union(enum) {
     }
 };
 
-/// MX record result
-pub const MxRecord = struct {
-    preference: u16,
-    exchange: []const u8,
-};
+// MX record type lives in client.zig as MXRecord.
+// Removed duplicate MxRecord definition (RM-04).
 
 /// SRV record result
 pub const SrvRecord = struct {
@@ -493,8 +481,12 @@ test "resolveHost returns NotImplemented" {
     try std.testing.expectError(error.NotImplemented, resolveHostIPv6(allocator, "example.com"));
 }
 
-test "QueryType enum" {
-    try std.testing.expectEqual(@as(u16, 1), @intFromEnum(QueryType.A));
-    try std.testing.expectEqual(@as(u16, 28), @intFromEnum(QueryType.AAAA));
-    try std.testing.expectEqual(@as(u16, 15), @intFromEnum(QueryType.MX));
+test "Type enum re-export matches canonical values" {
+    // Verify that the re-exported Type from types.zig has the expected
+    // wire-format values for common query types (QM-NEW-01).
+    try std.testing.expectEqual(@as(u16, 1), @intFromEnum(Type.a));
+    try std.testing.expectEqual(@as(u16, 28), @intFromEnum(Type.aaaa));
+    try std.testing.expectEqual(@as(u16, 15), @intFromEnum(Type.mx));
+    try std.testing.expectEqual(@as(u16, 33), @intFromEnum(Type.srv));
+    try std.testing.expectEqual(@as(u16, 255), @intFromEnum(Type.any));
 }

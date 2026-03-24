@@ -553,6 +553,8 @@ pub const PipelinedBatch = struct {
     pub fn execute(self: *Self, fd: std.posix.fd_t, timeout_ms: u32) !void {
         // Send all queries with TCP length prefix using writeAll loop
         for (self.queries.items) |q| {
+            // SECURITY (SEC-SCAN-04): Bounds check before @intCast to u16 (CWE-681)
+            if (q.wire_data.len > std.math.maxInt(u16)) return error.MessageTooLong;
             var length_prefix: [2]u8 = undefined;
             std.mem.writeInt(u16, &length_prefix, @intCast(q.wire_data.len), .big);
 
@@ -658,6 +660,8 @@ pub const PooledTcpTransport = struct {
         }
 
         // Send query with TCP length prefix
+        // SECURITY (SEC-SCAN-04): Bounds check before @intCast to u16 (CWE-681)
+        if (wire_req.len > std.math.maxInt(u16)) return error.MessageTooLong;
         var length_prefix: [2]u8 = undefined;
         std.mem.writeInt(u16, &length_prefix, @intCast(wire_req.len), .big);
 
@@ -703,6 +707,8 @@ pub const PooledTcpTransport = struct {
 
         // Send all queries
         for (queries) |q| {
+            // SECURITY (SEC-SCAN-04): Bounds check before @intCast to u16 (CWE-681)
+            if (q.len > std.math.maxInt(u16)) return error.MessageTooLong;
             var length_prefix: [2]u8 = undefined;
             std.mem.writeInt(u16, &length_prefix, @intCast(q.len), .big);
 

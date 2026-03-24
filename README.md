@@ -30,7 +30,7 @@ A comprehensive pure Zig implementation of the Domain Name System (DNS) protocol
 - **EDNS Client Subnet**: Geo-aware DNS queries (RFC 7871)
 - **DNS Cookies**: Lightweight transaction security (RFC 7873)
 - **Cross-Platform**: Linux, macOS, Windows, and more
-- **Zero Dependencies**: Pure Zig implementation using only the standard library
+- **Minimal Dependencies**: Pure Zig implementation using the standard library (optional `spice` dependency for parallelism)
 - **Record Types**: A, AAAA, CNAME, MX, NS, PTR, SOA, TXT, DNAME, SRV, CAA, TLSA, SVCB, HTTPS, DNSKEY, RRSIG, DS, NSEC, NSEC3
 
 ### Project Status
@@ -227,19 +227,23 @@ See [GitLab Issues](https://gitlab.com/devnw/zig/dns/-/issues) for open tasks.
 | [RFC 1035](https://tools.ietf.org/html/rfc1035) | Domain Names - Implementation | Complete |
 | [RFC 2308](https://tools.ietf.org/html/rfc2308) | Negative Caching | Complete |
 | [RFC 3596](https://tools.ietf.org/html/rfc3596) | IPv6 (AAAA) | Complete |
-| [RFC 4033](https://tools.ietf.org/html/rfc4033) | DNSSEC Introduction | Complete |
-| [RFC 4034](https://tools.ietf.org/html/rfc4034) | DNSSEC Resource Records | Complete |
-| [RFC 4035](https://tools.ietf.org/html/rfc4035) | DNSSEC Protocol | Complete |
+| [RFC 4033](https://tools.ietf.org/html/rfc4033) | DNSSEC Introduction | Partial** |
+| [RFC 4034](https://tools.ietf.org/html/rfc4034) | DNSSEC Resource Records | Partial** |
+| [RFC 4035](https://tools.ietf.org/html/rfc4035) | DNSSEC Protocol | Partial** |
 | [RFC 5155](https://tools.ietf.org/html/rfc5155) | NSEC3 | Complete |
 | [RFC 6891](https://tools.ietf.org/html/rfc6891) | EDNS(0) | Complete |
 | [RFC 7816](https://tools.ietf.org/html/rfc7816) | QNAME Minimization | Complete |
-| [RFC 7858](https://tools.ietf.org/html/rfc7858) | DNS over TLS | Complete |
+| [RFC 7858](https://tools.ietf.org/html/rfc7858) | DNS over TLS | Complete*** |
 | [RFC 7871](https://tools.ietf.org/html/rfc7871) | Client Subnet | Complete |
 | [RFC 7873](https://tools.ietf.org/html/rfc7873) | DNS Cookies | Complete |
 | [RFC 8484](https://tools.ietf.org/html/rfc8484) | DNS over HTTPS | Complete* |
 | [RFC 9250](https://tools.ietf.org/html/rfc9250) | DNS over QUIC | Complete* |
 
 \* Requires external HTTP/QUIC library via pluggable backend interface
+
+\*\* Ed25519 and ECDSA (P-256/P-384) signature verification is implemented; RSA signature verification is not yet implemented
+
+\*\*\* DoT transport interface exists with pluggable TLS backend; a TLS implementation must be provided by the consumer
 
 ## License
 

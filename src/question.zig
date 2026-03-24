@@ -98,19 +98,6 @@ pub const Question = struct {
     }
 };
 
-/// Build a DNS query for a given domain and type
-pub fn buildQuery(allocator: std.mem.Allocator, domain: []const u8, qtype: Type, qclass: Class) ![]u8 {
-    const encoded_name = try Name.encode(allocator, domain);
-    defer allocator.free(encoded_name);
-
-    const result = try allocator.alloc(u8, encoded_name.len + 4);
-    @memcpy(result[0..encoded_name.len], encoded_name);
-    std.mem.writeInt(u16, result[encoded_name.len..][0..2], qtype.toInt(), .big);
-    std.mem.writeInt(u16, result[encoded_name.len + 2 ..][0..2], qclass.toInt(), .big);
-
-    return result;
-}
-
 test "Question.parse" {
     const data = [_]u8{
         // Name: example.com
@@ -134,19 +121,6 @@ test "Question.parse" {
     defer allocator.free(name_str);
 
     try std.testing.expectEqualStrings("example.com", name_str);
-}
-
-test "buildQuery" {
-    const allocator = std.testing.allocator;
-    const query = try buildQuery(allocator, "example.com", .a, .in);
-    defer allocator.free(query);
-
-    try std.testing.expectEqualSlices(u8, &[_]u8{
-        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
-        3, 'c', 'o', 'm', 0,
-        0x00, 0x01, // A
-        0x00, 0x01, // IN
-    }, query);
 }
 
 test "Question for AAAA record" {

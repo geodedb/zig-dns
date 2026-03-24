@@ -222,6 +222,10 @@ pub const Name = struct {
         var data = self.labels;
         var first = true;
         var pointer_hops: u8 = 0;
+        // SECURITY (SEC-SCAN-07): Track last pointer target to reject forward pointers.
+        // Each successive compression pointer must target a strictly earlier offset,
+        // preventing forward-pointer attacks (RFC 1035 compliance).
+        var last_ptr_target: ?u16 = null;
 
         while (pos < data.len) {
             const len_byte = data[pos];
@@ -241,6 +245,13 @@ pub const Name = struct {
                         return error.CompressionLoopDetected;
                     }
                     const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | data[pos + 1];
+                    // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
+                    // Each pointer target must be strictly less than the previous target
+                    // to ensure we always move backwards in the message.
+                    if (last_ptr_target) |prev| {
+                        if (ptr_offset >= prev) return error.ForwardPointer;
+                    }
+                    last_ptr_target = ptr_offset;
                     data = msg[ptr_offset..];
                     pos = 0;
                     continue;
@@ -281,6 +292,8 @@ pub const Name = struct {
         var data = self.labels;
         var first = true;
         var pointer_hops: u8 = 0;
+        // SECURITY (SEC-SCAN-07): Track last pointer target to reject forward pointers.
+        var last_ptr_target: ?u16 = null;
 
         while (pos < data.len) {
             const len_byte = data[pos];
@@ -300,6 +313,11 @@ pub const Name = struct {
                         return error.CompressionLoopDetected;
                     }
                     const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | data[pos + 1];
+                    // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
+                    if (last_ptr_target) |prev| {
+                        if (ptr_offset >= prev) return error.ForwardPointer;
+                    }
+                    last_ptr_target = ptr_offset;
                     data = msg[ptr_offset..];
                     pos = 0;
                     continue;
@@ -340,11 +358,13 @@ pub const Name = struct {
     ///
     /// SECURITY: Limits compression pointer hops to prevent infinite loops
     /// from maliciously crafted packets with circular pointers (CWE-835).
-    pub fn labelCount(self: Self, full_message: ?[]const u8) error{CompressionLoopDetected}!usize {
+    pub fn labelCount(self: Self, full_message: ?[]const u8) error{ CompressionLoopDetected, ForwardPointer }!usize {
         var count: usize = 0;
         var pos: usize = 0;
         var data = self.labels;
         var pointer_hops: u8 = 0;
+        // SECURITY (SEC-SCAN-07): Track last pointer target to reject forward pointers.
+        var last_ptr_target: ?u16 = null;
 
         while (pos < data.len) {
             const len_byte = data[pos];
@@ -360,6 +380,11 @@ pub const Name = struct {
                         return error.CompressionLoopDetected;
                     }
                     const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | data[pos + 1];
+                    // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
+                    if (last_ptr_target) |prev| {
+                        if (ptr_offset >= prev) return error.ForwardPointer;
+                    }
+                    last_ptr_target = ptr_offset;
                     data = msg[ptr_offset..];
                     pos = 0;
                     continue;
@@ -381,10 +406,13 @@ pub const Name = struct {
         var self_data = self.labels;
         var self_pos: usize = 0;
         var self_hops: u8 = 0;
+        // SECURITY (SEC-SCAN-07): Track last pointer target to reject forward pointers.
+        var self_last_ptr: ?u16 = null;
 
         var other_data = other.labels;
         var other_pos: usize = 0;
         var other_hops: u8 = 0;
+        var other_last_ptr: ?u16 = null;
 
         while (true) {
             // Follow compression pointers for self
@@ -396,6 +424,11 @@ pub const Name = struct {
                 if (self_msg) |msg| {
                     if (self_pos + 1 >= self_data.len) return false;
                     const ptr = (@as(u16, self_data[self_pos] & 0x3F) << 8) | self_data[self_pos + 1];
+                    // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
+                    if (self_last_ptr) |prev| {
+                        if (ptr >= prev) return false;
+                    }
+                    self_last_ptr = ptr;
                     self_data = msg;
                     self_pos = ptr;
                 } else {
@@ -412,6 +445,11 @@ pub const Name = struct {
                 if (other_msg) |msg| {
                     if (other_pos + 1 >= other_data.len) return false;
                     const ptr = (@as(u16, other_data[other_pos] & 0x3F) << 8) | other_data[other_pos + 1];
+                    // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
+                    if (other_last_ptr) |prev| {
+                        if (ptr >= prev) return false;
+                    }
+                    other_last_ptr = ptr;
                     other_data = msg;
                     other_pos = ptr;
                 } else {
@@ -463,6 +501,8 @@ pub const Name = struct {
         var data = self.labels;
         var first_label_len: usize = 0;
         var pointer_hops: u8 = 0;
+        // SECURITY (SEC-SCAN-07): Track last pointer target to reject forward pointers.
+        var last_ptr_target: ?u16 = null;
 
         // Handle compression first
         while (pos < data.len) {
@@ -482,6 +522,11 @@ pub const Name = struct {
                         return error.CompressionLoopDetected;
                     }
                     const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | data[pos + 1];
+                    // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
+                    if (last_ptr_target) |prev| {
+                        if (ptr_offset >= prev) return error.ForwardPointer;
+                    }
+                    last_ptr_target = ptr_offset;
                     data = msg[ptr_offset..];
                     pos = 0;
                     continue;
@@ -1375,8 +1420,9 @@ test "Name.toStringBuf buffer too small" {
 
 test "GAP-0037: toString detects self-referencing compression pointer" {
     // SECURITY TEST: A self-referencing compression pointer at offset 0
-    // (0xC0, 0x00 points back to offset 0) must return
-    // error.CompressionLoopDetected rather than looping forever.
+    // (0xC0, 0x00 points back to offset 0) must be rejected.
+    // SEC-SCAN-07 forward pointer check catches this: on the second hop,
+    // ptr_offset (0) >= last_ptr_target (0), so ForwardPointer is returned.
     const allocator = std.testing.allocator;
 
     // Craft a buffer with a self-referencing pointer at offset 0
@@ -1390,13 +1436,14 @@ test "GAP-0037: toString detects self-referencing compression pointer" {
         .compressed = true,
     };
 
-    // toString must detect the loop and return the appropriate error
+    // toString must detect the self-reference and return ForwardPointer
     const res = name.toString(allocator, &circular);
-    try std.testing.expectError(error.CompressionLoopDetected, res);
+    try std.testing.expectError(error.ForwardPointer, res);
 }
 
 test "GAP-0037: labelCount detects self-referencing compression pointer" {
     // SECURITY TEST: labelCount must not loop forever on a circular pointer.
+    // SEC-SCAN-07 forward pointer check catches self-references as ForwardPointer.
     const circular = [_]u8{ 0xC0, 0x00 };
 
     const name = Name{
@@ -1406,11 +1453,12 @@ test "GAP-0037: labelCount detects self-referencing compression pointer" {
     };
 
     const res = name.labelCount(&circular);
-    try std.testing.expectError(error.CompressionLoopDetected, res);
+    try std.testing.expectError(error.ForwardPointer, res);
 }
 
 test "GAP-0037: parent detects self-referencing compression pointer" {
     // SECURITY TEST: parent must not loop forever on a circular pointer.
+    // SEC-SCAN-07 forward pointer check catches self-references as ForwardPointer.
     const allocator = std.testing.allocator;
     const circular = [_]u8{ 0xC0, 0x00 };
 
@@ -1421,5 +1469,131 @@ test "GAP-0037: parent detects self-referencing compression pointer" {
     };
 
     const res = name.parent(allocator, &circular);
-    try std.testing.expectError(error.CompressionLoopDetected, res);
+    try std.testing.expectError(error.ForwardPointer, res);
+}
+
+// ============================================================
+// SECURITY TESTS: SEC-SCAN-07 -- Forward pointer rejection in
+// toString(), toStringBuf(), labelCount(), parent() (CWE-822)
+// ============================================================
+
+test "SEC-SCAN-07: toString rejects forward compression pointer chain" {
+    const allocator = std.testing.allocator;
+    // Build a message where:
+    // offset 0-12: "example.com" in wire format = \x07example\x03com\x00
+    // offset 13: ptr to offset 0 (backward, valid)
+    // offset 15: ptr to offset 13 (forward relative to current chain, should be rejected)
+    //
+    // We create a Name whose labels start at offset 13 (ptr->0), which is valid.
+    // Then at offset 0 we place the real name. But to test the *forward pointer
+    // within a chain*, we build a two-hop scenario:
+    // offset 0: ptr to offset 4 (first hop)
+    // offset 2: some label data
+    // offset 4: ptr to offset 6 (second hop -- forward from offset 4, rejected)
+    //
+    // Simpler approach: two pointers in a chain where the second points forward.
+    // msg[0..2] = ptr to offset 4
+    // msg[2..4] = ptr to offset 0 (padding)
+    // msg[4..6] = ptr to offset 4 (self-reference / forward in chain)
+    //
+    // Actually, let's just build a clean test:
+    // msg layout:
+    //   offset 0: \x03com\x00  (5 bytes: label "com" + root)
+    //   offset 5: \xC0\x00     (ptr -> 0, backward, ok for first hop)
+    //   offset 7: \xC0\x05     (ptr -> 5 -- but we won't use this)
+    //
+    // Create a Name whose labels = msg[5..7] = ptr to offset 0.
+    // toString(name, msg) should follow ptr to offset 0 and read "com". PASS.
+    //
+    // For the forward pointer test, we need a Name that follows TWO pointers
+    // where the second is forward relative to the first.
+    // msg layout:
+    //   offset 0: \xC0\x04     (ptr -> 4)
+    //   offset 2: \x03com\x00  (5 bytes)
+    //   offset 7: \xC0\x04     (ptr -> 4, same as first hop)
+    //
+    // Name.labels = msg[0..2] (ptr -> 4).
+    // But offset 4 is inside "com\x00", starting at 'o'. That's not valid DNS.
+    //
+    // Best approach: build a message with two backward pointers where the second
+    // points forward relative to the first target.
+    // msg:
+    //   offset 0: \x03foo\x00         (5 bytes)
+    //   offset 5: \x03bar\xC0\x00     (6 bytes: "bar" label + ptr to offset 0)
+    //   offset 11: \xC0\x05           (ptr -> 5, backward from 11, 1st hop OK)
+    //
+    // Name.labels = msg[11..13]. toString follows:
+    //   hop 1: ptr_offset=5, last_ptr_target=5, data=msg[5..]
+    //   reads "bar", then hits \xC0\x00
+    //   hop 2: ptr_offset=0, 0 < 5 OK, last_ptr_target=0, data=msg[0..]
+    //   reads "foo" -> result = "bar.foo" -- PASS (both backward)
+    //
+    // Now test with forward: build where hop 2 targets offset >= hop 1 target.
+    // msg:
+    //   offset 0: \xC0\x05            (ptr -> 5)
+    //   offset 2: \x03foo\x00         (5 bytes)
+    //   offset 7: \x03bar\xC0\x05     (6 bytes: "bar" + ptr to offset 5)
+    //
+    // Name.labels = msg[7..13]. toString:
+    //   reads "bar", then hits ptr at offset 7+4=11 -> \xC0\x05
+    //   hop 1: ptr_offset=5, last_ptr_target=5, data=msg[5..]="oo\x00..."
+    //   That's not clean. Let me simplify.
+
+    // Simple test: two consecutive pointer hops where second >= first.
+    // msg[0..2] = \xC0\x04  (ptr to 4)
+    // msg[2..4] = \xAA\xBB  (padding)
+    // msg[4..6] = \xC0\x04  (ptr to 4, self-ref)
+    // msg[6..11] = \x03com\x00
+    //
+    // Name.labels = msg[0..2]. toString:
+    //   hop 1: ptr_offset=4, last_ptr_target=4, data=msg[4..]=\xC0\x04...
+    //   hop 2: ptr_offset=4, 4 >= 4 (prev=4) -> REJECTED. ForwardPointer.
+    const msg = [_]u8{ 0xC0, 0x04, 0xAA, 0xBB, 0xC0, 0x04, 0x03, 'c', 'o', 'm', 0x00 };
+    const name = Name{
+        .labels = msg[0..2],
+        .wire_length = 2,
+        .compressed = true,
+    };
+
+    const result = name.toString(allocator, &msg);
+    try std.testing.expectError(error.ForwardPointer, result);
+}
+
+test "SEC-SCAN-07: toStringBuf rejects forward compression pointer chain" {
+    var buf: [256]u8 = undefined;
+    // Same layout: two hops where second target >= first target
+    const msg = [_]u8{ 0xC0, 0x04, 0xAA, 0xBB, 0xC0, 0x04, 0x03, 'c', 'o', 'm', 0x00 };
+    const name = Name{
+        .labels = msg[0..2],
+        .wire_length = 2,
+        .compressed = true,
+    };
+
+    const result = name.toStringBuf(&buf, &msg);
+    try std.testing.expectError(error.ForwardPointer, result);
+}
+
+test "SEC-SCAN-07: labelCount rejects forward compression pointer chain" {
+    const msg = [_]u8{ 0xC0, 0x04, 0xAA, 0xBB, 0xC0, 0x04, 0x03, 'c', 'o', 'm', 0x00 };
+    const name = Name{
+        .labels = msg[0..2],
+        .wire_length = 2,
+        .compressed = true,
+    };
+
+    const result = name.labelCount(&msg);
+    try std.testing.expectError(error.ForwardPointer, result);
+}
+
+test "SEC-SCAN-07: parent rejects forward compression pointer chain" {
+    const allocator = std.testing.allocator;
+    const msg = [_]u8{ 0xC0, 0x04, 0xAA, 0xBB, 0xC0, 0x04, 0x03, 'c', 'o', 'm', 0x00 };
+    const name = Name{
+        .labels = msg[0..2],
+        .wire_length = 2,
+        .compressed = true,
+    };
+
+    const result = name.parent(allocator, &msg);
+    try std.testing.expectError(error.ForwardPointer, result);
 }

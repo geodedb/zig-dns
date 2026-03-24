@@ -167,18 +167,25 @@ pub const DnsCache = struct {
         const clamped_ttl = self.clampTtl(ttl);
         if (clamped_ttl == 0) return;
 
-        const key = try self.makeKey(name, qtype, qclass);
-        defer self.allocator.free(key);
-
         const rdata_copy = try self.allocator.dupe(u8, rdata);
         errdefer self.allocator.free(rdata_copy);
 
-        try self.entries.put(key, CacheEntry{
+        const entry = CacheEntry{
             .entry_type = .positive,
             .rdata = rdata_copy,
             .cached_at = self.clock.now(),
             .original_ttl = clamped_ttl,
-        });
+        };
+
+        // PF-NEW-15: Use stack buffer for key to avoid heap allocation on hot path.
+        var key_buf: [max_key_len]u8 = undefined;
+        if (self.makeKeyBuf(name, qtype, qclass, &key_buf)) |key| {
+            try self.entries.put(key, entry);
+        } else {
+            const heap_key = try self.makeKey(name, qtype, qclass);
+            defer self.allocator.free(heap_key);
+            try self.entries.put(heap_key, entry);
+        }
     }
 
     /// Cache an NXDOMAIN response (RFC 2308 Section 3)
@@ -187,15 +194,22 @@ pub const DnsCache = struct {
         const ttl = self.clampNegativeTtl(soa_ttl orelse self.options.negative_ttl_s);
         if (ttl == 0) return;
 
-        const key = try self.makeKey(name, qtype, qclass);
-        defer self.allocator.free(key);
-
-        try self.entries.put(key, CacheEntry{
+        const entry = CacheEntry{
             .entry_type = .nxdomain,
             .rdata = &[_]u8{},
             .cached_at = self.clock.now(),
             .original_ttl = ttl,
-        });
+        };
+
+        // PF-NEW-15: Use stack buffer for key to avoid heap allocation on hot path.
+        var key_buf: [max_key_len]u8 = undefined;
+        if (self.makeKeyBuf(name, qtype, qclass, &key_buf)) |key| {
+            try self.entries.put(key, entry);
+        } else {
+            const heap_key = try self.makeKey(name, qtype, qclass);
+            defer self.allocator.free(heap_key);
+            try self.entries.put(heap_key, entry);
+        }
     }
 
     /// Cache an NXDOMAIN response from a raw DNS message (RFC 2308)
@@ -211,38 +225,37 @@ pub const DnsCache = struct {
 
         if (ttl == 0) return;
 
-        const key = try self.makeKey(name, qtype, qclass);
-        defer self.allocator.free(key);
-
         // For zone-level caching, also cache at the zone level
         if (self.options.zone_nxdomain) {
             if (soa_data) |soa| {
-                const zone_key = try self.makeNxdomainZoneKey(soa.zone);
-                defer self.allocator.free(zone_key);
-
-                // Don't overwrite existing zone entry with shorter TTL
-                if (self.entries.get(zone_key)) |existing| {
-                    if (!existing.isExpired(self.clock.now())) {
-                        // Zone already cached, just cache specific name
-                    }
+                // PF-NEW-15: Use stack buffer for zone key.
+                var zone_key_buf: [max_key_len]u8 = undefined;
+                if (self.makeNxdomainZoneKeyBuf(soa.zone, &zone_key_buf)) |zone_key| {
+                    try self.putNxdomainZoneEntry(zone_key, soa.zone, ttl);
                 } else {
-                    try self.entries.put(zone_key, CacheEntry{
-                        .entry_type = .nxdomain,
-                        .rdata = &[_]u8{},
-                        .cached_at = self.clock.now(),
-                        .original_ttl = ttl,
-                        .zone_name = try self.allocator.dupe(u8, soa.zone),
-                    });
+                    const heap_zone_key = try self.makeNxdomainZoneKey(soa.zone);
+                    defer self.allocator.free(heap_zone_key);
+                    try self.putNxdomainZoneEntry(heap_zone_key, soa.zone, ttl);
                 }
             }
         }
 
-        try self.entries.put(key, CacheEntry{
+        const entry = CacheEntry{
             .entry_type = .nxdomain,
             .rdata = &[_]u8{},
             .cached_at = self.clock.now(),
             .original_ttl = ttl,
-        });
+        };
+
+        // PF-NEW-15: Use stack buffer for key to avoid heap allocation on hot path.
+        var key_buf: [max_key_len]u8 = undefined;
+        if (self.makeKeyBuf(name, qtype, qclass, &key_buf)) |key| {
+            try self.entries.put(key, entry);
+        } else {
+            const heap_key = try self.makeKey(name, qtype, qclass);
+            defer self.allocator.free(heap_key);
+            try self.entries.put(heap_key, entry);
+        }
     }
 
     /// Cache a NODATA response (RFC 2308 Section 2.2)
@@ -251,15 +264,22 @@ pub const DnsCache = struct {
         const ttl = self.clampNegativeTtl(soa_ttl orelse self.options.negative_ttl_s);
         if (ttl == 0) return;
 
-        const key = try self.makeKey(name, qtype, qclass);
-        defer self.allocator.free(key);
-
-        try self.entries.put(key, CacheEntry{
+        const entry = CacheEntry{
             .entry_type = .nodata,
             .rdata = &[_]u8{},
             .cached_at = self.clock.now(),
             .original_ttl = ttl,
-        });
+        };
+
+        // PF-NEW-15: Use stack buffer for key to avoid heap allocation on hot path.
+        var key_buf: [max_key_len]u8 = undefined;
+        if (self.makeKeyBuf(name, qtype, qclass, &key_buf)) |key| {
+            try self.entries.put(key, entry);
+        } else {
+            const heap_key = try self.makeKey(name, qtype, qclass);
+            defer self.allocator.free(heap_key);
+            try self.entries.put(heap_key, entry);
+        }
     }
 
     /// Cache a NODATA response from a raw DNS message (RFC 2308)
@@ -275,15 +295,22 @@ pub const DnsCache = struct {
 
         if (ttl == 0) return;
 
-        const key = try self.makeKey(name, qtype, qclass);
-        defer self.allocator.free(key);
-
-        try self.entries.put(key, CacheEntry{
+        const entry = CacheEntry{
             .entry_type = .nodata,
             .rdata = &[_]u8{},
             .cached_at = self.clock.now(),
             .original_ttl = ttl,
-        });
+        };
+
+        // PF-NEW-15: Use stack buffer for key to avoid heap allocation on hot path.
+        var key_buf: [max_key_len]u8 = undefined;
+        if (self.makeKeyBuf(name, qtype, qclass, &key_buf)) |key| {
+            try self.entries.put(key, entry);
+        } else {
+            const heap_key = try self.makeKey(name, qtype, qclass);
+            defer self.allocator.free(heap_key);
+            try self.entries.put(heap_key, entry);
+        }
     }
 
     /// Extract SOA record data from a DNS response (RFC 2308)
@@ -308,6 +335,25 @@ pub const DnsCache = struct {
         }
 
         return null;
+    }
+
+    /// Helper: insert an NXDOMAIN zone entry if one does not already exist.
+    /// Accepts a pre-formatted zone key (may live on the stack or heap).
+    fn putNxdomainZoneEntry(self: *Self, zone_key: []const u8, zone: []const u8, ttl: u32) !void {
+        // Don't overwrite existing zone entry with shorter TTL
+        if (self.entries.get(zone_key)) |existing| {
+            if (!existing.isExpired(self.clock.now())) {
+                // Zone already cached, just cache specific name
+                return;
+            }
+        }
+        try self.entries.put(zone_key, CacheEntry{
+            .entry_type = .nxdomain,
+            .rdata = &[_]u8{},
+            .cached_at = self.clock.now(),
+            .original_ttl = ttl,
+            .zone_name = try self.allocator.dupe(u8, zone),
+        });
     }
 
     /// Check if a name is under a cached NXDOMAIN zone

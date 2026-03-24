@@ -298,6 +298,8 @@ pub const DoTTransport = struct {
         const conn = self.connection orelse return error.NoConnection;
 
         // RFC 7858: Use same framing as TCP (2-byte length prefix)
+        // SECURITY (SEC-SCAN-04): Bounds check before @intCast to u16 (CWE-681)
+        if (wire_req.len > std.math.maxInt(u16)) return error.MessageTooLong;
         var length_prefix: [2]u8 = undefined;
         std.mem.writeInt(u16, &length_prefix, @intCast(wire_req.len), .big);
 

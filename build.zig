@@ -353,6 +353,9 @@ pub fn build(b: *std.Build) void {
     const convenience_mod = b.addModule("convenience", .{
         .root_source_file = b.path("src/resolver/convenience.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "types", .module = types_mod },
+        },
     });
 
     // ========================================================================
@@ -1053,6 +1056,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/resolver/convenience.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "types", .module = types_mod },
+            },
         }),
     });
     const run_convenience_test = b.addRunArtifact(convenience_test);

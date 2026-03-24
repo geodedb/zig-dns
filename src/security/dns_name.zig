@@ -124,6 +124,8 @@ pub fn encodeName(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), name
     var iter = std.mem.splitScalar(u8, name, '.');
     while (iter.next()) |label| {
         if (label.len == 0) continue;
+        // SECURITY (SEC-SCAN-05): Validate label length <= 63 before @intCast (CWE-681)
+        if (label.len > 63) return error.LabelTooLong;
         try buffer.append(allocator, @intCast(label.len));
         try buffer.appendSlice(allocator, label);
     }
@@ -136,6 +138,8 @@ pub fn encodeNameLower(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8),
     var iter = std.mem.splitScalar(u8, name, '.');
     while (iter.next()) |label| {
         if (label.len == 0) continue;
+        // SECURITY (SEC-SCAN-05): Validate label length <= 63 before @intCast (CWE-681)
+        if (label.len > 63) return error.LabelTooLong;
         try buffer.append(allocator, @intCast(label.len));
         for (label) |c| {
             try buffer.append(allocator, std.ascii.toLower(c));
@@ -261,4 +265,34 @@ test "SEC-NEW-03: skipRR accepts valid rdlength" {
     const data = "\x00" ++ "\x00\x01" ++ "\x00\x01" ++ "\x00\x00\x00\x00" ++ "\x00\x04" ++ "\xDE\xAD\xBE\xEF";
     const offset = try skipRR(data, 0);
     try std.testing.expectEqual(@as(usize, 15), offset);
+}
+
+test "SEC-SCAN-05: encodeName rejects label longer than 63 bytes" {
+    const allocator = std.testing.allocator;
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(allocator);
+    // Build a name with a 64-byte label (exceeds 63-byte maximum)
+    const long_label = "a" ** 64 ++ ".com";
+    const result = encodeName(allocator, &buffer, long_label);
+    try std.testing.expectError(error.LabelTooLong, result);
+}
+
+test "SEC-SCAN-05: encodeNameLower rejects label longer than 63 bytes" {
+    const allocator = std.testing.allocator;
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(allocator);
+    const long_label = "B" ** 64 ++ ".com";
+    const result = encodeNameLower(allocator, &buffer, long_label);
+    try std.testing.expectError(error.LabelTooLong, result);
+}
+
+test "SEC-SCAN-05: encodeName accepts label exactly 63 bytes" {
+    const allocator = std.testing.allocator;
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(allocator);
+    // 63-byte label is the maximum allowed
+    const max_label = "a" ** 63 ++ ".com";
+    try encodeName(allocator, &buffer, max_label);
+    // First byte should be 63 (the label length)
+    try std.testing.expectEqual(@as(u8, 63), buffer.items[0]);
 }

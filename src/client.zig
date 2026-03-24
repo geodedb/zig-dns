@@ -144,26 +144,26 @@ pub const Client = struct {
             if (cache.get(hostname, qtype, .in)) |entries| {
                 const now = std.time.timestamp();
                 var results: std.ArrayList([]const u8) = .empty;
-                errdefer results.deinit(self.allocator);
+                errdefer {
+                    for (results.items) |item| {
+                        self.allocator.free(item);
+                    }
+                    results.deinit(self.allocator);
+                }
 
                 for (entries) |entry| {
                     if (!entry.isExpired(now)) {
-                        // Format based on type using stack buffers (PF-NEW-10)
-                        if (qtype == .a and entry.rdata.len == 4) {
-                            var a_buf: [15]u8 = undefined;
-                            const formatted = std.fmt.bufPrint(&a_buf, "{d}.{d}.{d}.{d}", .{
-                                entry.rdata[0], entry.rdata[1], entry.rdata[2], entry.rdata[3],
-                            }) catch unreachable;
-                            try results.append(self.allocator, try self.allocator.dupe(u8, formatted));
-                        } else if (qtype == .aaaa and entry.rdata.len == 16) {
-                            var aaaa_buf: [39]u8 = undefined;
-                            const formatted = std.fmt.bufPrint(&aaaa_buf, "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}", .{
-                                entry.rdata[0],  entry.rdata[1],  entry.rdata[2],  entry.rdata[3],
-                                entry.rdata[4],  entry.rdata[5],  entry.rdata[6],  entry.rdata[7],
-                                entry.rdata[8],  entry.rdata[9],  entry.rdata[10], entry.rdata[11],
-                                entry.rdata[12], entry.rdata[13], entry.rdata[14], entry.rdata[15],
-                            }) catch unreachable;
-                            try results.append(self.allocator, try self.allocator.dupe(u8, formatted));
+                        // Format cached rdata based on record type (QM-NEW-03).
+                        // Supported types: A, AAAA, TXT, MX, NS, CNAME, PTR, SRV, SOA.
+                        // Name-based types (MX, NS, CNAME, PTR, SRV, SOA) store raw
+                        // wire-format rdata in the cache. If the name used compression
+                        // pointers referencing the original message (now freed), parsing
+                        // will fail and we skip that entry gracefully -- the caller will
+                        // fall through to the network path on a cache miss.
+                        const formatted_opt: ?[]const u8 = formatCachedRdata(self.allocator, qtype, entry.rdata) catch null;
+                        if (formatted_opt) |formatted| {
+                            errdefer self.allocator.free(formatted);
+                            try results.append(self.allocator, formatted);
                         }
                     }
                 }
@@ -285,7 +285,12 @@ pub const Client = struct {
         defer self.allocator.free(response.data);
 
         var results: std.ArrayList(MXRecord) = .empty;
-        errdefer results.deinit(self.allocator);
+        errdefer {
+            for (results.items) |mx| {
+                self.allocator.free(mx.exchange);
+            }
+            results.deinit(self.allocator);
+        }
 
         var ans_iter = response.answers();
         while (try ans_iter.next()) |rr| {
@@ -295,6 +300,7 @@ pub const Client = struct {
                 var mx_buf: [256]u8 = undefined;
                 const exchange_str = try mx_data.exchange.toStringBuf(&mx_buf, response.data);
                 const exchange = try self.allocator.dupe(u8, exchange_str);
+                errdefer self.allocator.free(exchange);
                 try results.append(self.allocator, .{
                     .preference = mx_data.preference,
                     .exchange = exchange,
@@ -333,7 +339,19 @@ pub const ResolveResult = struct {
     }
 };
 
-/// MX Record result
+/// MX Record result returned by `Client.lookupMX`.
+///
+/// **Ownership:** The caller owns each `exchange` string and the returned
+/// slice itself. Both must be freed with the same allocator that was used
+/// to create the `Client`. For example:
+///
+/// ```zig
+/// const mx_records = try client.lookupMX("example.com");
+/// defer {
+///     for (mx_records) |mx| allocator.free(mx.exchange);
+///     allocator.free(mx_records);
+/// }
+/// ```
 pub const MXRecord = struct {
     preference: u16,
     exchange: []const u8,
@@ -455,6 +473,132 @@ fn buildCnameChain(
     return chain;
 }
 
+/// Format cached rdata bytes into a human-readable string for the given record type.
+///
+/// Supported types (DG-06):
+///   - A:     dotted-decimal IPv4 ("1.2.3.4")
+///   - AAAA:  colon-hex IPv6 ("2001:0db8:...")
+///   - TXT:   concatenated text strings
+///   - MX:    "preference exchange" (e.g., "10 mail.example.com")
+///   - NS, CNAME, PTR: domain name string
+///   - SRV:   "priority weight port target"
+///   - SOA:   "mname rname serial refresh retry expire minimum"
+///
+/// Name-based types (MX, NS, CNAME, PTR, SRV, SOA) attempt to parse DNS
+/// wire-format names from the cached rdata buffer. If the original rdata
+/// used compression pointers (which reference the now-freed full message),
+/// parsing will fail and this function returns `error.InvalidOffset` or
+/// similar -- callers should treat this as a cache miss.
+///
+/// Returns an allocator-owned string on success, or null/error when the
+/// rdata cannot be interpreted for the given type.
+fn formatCachedRdata(allocator: std.mem.Allocator, qtype: Type, rdata: []const u8) ![]const u8 {
+    switch (qtype) {
+        .a => {
+            if (rdata.len != 4) return error.InvalidRdataLength;
+            var buf: [15]u8 = undefined;
+            const formatted = std.fmt.bufPrint(&buf, "{d}.{d}.{d}.{d}", .{
+                rdata[0], rdata[1], rdata[2], rdata[3],
+            }) catch unreachable;
+            return try allocator.dupe(u8, formatted);
+        },
+        .aaaa => {
+            if (rdata.len != 16) return error.InvalidRdataLength;
+            var buf: [39]u8 = undefined;
+            const formatted = std.fmt.bufPrint(&buf, "{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}:{x:0>2}{x:0>2}", .{
+                rdata[0],  rdata[1],  rdata[2],  rdata[3],
+                rdata[4],  rdata[5],  rdata[6],  rdata[7],
+                rdata[8],  rdata[9],  rdata[10], rdata[11],
+                rdata[12], rdata[13], rdata[14], rdata[15],
+            }) catch unreachable;
+            return try allocator.dupe(u8, formatted);
+        },
+        .txt => {
+            // TXT rdata: one or more length-prefixed strings, concatenated.
+            var total_len: usize = 0;
+            var pos: usize = 0;
+            while (pos < rdata.len) {
+                const str_len = rdata[pos];
+                pos += 1;
+                if (pos + str_len > rdata.len) return error.InvalidRdataLength;
+                total_len += str_len;
+                pos += str_len;
+            }
+            const result = try allocator.alloc(u8, total_len);
+            errdefer allocator.free(result);
+            var write_pos: usize = 0;
+            pos = 0;
+            while (pos < rdata.len) {
+                const str_len = rdata[pos];
+                pos += 1;
+                @memcpy(result[write_pos..][0..str_len], rdata[pos..][0..str_len]);
+                write_pos += str_len;
+                pos += str_len;
+            }
+            return result;
+        },
+        .mx => {
+            // MX rdata: 2-byte preference + DNS name.
+            if (rdata.len < 3) return error.InvalidRdataLength;
+            const preference = std.mem.readInt(u16, rdata[0..2], .big);
+            const exchange_name = try name_mod.Name.parse(rdata, 2);
+            var name_buf: [256]u8 = undefined;
+            const exchange_str = try exchange_name.toStringBuf(&name_buf, rdata);
+            // Format: "preference exchange"
+            var fmt_buf: [280]u8 = undefined;
+            const formatted = std.fmt.bufPrint(&fmt_buf, "{d} {s}", .{ preference, exchange_str }) catch
+                return error.NameTooLong;
+            return try allocator.dupe(u8, formatted);
+        },
+        .ns, .cname, .ptr => {
+            // NS/CNAME/PTR rdata: a single DNS name.
+            if (rdata.len < 1) return error.InvalidRdataLength;
+            const parsed_name = try name_mod.Name.parse(rdata, 0);
+            var name_buf: [256]u8 = undefined;
+            const name_str = try parsed_name.toStringBuf(&name_buf, rdata);
+            return try allocator.dupe(u8, name_str);
+        },
+        .srv => {
+            // SRV rdata: 2-byte priority + 2-byte weight + 2-byte port + DNS name.
+            if (rdata.len < 7) return error.InvalidRdataLength;
+            const priority = std.mem.readInt(u16, rdata[0..2], .big);
+            const weight = std.mem.readInt(u16, rdata[2..4], .big);
+            const port = std.mem.readInt(u16, rdata[4..6], .big);
+            const target_name = try name_mod.Name.parse(rdata, 6);
+            var name_buf: [256]u8 = undefined;
+            const target_str = try target_name.toStringBuf(&name_buf, rdata);
+            var fmt_buf: [300]u8 = undefined;
+            const formatted = std.fmt.bufPrint(&fmt_buf, "{d} {d} {d} {s}", .{ priority, weight, port, target_str }) catch
+                return error.NameTooLong;
+            return try allocator.dupe(u8, formatted);
+        },
+        .soa => {
+            // SOA rdata: mname + rname + 5x u32 (serial, refresh, retry, expire, minimum).
+            if (rdata.len < 22) return error.InvalidRdataLength;
+            const mname = try name_mod.Name.parse(rdata, 0);
+            var mname_buf: [256]u8 = undefined;
+            const mname_str = try mname.toStringBuf(&mname_buf, rdata);
+            const rname_offset = mname.wire_length;
+            const rname = try name_mod.Name.parse(rdata, rname_offset);
+            var rname_buf: [256]u8 = undefined;
+            const rname_str = try rname.toStringBuf(&rname_buf, rdata);
+            const int_offset = rname_offset + rname.wire_length;
+            if (int_offset + 20 > rdata.len) return error.InvalidRdataLength;
+            const serial = std.mem.readInt(u32, rdata[int_offset..][0..4], .big);
+            const refresh = std.mem.readInt(u32, rdata[int_offset + 4 ..][0..4], .big);
+            const retry = std.mem.readInt(u32, rdata[int_offset + 8 ..][0..4], .big);
+            const expire = std.mem.readInt(u32, rdata[int_offset + 12 ..][0..4], .big);
+            const minimum = std.mem.readInt(u32, rdata[int_offset + 16 ..][0..4], .big);
+            var fmt_buf: [600]u8 = undefined;
+            const formatted = std.fmt.bufPrint(&fmt_buf, "{s} {s} {d} {d} {d} {d} {d}", .{
+                mname_str, rname_str, serial, refresh, retry, expire, minimum,
+            }) catch return error.NameTooLong;
+            return try allocator.dupe(u8, formatted);
+        },
+        else => return error.UnsupportedRecordType,
+    }
+}
+
 test "Client.init default" {
     // Note: This test requires network access and system DNS
     // In practice, we'd mock the network layer
@@ -549,4 +693,165 @@ test "buildCnameChain from response" {
     try std.testing.expectEqualStrings("www.example.com", chain.items[0]);
     try std.testing.expectEqualStrings("alias.example.net", chain.items[1]);
     try std.testing.expect(nameInChain(chain.items, "ALIAS.EXAMPLE.NET"));
+}
+
+test "formatCachedRdata A record" {
+    const allocator = std.testing.allocator;
+    const rdata = [_]u8{ 93, 184, 216, 34 };
+    const result = try formatCachedRdata(allocator, .a, &rdata);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("93.184.216.34", result);
+}
+
+test "formatCachedRdata AAAA record" {
+    const allocator = std.testing.allocator;
+    const rdata = [_]u8{ 0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 };
+    const result = try formatCachedRdata(allocator, .aaaa, &rdata);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("2001:0db8:0000:0000:0000:0000:0000:0001", result);
+}
+
+test "formatCachedRdata TXT record" {
+    const allocator = std.testing.allocator;
+    // TXT rdata: length-prefixed string "hello"
+    const rdata = [_]u8{ 5, 'h', 'e', 'l', 'l', 'o' };
+    const result = try formatCachedRdata(allocator, .txt, &rdata);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("hello", result);
+}
+
+test "formatCachedRdata TXT record multiple strings" {
+    const allocator = std.testing.allocator;
+    // TXT rdata: "hi" + "there"
+    const rdata = [_]u8{ 2, 'h', 'i', 5, 't', 'h', 'e', 'r', 'e' };
+    const result = try formatCachedRdata(allocator, .txt, &rdata);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("hithere", result);
+}
+
+test "formatCachedRdata MX record uncompressed" {
+    const allocator = std.testing.allocator;
+    // MX rdata: preference=10, exchange=mail.example.com (uncompressed)
+    const rdata = [_]u8{
+        0x00, 0x0A, // preference: 10
+        4,    'm',
+        'a',  'i',
+        'l',  7,
+        'e',  'x',
+        'a',  'm',
+        'p',  'l',
+        'e',  3,
+        'c',  'o',
+        'm',
+        0, // root label
+    };
+    const result = try formatCachedRdata(allocator, .mx, &rdata);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("10 mail.example.com", result);
+}
+
+test "formatCachedRdata NS record uncompressed" {
+    const allocator = std.testing.allocator;
+    // NS rdata: ns1.example.com (uncompressed)
+    const rdata = [_]u8{
+        3,   'n', 's', '1',
+        7,   'e', 'x', 'a',
+        'm', 'p', 'l', 'e',
+        3,   'c', 'o', 'm',
+        0,
+    };
+    const result = try formatCachedRdata(allocator, .ns, &rdata);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("ns1.example.com", result);
+}
+
+test "formatCachedRdata CNAME record uncompressed" {
+    const allocator = std.testing.allocator;
+    const rdata = [_]u8{
+        3,   'w', 'w', 'w',
+        7,   'e', 'x', 'a',
+        'm', 'p', 'l', 'e',
+        3,   'c', 'o', 'm',
+        0,
+    };
+    const result = try formatCachedRdata(allocator, .cname, &rdata);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("www.example.com", result);
+}
+
+test "formatCachedRdata SRV record uncompressed" {
+    const allocator = std.testing.allocator;
+    // SRV rdata: priority=10 weight=20 port=5060 target=sip.example.com
+    const rdata = [_]u8{
+        0x00, 0x0A, // priority: 10
+        0x00, 0x14, // weight: 20
+        0x13, 0xC4, // port: 5060
+        3,    's',
+        'i',  'p',
+        7,    'e',
+        'x',  'a',
+        'm',  'p',
+        'l',  'e',
+        3,    'c',
+        'o',  'm',
+        0,
+    };
+    const result = try formatCachedRdata(allocator, .srv, &rdata);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("10 20 5060 sip.example.com", result);
+}
+
+test "formatCachedRdata SOA record uncompressed" {
+    const allocator = std.testing.allocator;
+    // SOA rdata: mname=ns.example.com rname=admin.example.com serial=1 refresh=3600 retry=900 expire=86400 minimum=300
+    const rdata = [_]u8{
+        2,   'n', 's',
+        7,   'e', 'x',
+        'a', 'm', 'p',
+        'l', 'e', 3,
+        'c', 'o', 'm',
+        0, // mname: ns.example.com
+        5,
+        'a',
+        'd',
+        'm',
+        'i',
+        'n',
+        7,
+        'e',
+        'x',
+        'a',
+        'm',
+        'p',
+        'l',
+        'e',
+        3,
+        'c',
+        'o',
+        'm',
+        0, // rname: admin.example.com
+        0x00, 0x00, 0x00, 0x01, // serial: 1
+        0x00, 0x00, 0x0E, 0x10, // refresh: 3600
+        0x00, 0x00, 0x03, 0x84, // retry: 900
+        0x00, 0x01, 0x51, 0x80, // expire: 86400
+        0x00, 0x00, 0x01, 0x2C, // minimum: 300
+    };
+    const result = try formatCachedRdata(allocator, .soa, &rdata);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("ns.example.com admin.example.com 1 3600 900 86400 300", result);
+}
+
+test "formatCachedRdata A record wrong length" {
+    const allocator = std.testing.allocator;
+    const rdata = [_]u8{ 1, 2, 3 }; // too short
+    try std.testing.expectError(error.InvalidRdataLength, formatCachedRdata(allocator, .a, &rdata));
+}
+
+test "formatCachedRdata compressed name returns error" {
+    const allocator = std.testing.allocator;
+    // NS rdata with a compression pointer (0xC0, 0x0C) -- invalid without full message.
+    // Name.parse detects that the pointer target (offset 12) exceeds the current
+    // position in the small 2-byte buffer, returning ForwardPointer.
+    const rdata = [_]u8{ 0xC0, 0x0C };
+    try std.testing.expectError(error.ForwardPointer, formatCachedRdata(allocator, .ns, &rdata));
 }

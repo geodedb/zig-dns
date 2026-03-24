@@ -167,9 +167,11 @@ pub const StubResolver = struct {
         for (self.config.servers) |server| {
             var attempt: u8 = 0;
             while (attempt < self.config.retries) : (attempt += 1) {
-                const response = self.sendQuery(query, server) catch {
-                    // Error occurred, try next attempt/server
-                    continue;
+                const response = self.sendQuery(query, server) catch |err| switch (err) {
+                    // OOM is fatal and must not be silently swallowed (QS-NEW-05)
+                    error.OutOfMemory => return error.OutOfMemory,
+                    // Other errors (network, timeout): try next attempt/server
+                    else => continue,
                 };
 
                 const msg = Message.parse(response) catch {
@@ -183,7 +185,10 @@ pub const StubResolver = struct {
 
                 // Check for truncation
                 if (msg.header.tc and self.config.use_tcp_on_truncation) {
-                    const tcp_response = self.sendQueryTcp(query, server) catch continue;
+                    const tcp_response = self.sendQueryTcp(query, server) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => continue,
+                    };
                     self.allocator.free(response);
                     return Message.parse(tcp_response) catch continue;
                 }

@@ -151,6 +151,27 @@ pub const TsigKey = struct {
             .secret = secret,
         };
     }
+
+    /// SECURITY (SEC-SCAN-01): Zero secret material on cleanup to prevent
+    /// residual secrets in freed memory (CWE-244: Heap Inspection).
+    /// If the secret was heap-allocated (via initBase64), pass the same
+    /// allocator to also free the backing memory after zeroing.
+    pub fn deinit(self: *Self, allocator: ?std.mem.Allocator) void {
+        // Zero the secret bytes in-place for defense-in-depth.
+        // @constCast is required because the field is []const u8; we own
+        // the backing memory when it was allocated via initBase64.
+        // @volatileCast prevents the compiler from optimizing out the zeroing.
+        if (self.secret.len > 0) {
+            const mutable = @constCast(self.secret);
+            const volatile_ptr: [*]volatile u8 = @ptrCast(mutable.ptr);
+            const volatile_slice: []volatile u8 = volatile_ptr[0..mutable.len];
+            std.crypto.secureZero(u8, volatile_slice);
+        }
+        if (allocator) |alloc| {
+            alloc.free(self.secret);
+        }
+        self.secret = &.{};
+    }
 };
 
 /// TSIG Record data (parsed from wire format)
@@ -551,7 +572,9 @@ pub const TsigContext = struct {
         try buffer.appendSlice(self.allocator, message);
 
         // Update ARCOUNT
+        // SECURITY (SEC-SCAN-02): Check for u16 overflow before incrementing (CWE-190)
         const arcount = std.mem.readInt(u16, message[10..12], .big);
+        if (arcount == std.math.maxInt(u16)) return error.ArcountOverflow;
         std.mem.writeInt(u16, buffer.items[10..12], arcount + 1, .big);
 
         // Add TSIG RR
@@ -568,6 +591,8 @@ pub const TsigContext = struct {
         try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, 0)));
 
         // RDLENGTH
+        // SECURITY (SEC-SCAN-06): Bounds check before @intCast to u16 (CWE-681)
+        if (tsig_rdata.len > std.math.maxInt(u16)) return error.RdlengthOverflow;
         try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(tsig_rdata.len))));
 
         // RDATA
@@ -1009,4 +1034,55 @@ test "SEC-NEW-04: TsigRecord.parse rejects truncated other_data" {
 
     const result = TsigRecord.parse(allocator, rdata_buf[0..offset]);
     try std.testing.expectError(error.InvalidTsigRecord, result);
+}
+
+test "SEC-SCAN-01: TsigKey.deinit zeroes secret material" {
+    const allocator = std.testing.allocator;
+
+    // Allocate a secret on the heap so we can inspect memory after zeroing
+    const secret = try allocator.dupe(u8, &[_]u8{ 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE });
+    var key = TsigKey.init("test-key", .hmac_sha256, secret);
+
+    // Verify secret is non-zero before deinit
+    var any_nonzero = false;
+    for (secret) |b| {
+        if (b != 0) any_nonzero = true;
+    }
+    try std.testing.expect(any_nonzero);
+
+    // deinit should zero and free the secret
+    key.deinit(allocator);
+
+    // After deinit, the key's secret slice should be empty
+    try std.testing.expectEqual(@as(usize, 0), key.secret.len);
+}
+
+test "SEC-SCAN-01: TsigKey.deinit without allocator only zeroes" {
+    // For stack-allocated or borrowed secrets, pass null allocator
+    var secret_buf = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    var key = TsigKey.init("test-key", .hmac_sha256, &secret_buf);
+
+    key.deinit(null);
+
+    // Secret bytes should be zeroed
+    for (secret_buf) |b| {
+        try std.testing.expectEqual(@as(u8, 0), b);
+    }
+}
+
+test "SEC-SCAN-02: TSIG appendTsig rejects ARCOUNT overflow" {
+    const allocator = std.testing.allocator;
+
+    const key = TsigKey.init("test-key.example.com", .hmac_sha256, &[_]u8{0} ** 32);
+    var ctx = TsigContext.initNoWarn(allocator, key);
+
+    // Build a message with ARCOUNT = 65535 (max u16)
+    var msg: [16]u8 = .{0} ** 16;
+    // Set ARCOUNT to 0xFFFF
+    msg[10] = 0xFF;
+    msg[11] = 0xFF;
+
+    // sign() internally calls appendTsig which should detect the overflow
+    const result = ctx.sign(&msg);
+    try std.testing.expectError(error.ArcountOverflow, result);
 }

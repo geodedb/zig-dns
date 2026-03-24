@@ -184,7 +184,17 @@ pub const RecursiveResolver = struct {
         return self.resolveIterative(&state);
     }
 
-    /// Internal iterative resolution
+    /// Iteratively resolves a DNS query starting from the root servers,
+    /// following referrals down the delegation chain until an authoritative
+    /// answer is found or an error condition is reached.
+    ///
+    /// Implements the standard recursive resolution algorithm (RFC 1034 Section 5.3.3)
+    /// with support for QNAME minimization (RFC 9156), 0x20 case randomization for
+    /// cache poisoning protection, and CNAME chain following.
+    ///
+    /// The resolution loop processes referrals by extracting NS records and their
+    /// glue addresses from responses, then querying the referred servers until an
+    /// answer, NXDOMAIN, or NODATA response is received.
     fn resolveIterative(self: *Self, state: *ResolutionState) !ResolveResult {
         var current_servers: []const ServerAddress = self.root_servers;
         // Track dynamically-allocated server list for proper memory management.
@@ -202,7 +212,7 @@ pub const RecursiveResolver = struct {
         outer: while (state.query_count < self.config.max_queries) {
             // Determine what to query based on QNAME minimization
             const query_name = if (self.config.qname_minimization)
-                try self.getMinimizedQname(state.original_qname, current_zone, zone_depth)
+                try self.getMinimizedQname(state.original_qname, zone_depth)
             else
                 try self.allocator.dupe(u8, state.original_qname);
             defer self.allocator.free(query_name);
@@ -341,7 +351,8 @@ pub const RecursiveResolver = struct {
                                     // Need to resolve NS hostname (glue missing)
                                     // Propagate parent state's depth and query budget to
                                     // prevent amplification via deeply nested NS chains (PF-31).
-                                    const ns_result = self.resolveNsAddress(ns.name, state) orelse continue;
+                                    // OOM is propagated; other resolution failures skip this NS (QM-NEW-05).
+                                    const ns_result = (try self.resolveNsAddress(ns.name, state)) orelse continue;
                                     try new_servers.append(self.allocator, ns_result);
                                 }
                             }
@@ -405,13 +416,16 @@ pub const RecursiveResolver = struct {
         return error.MaxQueriesExceeded;
     }
 
-    /// Get minimized QNAME for a given zone depth.
+    /// Implements QNAME minimization per RFC 9156.
     ///
-    /// Returns the rightmost `depth + 1` labels of `original`.
+    /// Returns the rightmost `depth + 1` labels of `original`, allowing the
+    /// resolver to reveal only the minimal number of labels needed at each
+    /// delegation step. This limits the amount of query name information
+    /// exposed to authoritative servers, improving privacy.
+    ///
     /// Single-pass: collects labels into a stack array once, then builds
     /// the result from the appropriate suffix (PF-23).
-    fn getMinimizedQname(self: *Self, original: []const u8, current_zone: []const u8, depth: usize) ![]u8 {
-        _ = current_zone;
+    fn getMinimizedQname(self: *Self, original: []const u8, depth: usize) ![]u8 {
 
         // Single pass: collect non-empty labels into a stack-local array.
         var labels: [128][]const u8 = undefined;
@@ -668,7 +682,9 @@ pub const RecursiveResolver = struct {
     /// Resolve NS address when glue is missing.
     /// Propagates the parent's query_count and depth to enforce global limits,
     /// preventing amplification/DoS via deeply nested NS chains (PF-31).
-    fn resolveNsAddress(self: *Self, ns_name: []const u8, parent_state: *ResolutionState) ?ServerAddress {
+    /// OutOfMemory is propagated to the caller rather than swallowed, since OOM
+    /// is a fatal condition that should not be silently ignored (QM-NEW-05).
+    fn resolveNsAddress(self: *Self, ns_name: []const u8, parent_state: *ResolutionState) error{OutOfMemory}!?ServerAddress {
         // Guard: reject if parent depth already exceeds the NS resolution limit
         if (parent_state.depth >= max_ns_resolve_depth) return null;
 
@@ -686,7 +702,10 @@ pub const RecursiveResolver = struct {
         };
         defer child_state.deinit(self.allocator);
 
-        const result = self.resolveIterative(&child_state) catch return null;
+        const result = self.resolveIterative(&child_state) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return null,
+        };
         defer if (result.answer) |a| self.allocator.free(a);
 
         // Propagate the child's query_count back to the parent so the
@@ -797,7 +816,12 @@ fn isSubdomainOf(name: []const u8, zone: []const u8) bool {
     return clean_name[suffix_start - 1] == '.';
 }
 
-/// Internal resolution state
+/// Tracks state for a single iterative DNS resolution.
+///
+/// Maintains the current query name (which may change when following CNAME chains),
+/// the original query type, recursion depth and query budget counters to prevent
+/// infinite loops, the current delegation zone, the CNAME chain for loop detection,
+/// and the last query name used for 0x20 case randomization verification.
 const ResolutionState = struct {
     original_qname: []const u8,
     qtype: Type,
@@ -1067,22 +1091,22 @@ test "RecursiveResolver.getMinimizedQname" {
     defer resolver.deinit();
 
     // depth=0: just TLD
-    const q0 = try resolver.getMinimizedQname("www.example.com", ".", 0);
+    const q0 = try resolver.getMinimizedQname("www.example.com", 0);
     defer allocator.free(q0);
     try std.testing.expectEqualStrings("com", q0);
 
     // depth=1: second-level + TLD
-    const q1 = try resolver.getMinimizedQname("www.example.com", ".", 1);
+    const q1 = try resolver.getMinimizedQname("www.example.com", 1);
     defer allocator.free(q1);
     try std.testing.expectEqualStrings("example.com", q1);
 
     // depth=2: full name
-    const q2 = try resolver.getMinimizedQname("www.example.com", ".", 2);
+    const q2 = try resolver.getMinimizedQname("www.example.com", 2);
     defer allocator.free(q2);
     try std.testing.expectEqualStrings("www.example.com", q2);
 
     // depth >= labels: full name
-    const q3 = try resolver.getMinimizedQname("www.example.com", ".", 10);
+    const q3 = try resolver.getMinimizedQname("www.example.com", 10);
     defer allocator.free(q3);
     try std.testing.expectEqualStrings("www.example.com", q3);
 }
@@ -1097,24 +1121,24 @@ test "PF-NEW-04: getMinimizedQname uses stack buffer (no ArrayList)" {
     defer resolver.deinit();
 
     // Test with a deeper domain (4 labels)
-    const q0 = try resolver.getMinimizedQname("a.b.example.com", ".", 0);
+    const q0 = try resolver.getMinimizedQname("a.b.example.com", 0);
     defer allocator.free(q0);
     try std.testing.expectEqualStrings("com", q0);
 
-    const q1 = try resolver.getMinimizedQname("a.b.example.com", ".", 1);
+    const q1 = try resolver.getMinimizedQname("a.b.example.com", 1);
     defer allocator.free(q1);
     try std.testing.expectEqualStrings("example.com", q1);
 
-    const q2 = try resolver.getMinimizedQname("a.b.example.com", ".", 2);
+    const q2 = try resolver.getMinimizedQname("a.b.example.com", 2);
     defer allocator.free(q2);
     try std.testing.expectEqualStrings("b.example.com", q2);
 
-    const q3 = try resolver.getMinimizedQname("a.b.example.com", ".", 3);
+    const q3 = try resolver.getMinimizedQname("a.b.example.com", 3);
     defer allocator.free(q3);
     try std.testing.expectEqualStrings("a.b.example.com", q3);
 
     // Single label domain
-    const qs = try resolver.getMinimizedQname("localhost", ".", 0);
+    const qs = try resolver.getMinimizedQname("localhost", 0);
     defer allocator.free(qs);
     try std.testing.expectEqualStrings("localhost", qs);
 }
@@ -1283,7 +1307,7 @@ test "PF-31: resolveNsAddress respects depth guard" {
     defer parent_state.deinit(allocator);
 
     // resolveNsAddress should return null due to depth exceeded
-    const result = resolver.resolveNsAddress("ns1.example.com", &parent_state);
+    const result = try resolver.resolveNsAddress("ns1.example.com", &parent_state);
     try std.testing.expect(result == null);
 }
 
@@ -1306,7 +1330,7 @@ test "PF-31: resolveNsAddress respects query budget" {
     defer parent_state.deinit(allocator);
 
     // resolveNsAddress should return null due to budget exhausted
-    const result = resolver.resolveNsAddress("ns1.example.com", &parent_state);
+    const result = try resolver.resolveNsAddress("ns1.example.com", &parent_state);
     try std.testing.expect(result == null);
 }
 

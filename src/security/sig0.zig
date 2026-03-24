@@ -342,7 +342,9 @@ pub const Sig0Context = struct {
         try result.appendSlice(self.allocator, message);
 
         // Update ARCOUNT
+        // SECURITY (SEC-SCAN-02): Check for u16 overflow before incrementing (CWE-190)
         const arcount = std.mem.readInt(u16, message[10..12], .big);
+        if (arcount == std.math.maxInt(u16)) return error.ArcountOverflow;
         std.mem.writeInt(u16, result.items[10..12], arcount + 1, .big);
 
         // Add SIG RR
@@ -356,7 +358,9 @@ pub const Sig0Context = struct {
         try result.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, 0)));
 
         // RDLENGTH
+        // SECURITY (SEC-SCAN-06): Bounds check before @intCast to u16 (CWE-681)
         const rdlength = sig_data.len + signature.len;
+        if (rdlength > std.math.maxInt(u16)) return error.RdlengthOverflow;
         try result.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(rdlength))));
 
         // RDATA
@@ -858,4 +862,22 @@ test "SEC-NEW-02: extractSig0 rejects rdlength exceeding message" {
     // Only provide 28 bytes total -- rdlength claims 255 but only ~5 bytes remain
     const result = ctx.verify(msg[0..28], &public_key);
     try std.testing.expectError(error.InvalidMessage, result);
+}
+
+test "SEC-SCAN-02: SIG(0) sign rejects ARCOUNT overflow" {
+    const allocator = std.testing.allocator;
+
+    var key_pair = try Sig0KeyPair.generate(allocator, "test.example.com", .ed25519);
+    defer key_pair.deinit(allocator);
+
+    var ctx = Sig0Context.init(allocator);
+
+    // Build a message with ARCOUNT = 65535 (max u16)
+    var msg: [16]u8 = .{0} ** 16;
+    msg[10] = 0xFF;
+    msg[11] = 0xFF;
+
+    // sign() should detect the ARCOUNT overflow
+    const result = ctx.sign(&msg, &key_pair);
+    try std.testing.expectError(error.ArcountOverflow, result);
 }

@@ -28,6 +28,14 @@ pub const max_udp_size = 512;
 /// Maximum DNS message size with EDNS
 pub const max_edns_size = 65535;
 
+/// Maximum number of records allowed per section (qdcount, ancount, nscount, arcount).
+/// This bounds-checks against malicious or malformed messages that claim an
+/// unreasonably large record count, preventing CPU-bound parse loops.
+/// Normal DNS messages rarely exceed a few hundred records per section;
+/// 4096 is generous enough for legitimate zone transfers while still
+/// protecting against abuse.
+pub const max_section_count = 4096;
+
 /// DNS Message (RFC 1035 Section 4)
 pub const Message = struct {
     /// Raw message data
@@ -55,6 +63,16 @@ pub const Message = struct {
     /// and additional() are O(1) on every call.
     pub fn parse(data: []const u8) !Self {
         const header = try Header.parse(data);
+
+        // ADV-05: Reject messages with unreasonably large section counts
+        // to prevent CPU-bound parse loops from malicious/malformed packets.
+        if (header.qdcount > max_section_count or
+            header.ancount > max_section_count or
+            header.nscount > max_section_count or
+            header.arcount > max_section_count)
+        {
+            return error.MessageTooLarge;
+        }
 
         // Compute answer_offset by skipping questions
         var offset: usize = header_mod.header_size;
@@ -507,4 +525,82 @@ test "Message section offsets with empty sections" {
     // additional() returns no records
     var add_iter = msg.additional();
     try std.testing.expect(try add_iter.next() == null);
+}
+
+test "Message.parse rejects excessive section counts" {
+    // Craft a header with ANCOUNT exceeding max_section_count (4096).
+    // We set ANCOUNT to 0xFFFF (65535) which far exceeds the limit.
+    const data = [_]u8{
+        // Header
+        0x12, 0x34, // ID
+        0x81, 0x80, // Flags: QR=1, RD=1, RA=1
+        0x00, 0x00, // QDCOUNT: 0
+        0xFF, 0xFF, // ANCOUNT: 65535 (exceeds max_section_count)
+        0x00, 0x00, // NSCOUNT: 0
+        0x00, 0x00, // ARCOUNT: 0
+    };
+
+    try std.testing.expectError(error.MessageTooLarge, Message.parse(&data));
+}
+
+test "Message.parse rejects excessive qdcount" {
+    const data = [_]u8{
+        0x12, 0x34, // ID
+        0x01, 0x00, // Flags
+        0xFF, 0xFF, // QDCOUNT: 65535
+        0x00, 0x00, // ANCOUNT: 0
+        0x00, 0x00, // NSCOUNT: 0
+        0x00, 0x00, // ARCOUNT: 0
+    };
+
+    try std.testing.expectError(error.MessageTooLarge, Message.parse(&data));
+}
+
+test "Message.parse rejects excessive nscount" {
+    const data = [_]u8{
+        0x12, 0x34, // ID
+        0x81, 0x80, // Flags
+        0x00, 0x00, // QDCOUNT: 0
+        0x00, 0x00, // ANCOUNT: 0
+        0x10, 0x01, // NSCOUNT: 4097 (just over max_section_count)
+        0x00, 0x00, // ARCOUNT: 0
+    };
+
+    try std.testing.expectError(error.MessageTooLarge, Message.parse(&data));
+}
+
+test "Message.parse rejects excessive arcount" {
+    const data = [_]u8{
+        0x12, 0x34, // ID
+        0x81, 0x80, // Flags
+        0x00, 0x00, // QDCOUNT: 0
+        0x00, 0x00, // ANCOUNT: 0
+        0x00, 0x00, // NSCOUNT: 0
+        0x10, 0x01, // ARCOUNT: 4097
+    };
+
+    try std.testing.expectError(error.MessageTooLarge, Message.parse(&data));
+}
+
+test "Message.parse accepts count at max_section_count boundary" {
+    // QDCOUNT = 4096 (0x1000) should be accepted (not exceed max).
+    // It will fail later during question parsing due to insufficient data,
+    // but it should NOT fail with MessageTooLarge.
+    const data = [_]u8{
+        0x12, 0x34, // ID
+        0x01, 0x00, // Flags
+        0x10, 0x00, // QDCOUNT: 4096 (exactly max_section_count)
+        0x00, 0x00, // ANCOUNT: 0
+        0x00, 0x00, // NSCOUNT: 0
+        0x00, 0x00, // ARCOUNT: 0
+    };
+
+    // Should not get MessageTooLarge; will get a different error from trying
+    // to parse 4096 questions from 0 bytes of data.
+    const result = Message.parse(&data);
+    if (result) |_| {
+        // If it somehow parsed (unlikely), that's fine -- no MessageTooLarge
+    } else |err| {
+        try std.testing.expect(err != error.MessageTooLarge);
+    }
 }

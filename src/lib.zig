@@ -96,11 +96,11 @@ pub const dnssec = @import("dnssec");
 pub const zone_transfer = @import("zone_transfer");
 pub const failover = @import("failover");
 pub const split_dns = @import("split_dns");
-pub const rpz = @import("rpz");
+pub const rpz = @import("rpz"); // Public API: no internal callers; kept for external consumers
 pub const logging = @import("logging");
-pub const config = @import("config");
-pub const convenience = @import("convenience");
-pub const cache_prefetch = @import("cache_prefetch");
+pub const config = @import("config"); // Public API: no internal callers; kept for external consumers
+pub const convenience = @import("convenience"); // Public API: no internal callers; kept for external consumers
+pub const cache_prefetch = @import("cache_prefetch"); // Public API: no internal callers; kept for external consumers
 
 // Transports
 pub const transport_udp = @import("transport_udp");

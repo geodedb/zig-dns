@@ -71,11 +71,23 @@ pub const ResourceRecord = struct {
     /// Compute the byte offset of `self.rdata` within `full_message`, plus
     /// an optional `additional_offset` into the rdata payload.
     ///
-    /// This relies on the aliasing invariant: `self.rdata.ptr` must point
-    /// into `full_message`.  The returned value is suitable for passing to
-    /// `Name.parse(full_message, offset)`.
-    fn rdataOffset(self: Self, full_message: []const u8, additional_offset: usize) usize {
-        return (@intFromPtr(self.rdata.ptr) - @intFromPtr(full_message.ptr)) + additional_offset;
+    /// **Invariant (DG-04):** The returned offset must point within
+    /// `full_message` (i.e., be less than `full_message.len`).  This is
+    /// guaranteed when `self.rdata` is a sub-slice of `full_message`, which
+    /// holds for all records produced by `ResourceRecord.parse()`.
+    ///
+    /// Returns `error.InvalidOffset` if the computed offset would exceed
+    /// the message buffer length, which indicates a violation of the
+    /// aliasing invariant (e.g., `full_message` is not the original buffer).
+    fn rdataOffset(self: Self, full_message: []const u8, additional_offset: usize) !usize {
+        const rdata_addr = @intFromPtr(self.rdata.ptr);
+        const msg_addr = @intFromPtr(full_message.ptr);
+        // Guard: rdata must point within (or at the end of) full_message.
+        if (rdata_addr < msg_addr) return error.InvalidOffset;
+        const base_offset = rdata_addr - msg_addr;
+        const result = base_offset + additional_offset;
+        if (result > full_message.len) return error.InvalidOffset;
+        return result;
     }
 
     /// Parse a resource record from wire format
@@ -149,7 +161,7 @@ pub const ResourceRecord = struct {
             else => return error.WrongRecordType,
         }
 
-        return Name.parse(full_message, self.rdataOffset(full_message, 0));
+        return Name.parse(full_message, try self.rdataOffset(full_message, 0));
     }
 
     /// Parse RDATA as MX record
@@ -169,7 +181,7 @@ pub const ResourceRecord = struct {
         const preference = std.mem.readInt(u16, self.rdata[0..2], .big);
 
         // Parse the exchange name (starts after 2-byte preference field)
-        const exchange = try Name.parse(full_message, self.rdataOffset(full_message, 2));
+        const exchange = try Name.parse(full_message, try self.rdataOffset(full_message, 2));
 
         return MxData{
             .preference = preference,
@@ -193,7 +205,7 @@ pub const ResourceRecord = struct {
             return error.WrongRecordType;
         }
 
-        var offset = self.rdataOffset(full_message, 0);
+        var offset = try self.rdataOffset(full_message, 0);
 
         const mname = try Name.parse(full_message, offset);
         offset += mname.wire_length;
@@ -326,7 +338,7 @@ pub const ResourceRecord = struct {
         const port = std.mem.readInt(u16, self.rdata[4..6], .big);
 
         // Parse the target name (starts after 6-byte priority/weight/port fields)
-        const target = try Name.parse(full_message, self.rdataOffset(full_message, 6));
+        const target = try Name.parse(full_message, try self.rdataOffset(full_message, 6));
 
         return SrvData{
             .priority = priority,
@@ -537,7 +549,7 @@ pub const ResourceRecord = struct {
         const priority = std.mem.readInt(u16, self.rdata[0..2], .big);
 
         // Parse the target name (starts after 2-byte priority field)
-        const target_offset = self.rdataOffset(full_message, 2);
+        const target_offset = try self.rdataOffset(full_message, 2);
 
         const target = try Name.parse(full_message, target_offset);
 
@@ -859,7 +871,7 @@ pub const ResourceRecord = struct {
         const key_tag = std.mem.readInt(u16, self.rdata[16..18], .big);
 
         // Parse signer's name (starts after 18-byte fixed fields)
-        const signer = try Name.parse(full_message, self.rdataOffset(full_message, 18));
+        const signer = try Name.parse(full_message, try self.rdataOffset(full_message, 18));
         const sig_offset = 18 + signer.wire_length;
 
         if (sig_offset > self.rdlength) {
@@ -940,7 +952,7 @@ pub const ResourceRecord = struct {
             return error.InvalidRdataLength;
         }
 
-        const next_domain = try Name.parse(full_message, self.rdataOffset(full_message, 0));
+        const next_domain = try Name.parse(full_message, try self.rdataOffset(full_message, 0));
 
         const bitmap_start = next_domain.wire_length;
         const type_bitmaps = if (bitmap_start < self.rdlength)
