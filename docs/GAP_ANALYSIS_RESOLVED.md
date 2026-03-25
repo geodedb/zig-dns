@@ -1,6 +1,6 @@
 # Gap Analysis -- Resolved
 
-Last updated: 2026-03-25 (Final closure: GAP-0064, GAP-0065, SEC-AUDIT-06 through SEC-AUDIT-10, QR-01 through QR-R01, PF-NEW-14 all resolved. 499/499 tests passing.)
+Last updated: 2026-03-25 (Final closure: GAP-0066/0067/0068 wire-format, SEC-AUDIT-11/12/13 hardening, QR-NEW-01/02 resolved, QR-NEW-03/04 won't do. 525/525 tests passing.)
 
 Items below were identified in prior gap analyses and verified as resolved. They are listed here for audit trail purposes.
 
@@ -1269,6 +1269,64 @@ The following 15 items were resolved in the final gap closure round. 499/499 tes
 - **Category:** Performance (P3, PerfScore 32)
 - **Resolution:** `extractReferral` NS name conversion changed from `toString` (ArrayList with 3-5 allocs per name) to `toStringBuf` with stack buffer + `allocator.dupe` (single allocation). Matches pattern applied to all other toString sites in recursive.zig.
 - **Evidence:** `src/recursive.zig:666-670` -- `toStringBuf(&ns_buf, response)` + `allocator.dupe(u8, ns_str)`
+- **Resolved date:** 2026-03-25
+
+### GAP-0066: validateNodataWithNsec wire-format vs dotted-string mismatch [RESOLVED]
+- **Category:** Bug (High)
+- **Resolution:** `dottedToWire` conversion added at entry point of `validateNodataWithNsec`. The function now converts dotted-string `qname` to wire-format before comparison with `wireNamesEqlInsensitive`.
+- **Evidence:** `src/resolver/dnssec.zig` -- `dottedToWire(qname)` called before `wireNamesEqlInsensitive`. 1 new test.
+- **Resolved date:** 2026-03-25
+
+### GAP-0067: validateNxdomainWithNsec wire-format vs dotted-string mismatch [RESOLVED]
+- **Category:** Bug (High)
+- **Resolution:** `dottedToWire` conversion added at entry point of `validateNxdomainWithNsec`. The function now converts dotted-string `qname` to wire-format before passing to `nameInNsecRange`.
+- **Evidence:** `src/resolver/dnssec.zig` -- `dottedToWire(qname)` called before `nameInNsecRange`. 1 new test.
+- **Resolved date:** 2026-03-25
+
+### GAP-0068: computeNsec3Hash receives dotted-string instead of wire-format [RESOLVED]
+- **Category:** Bug (Medium)
+- **Resolution:** `dottedToWire` conversion added at both NSEC3 validation entry points (`validateNxdomainWithNsec3`, `validateNodataWithNsec3`). `computeNsec3Hash` now receives wire-format input, producing correct SHA-1 digests per RFC 5155 Section 5.
+- **Evidence:** `src/resolver/dnssec.zig` -- `dottedToWire(qname)` in both NSEC3 entry points. 1 new test.
+- **Resolved date:** 2026-03-25
+
+### SEC-AUDIT-11: validateChainOfTrust ignores target_zone parameter [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** `target_zone` parameter is now used via `isNameInZone` to verify that DNSKEY/DS records belong to the expected zone during chain-of-trust validation. Cross-zone records are rejected.
+- **Evidence:** `src/resolver/dnssec.zig` -- `isNameInZone(target_zone, ...)` check added. 1 new test for cross-zone DNSKEY rejection.
+- **Resolved date:** 2026-03-25
+
+### SEC-AUDIT-12: extractWireLabels silently truncates malformed names [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** `extractWireLabels` now returns an error union (`!LabelList`). Compression pointers in canonical wire-format and out-of-bounds label lengths return `error.MalformedName`. `compareDnsNames` propagates the error to callers.
+- **Evidence:** `src/resolver/dnssec.zig` -- error union return type. 4 new tests: compression pointer rejection, OOB label length, empty input, valid wire names.
+- **Resolved date:** 2026-03-25
+
+### SEC-AUDIT-13: base32hexDecode does not reject non-zero trailing bits [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** After the decode loop, `base32hexDecode` now checks remaining bits in `bit_buffer` and returns `error.InvalidData` when trailing bits are non-zero, per RFC 4648 Section 3.5.
+- **Evidence:** `src/resolver/dnssec.zig` -- trailing-bit check after decode loop. 2 new tests: canonical accepted, non-zero trailing bits rejected.
+- **Resolved date:** 2026-03-25
+
+### QR-NEW-01: extractWireLabels comptime max_labels param mismatch [RESOLVED]
+- **Category:** Quality / Architecture (Low)
+- **Resolution:** `LabelList` comptime parameter removed; array size fixed at 128. Eliminates the silent overflow risk if a future caller passed `max_labels > 128`.
+- **Evidence:** `src/resolver/dnssec.zig` -- comptime param removed from `extractWireLabels`.
+- **Resolved date:** 2026-03-25
+
+### QR-NEW-02: No edge-case tests for compareDnsNames [RESOLVED]
+- **Category:** Quality / Tests (Low)
+- **Resolution:** 3 edge-case tests added for `compareDnsNames`: empty slice, truncated wire name (no root terminator), and missing root label.
+- **Evidence:** `src/resolver/dnssec.zig` -- 3 new test functions.
+- **Resolved date:** 2026-03-25
+
+### QR-NEW-03: base32hexEncode hardcoded to 20-byte input [WON'T DO]
+- **Category:** Quality / Architecture (Info)
+- **Resolution:** Won't Do. SHA-1 is the only NSEC3 hash algorithm defined in RFC 5155. The 20-byte constraint is correct for all current use cases. Generalize only if additional hash algorithms are added to the NSEC3 specification.
+- **Resolved date:** 2026-03-25
+
+### QR-NEW-04: SEC-AUDIT-09 doc comment duplication [WON'T DO]
+- **Category:** Quality / Docs (Info)
+- **Resolution:** Won't Do. The doc comment duplication across stub.zig and recursive.zig is an intentional per-file documentation pattern. Each module is self-documenting without requiring cross-file navigation.
 - **Resolved date:** 2026-03-25
 
 ---
