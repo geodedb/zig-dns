@@ -20,6 +20,7 @@ const clock_mod = @import("clock");
 const record_mod = @import("record");
 const message_mod = @import("message");
 const name_mod = @import("name");
+const cache_protection = @import("cache_protection");
 
 pub const Type = types.Type;
 pub const Class = types.Class;
@@ -81,12 +82,12 @@ pub const CacheEntry = struct {
 
     const Self = @This();
 
-    pub fn isExpired(self: Self, now: i64) bool {
+    pub inline fn isExpired(self: Self, now: i64) bool {
         const age = now - self.cached_at;
         return age < 0 or age >= self.original_ttl;
     }
 
-    pub fn remainingTtl(self: Self, now: i64) u32 {
+    pub inline fn remainingTtl(self: Self, now: i64) u32 {
         const age = now - self.cached_at;
         if (age < 0 or age >= self.original_ttl) return 0;
         return self.original_ttl - @as(u32, @intCast(age));
@@ -467,6 +468,105 @@ pub const DnsCache = struct {
     fn clampNegativeTtl(self: *Self, ttl: u32) u32 {
         return @min(self.options.max_negative_ttl_s, @max(self.options.min_ttl_s, ttl));
     }
+
+    // ================================================================
+    // Multi-record support (PF-24-dual-cache)
+    // ================================================================
+    //
+    // Positive entries may contain multiple resource records packed as:
+    //   [u16 len1][rdata1][u16 len2][rdata2]...
+    // putRecord appends to an existing positive entry for the same key.
+    // PackedRdataIterator walks the segments.
+
+    /// Store a single resource record, appending to existing records for
+    /// the same (name, type, class). Records are packed with 2-byte
+    /// big-endian length prefixes so PackedRdataIterator can walk them.
+    pub fn putRecord(self: *Self, name: []const u8, qtype: Type, qclass: Class, rdata: []const u8, ttl: u32) !void {
+        const clamped_ttl = self.clampTtl(ttl);
+        if (clamped_ttl == 0) return;
+
+        var key_buf: [max_key_len]u8 = undefined;
+        if (self.makeKeyBuf(name, qtype, qclass, &key_buf)) |key| {
+            return self.putRecordWithKey(key, rdata, clamped_ttl);
+        }
+        const heap_key = try self.makeKey(name, qtype, qclass);
+        defer self.allocator.free(heap_key);
+        return self.putRecordWithKey(heap_key, rdata, clamped_ttl);
+    }
+
+    /// putRecord with bailiwick validation (RFC 5452).
+    pub fn putRecordWithBailiwick(
+        self: *Self,
+        name: []const u8,
+        qtype: Type,
+        qclass: Class,
+        rdata: []const u8,
+        ttl: u32,
+        query_zone: []const u8,
+    ) !void {
+        if (cache_protection.checkBailiwick(name, query_zone) == .out_of_bailiwick) return;
+        return self.putRecord(name, qtype, qclass, rdata, ttl);
+    }
+
+    fn putRecordWithKey(self: *Self, key: []const u8, rdata: []const u8, ttl: u32) !void {
+        const now = self.clock.now();
+
+        // Append to existing positive entry if present and not expired.
+        if (self.entries.getWithHandle(key)) |handle| {
+            if (handle.value.entry_type == .positive and !handle.value.isExpired(now)) {
+                const old = handle.value.rdata;
+                const seg_len = 2 + rdata.len;
+                const buf = try self.allocator.alloc(u8, old.len + seg_len);
+                errdefer self.allocator.free(buf);
+                @memcpy(buf[0..old.len], old);
+                std.mem.writeInt(u16, buf[old.len..][0..2], @intCast(rdata.len), .big);
+                @memcpy(buf[old.len + 2 ..][0..rdata.len], rdata);
+
+                // put evicts old entry (freeing old rdata via on_evict)
+                try self.entries.put(key, CacheEntry{
+                    .entry_type = .positive,
+                    .rdata = buf,
+                    .cached_at = handle.value.cached_at,
+                    .original_ttl = ttl,
+                });
+                return;
+            }
+        }
+
+        // New entry: single segment [u16 len][rdata]
+        const buf = try self.allocator.alloc(u8, 2 + rdata.len);
+        errdefer self.allocator.free(buf);
+        std.mem.writeInt(u16, buf[0..2], @intCast(rdata.len), .big);
+        @memcpy(buf[2..][0..rdata.len], rdata);
+
+        try self.entries.put(key, CacheEntry{
+            .entry_type = .positive,
+            .rdata = buf,
+            .cached_at = now,
+            .original_ttl = ttl,
+        });
+    }
+};
+
+/// Iterator over length-prefixed packed rdata segments.
+/// Each segment is: [u16 big-endian length][rdata bytes].
+pub const PackedRdataIterator = struct {
+    data: []const u8,
+    pos: usize = 0,
+
+    pub fn init(data: []const u8) PackedRdataIterator {
+        return .{ .data = data };
+    }
+
+    pub fn next(self: *PackedRdataIterator) ?[]const u8 {
+        if (self.pos + 2 > self.data.len) return null;
+        const len = std.mem.readInt(u16, self.data[self.pos..][0..2], .big);
+        self.pos += 2;
+        if (self.pos + len > self.data.len) return null;
+        const segment = self.data[self.pos..][0..len];
+        self.pos += len;
+        return segment;
+    }
 };
 
 test "DnsCache basic" {
@@ -821,4 +921,39 @@ test "SoaCacheData negativeTtl calculation" {
         .zone = "example.com.",
     };
     try std.testing.expectEqual(@as(u32, 300), soa2.negativeTtl());
+}
+
+test "DnsCache putRecord packs multiple records" {
+    const allocator = std.testing.allocator;
+    var mock_clock = clock_mod.MockClock.init();
+
+    var cache = DnsCache.init(allocator, .{}, mock_clock.clock());
+    defer cache.deinit();
+
+    // Put two A records for the same domain
+    try cache.putRecord("example.com.", .a, .in, &[_]u8{ 1, 2, 3, 4 }, 300);
+    try cache.putRecord("example.com.", .a, .in, &[_]u8{ 5, 6, 7, 8 }, 300);
+
+    const entry = cache.get("example.com.", .a, .in).?;
+    try std.testing.expectEqual(EntryType.positive, entry.entry_type);
+
+    // Iterate packed segments
+    var iter = PackedRdataIterator.init(entry.rdata);
+    const first = iter.next().?;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4 }, first);
+    const second = iter.next().?;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 5, 6, 7, 8 }, second);
+    try std.testing.expect(iter.next() == null);
+}
+
+test "PackedRdataIterator empty and single" {
+    // Empty data
+    var empty_iter = PackedRdataIterator.init(&[_]u8{});
+    try std.testing.expect(empty_iter.next() == null);
+
+    // Single segment: [0x00, 0x02, 0xAA, 0xBB]
+    var single_iter = PackedRdataIterator.init(&[_]u8{ 0x00, 0x02, 0xAA, 0xBB });
+    const seg = single_iter.next().?;
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xAA, 0xBB }, seg);
+    try std.testing.expect(single_iter.next() == null);
 }

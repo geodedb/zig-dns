@@ -85,6 +85,7 @@ pub const StubConfig = struct {
 pub const StubResolver = struct {
     allocator: std.mem.Allocator,
     config: StubConfig,
+    owns_servers: bool,
 
     const Self = @This();
 
@@ -102,6 +103,7 @@ pub const StubResolver = struct {
         return Self{
             .allocator = allocator,
             .config = config,
+            .owns_servers = false,
         };
     }
 
@@ -111,15 +113,21 @@ pub const StubResolver = struct {
         const servers = try allocator.alloc(ServerAddress, 1);
         servers[0] = server;
 
-        return Self.init(allocator, .{
+        var self = Self.init(allocator, .{
             .servers = servers,
-        });
+        }) catch |err| {
+            allocator.free(servers);
+            return err;
+        };
+        self.owns_servers = true;
+        return self;
     }
 
     /// Free resolver resources
     pub fn deinit(self: *Self) void {
-        _ = self;
-        // Note: servers array is not owned by the resolver
+        if (self.owns_servers) {
+            self.allocator.free(self.config.servers);
+        }
     }
 
     /// Generate a unique query ID
@@ -129,7 +137,7 @@ pub const StubResolver = struct {
         return std.crypto.random.int(u16);
     }
 
-    fn responseMatchesQuery(
+    pub fn responseMatchesQuery(
         msg: Message,
         expected_name: []const u8,
         expected_type: Type,
@@ -159,9 +167,9 @@ pub const StubResolver = struct {
     pub fn resolveClass(self: *Self, domain: []const u8, qtype: Type, qclass: Class) !Message {
         const id = self.nextId();
 
-        // Build query
-        const query = try message_mod.buildQuery(self.allocator, id, domain, qtype, qclass, true);
-        defer self.allocator.free(query);
+        // Build query on the stack (max 271 bytes, no heap allocation)
+        var query_buf: [message_mod.max_query_size]u8 = undefined;
+        const query = try message_mod.buildQueryBuf(&query_buf, id, domain, qtype, qclass, true);
 
         // Try each server
         for (self.config.servers) |server| {
@@ -262,6 +270,7 @@ pub const StubResolver = struct {
         try io.connectWithTimeout(sock, server.address, self.config.timeout_ms);
 
         // TCP DNS messages are prefixed with 2-byte length
+        if (query.len > std.math.maxInt(u16)) return error.MessageTooLarge;
         var length_prefix: [2]u8 = undefined;
         std.mem.writeInt(u16, &length_prefix, @intCast(query.len), .big);
 
@@ -367,4 +376,22 @@ test "ServerAddress.fromIpv4" {
 test "PublicServers constants" {
     try std.testing.expectEqualStrings("8.8.8.8", PublicServers.google_primary);
     try std.testing.expectEqualStrings("1.1.1.1", PublicServers.cloudflare_primary);
+}
+
+test "StubResolver.initWithServer frees servers on deinit" {
+    // std.testing.allocator detects leaks; if deinit doesn't free the
+    // internally-allocated servers slice the test will fail.
+    var resolver = try StubResolver.initWithServer(std.testing.allocator, "8.8.8.8");
+    defer resolver.deinit();
+
+    try std.testing.expect(resolver.owns_servers);
+    try std.testing.expectEqual(@as(usize, 1), resolver.config.servers.len);
+}
+
+test "StubResolver.init does not own servers" {
+    var servers = [_]ServerAddress{};
+    var resolver = try StubResolver.init(std.testing.allocator, .{ .servers = &servers });
+    defer resolver.deinit();
+
+    try std.testing.expect(!resolver.owns_servers);
 }

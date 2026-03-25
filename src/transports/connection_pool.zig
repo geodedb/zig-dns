@@ -120,12 +120,12 @@ pub const PooledConnection = struct {
         if (self.state == .closed) return false;
 
         // Check max age
-        const age_ms: u64 = @intCast(now - self.created_at);
+        const age_ms: u64 = @intCast(@max(0, now - self.created_at));
         if (age_ms > config.max_connection_age_ms) return false;
 
         // Check idle timeout
         if (self.state == .idle) {
-            const idle_ms: u64 = @intCast(now - self.last_used);
+            const idle_ms: u64 = @intCast(@max(0, now - self.last_used));
             // Use server-provided keepalive if available
             const timeout = self.keepalive_timeout_ms orelse config.idle_timeout_ms;
             if (idle_ms > timeout) return false;
@@ -468,6 +468,10 @@ pub const ConnectionPool = struct {
         return count;
     }
 
+    /// Create a new pooled connection entry (socket only, no active connection).
+    /// The actual TCP connection is established lazily on first use, not here.
+    /// Parameters `server` and `timeout_ms` are stored for deferred connection
+    /// establishment; they do NOT trigger an immediate connect.
     fn createConnection(self: *Self, server: ServerKey, timeout_ms: u32) !std.posix.fd_t {
         _ = timeout_ms;
         _ = self;

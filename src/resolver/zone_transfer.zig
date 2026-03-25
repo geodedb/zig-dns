@@ -65,6 +65,17 @@ pub const TsigKey = struct {
     name: []const u8,
     algorithm: []const u8,
     secret: []const u8,
+
+    /// Zero secret bytes before releasing. Uses volatile write to prevent
+    /// compiler from optimizing away the zeroing (CWE-244).
+    pub fn deinit(self: *TsigKey) void {
+        if (self.secret.len > 0) {
+            const ptr: [*]volatile u8 = @constCast(@volatileCast(self.secret.ptr));
+            for (0..self.secret.len) |i| {
+                ptr[i] = 0;
+            }
+        }
+    }
 };
 
 /// Represents a DNS resource record in a zone
@@ -314,7 +325,7 @@ pub const ZoneTransferClient = struct {
                         .zone = null,
                         .record_count = zone.recordCount(),
                         .message_count = message_count,
-                        .duration_ms = @intCast(std.time.milliTimestamp() - start_time),
+                        .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
                         .error_message = "Zone too large",
                     };
                 }
@@ -326,7 +337,7 @@ pub const ZoneTransferClient = struct {
             .zone = zone,
             .record_count = zone.recordCount(),
             .message_count = message_count,
-            .duration_ms = @intCast(std.time.milliTimestamp() - start_time),
+            .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
             .error_message = null,
         };
     }
@@ -395,7 +406,7 @@ pub const ZoneTransferClient = struct {
                     self.extractSerial(records[0].rdata)
                 else
                     current_serial,
-                .duration_ms = @intCast(std.time.milliTimestamp() - start_time),
+                .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
             };
         }
 
@@ -410,7 +421,7 @@ pub const ZoneTransferClient = struct {
             .is_full_zone = false,
             .changeset = changeset,
             .new_serial = changeset.new_serial,
-            .duration_ms = @intCast(std.time.milliTimestamp() - start_time),
+            .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
         };
     }
 
@@ -514,6 +525,8 @@ pub const ZoneTransferClient = struct {
         var iter = std.mem.splitScalar(u8, name, '.');
         while (iter.next()) |label| {
             if (label.len == 0) continue;
+            // RFC 1035: max label length is 63 octets
+            if (label.len > 63) return error.InvalidName;
             try buffer.append(self.allocator, @intCast(label.len));
             try buffer.appendSlice(self.allocator, label);
         }
@@ -522,7 +535,8 @@ pub const ZoneTransferClient = struct {
 
     fn sendTcpMessage(self: *Self, stream: std.net.Stream, message: []const u8) !void {
         _ = self;
-        // TCP DNS uses 2-byte length prefix
+        // TCP DNS uses 2-byte length prefix; message must fit in u16
+        if (message.len > std.math.maxInt(u16)) return error.MessageTooLarge;
         var length_prefix: [2]u8 = undefined;
         std.mem.writeInt(u16, &length_prefix, @intCast(message.len), .big);
 
@@ -575,21 +589,31 @@ pub const ZoneTransferClient = struct {
         if (response.len < 12) return error.InvalidResponse;
 
         // Parse header
+        const qdcount = std.mem.readInt(u16, response[4..6], .big);
         const ancount = std.mem.readInt(u16, response[6..8], .big);
+
+        // Validate qdcount (SEC-NEW-03b): must be 0 or 1
+        if (qdcount > 1) return error.InvalidResponse;
 
         // Skip header and question section
         var offset: usize = 12;
 
-        // Skip question
-        while (offset < response.len and response[offset] != 0) {
-            if (response[offset] & 0xC0 == 0xC0) {
-                offset += 2;
-                break;
+        // Skip question section with bounds checking (SEC-NEW-02b)
+        if (qdcount >= 1) {
+            while (offset < response.len and response[offset] != 0) {
+                if (response[offset] & 0xC0 == 0xC0) {
+                    if (offset + 2 > response.len) return error.InvalidResponse;
+                    offset += 2;
+                    break;
+                }
+                const label_len = response[offset];
+                if (offset + 1 + label_len > response.len) return error.InvalidResponse;
+                offset += 1 + label_len;
             }
-            offset += 1 + response[offset];
+            if (offset < response.len and response[offset] == 0) offset += 1;
+            if (offset + 4 > response.len) return error.InvalidResponse;
+            offset += 4; // QTYPE + QCLASS
         }
-        if (offset < response.len and response[offset] == 0) offset += 1;
-        offset += 4; // QTYPE + QCLASS
 
         // Parse answer records
         var count: u16 = 0;
@@ -891,4 +915,138 @@ test "SEC-C28: explicit opt-out for unauthenticated transfers" {
         .require_auth = false,
     };
     try std.testing.expect(!config.require_auth);
+}
+
+test "SEC-NEW-02b: parseTransferResponse rejects truncated question section" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .require_auth = false });
+
+    // Build a minimal DNS header with qdcount=1 but truncated question data.
+    // 12-byte header + 1 byte label length claiming 200 bytes but only 2 bytes present.
+    var response: [15]u8 = undefined;
+    @memset(&response, 0);
+    // qdcount = 1
+    std.mem.writeInt(u16, response[4..6], 1, .big);
+    // ancount = 0
+    std.mem.writeInt(u16, response[6..8], 0, .big);
+    // Label length byte claiming 200 bytes, but only 2 bytes left in response
+    response[12] = 200;
+    response[13] = 0x41; // 'A'
+    response[14] = 0x42; // 'B'
+
+    const result = client.parseTransferResponse(&response);
+    try std.testing.expectError(error.InvalidResponse, result);
+}
+
+test "SEC-NEW-02b: parseTransferResponse rejects truncated compression pointer" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .require_auth = false });
+
+    // 12-byte header + compression pointer (0xC0 xx) but only 1 byte for pointer
+    var response: [13]u8 = undefined;
+    @memset(&response, 0);
+    std.mem.writeInt(u16, response[4..6], 1, .big); // qdcount = 1
+    response[12] = 0xC0; // Compression pointer start, but no second byte
+
+    const result = client.parseTransferResponse(&response);
+    try std.testing.expectError(error.InvalidResponse, result);
+}
+
+test "SEC-NEW-02b: parseTransferResponse rejects truncated QTYPE+QCLASS" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .require_auth = false });
+
+    // 12-byte header + root label (0x00) but no QTYPE/QCLASS bytes
+    var response: [13]u8 = undefined;
+    @memset(&response, 0);
+    std.mem.writeInt(u16, response[4..6], 1, .big); // qdcount = 1
+    response[12] = 0; // Root label
+
+    const result = client.parseTransferResponse(&response);
+    try std.testing.expectError(error.InvalidResponse, result);
+}
+
+test "SEC-NEW-03b: parseTransferResponse rejects qdcount > 1" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .require_auth = false });
+
+    // DNS header with qdcount = 2 (invalid for transfer response)
+    var response: [12]u8 = undefined;
+    @memset(&response, 0);
+    std.mem.writeInt(u16, response[4..6], 2, .big); // qdcount = 2
+
+    const result = client.parseTransferResponse(&response);
+    try std.testing.expectError(error.InvalidResponse, result);
+}
+
+test "SEC-NEW-03b: parseTransferResponse accepts qdcount 0" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .require_auth = false });
+
+    // DNS header with qdcount=0, ancount=0 -- valid empty response
+    var response: [12]u8 = undefined;
+    @memset(&response, 0);
+    // qdcount = 0, ancount = 0
+
+    const records = try client.parseTransferResponse(&response);
+    defer allocator.free(records);
+    try std.testing.expectEqual(@as(usize, 0), records.len);
+}
+
+test "SEC-SCAN-12: encodeName rejects labels > 63 bytes" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .require_auth = false });
+
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(allocator);
+
+    // Build a name with a 64-byte label (exceeds RFC 1035 max of 63)
+    const long_label = "a" ** 64 ++ ".example.com";
+    const result = client.encodeName(&buffer, long_label);
+    try std.testing.expectError(error.InvalidName, result);
+}
+
+test "SEC-SCAN-12: encodeName accepts labels of exactly 63 bytes" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .require_auth = false });
+
+    var buffer: std.ArrayList(u8) = .empty;
+    defer buffer.deinit(allocator);
+
+    // 63-byte label is the maximum allowed
+    const max_label = "a" ** 63 ++ ".com";
+    try client.encodeName(&buffer, max_label);
+    // Verify the encoded label length byte is 63
+    try std.testing.expectEqual(@as(u8, 63), buffer.items[0]);
+}
+
+test "SEC-SCAN-15: TsigKey.deinit zeroes secret bytes" {
+    // Allocate a mutable secret so we can verify zeroing
+    var secret_buf = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE };
+
+    var key = TsigKey{
+        .name = "test-key",
+        .algorithm = "hmac-sha256",
+        .secret = &secret_buf,
+    };
+
+    // Before deinit, secret should be non-zero
+    try std.testing.expect(secret_buf[0] != 0 or secret_buf[1] != 0);
+
+    key.deinit();
+
+    // After deinit, all secret bytes should be zeroed
+    for (secret_buf) |byte| {
+        try std.testing.expectEqual(@as(u8, 0), byte);
+    }
+}
+
+test "SEC-SCAN-15: TsigKey.deinit handles empty secret" {
+    var key = TsigKey{
+        .name = "test-key",
+        .algorithm = "hmac-sha256",
+        .secret = "",
+    };
+    // Should not panic or crash on empty secret
+    key.deinit();
 }

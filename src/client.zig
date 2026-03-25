@@ -15,7 +15,9 @@ const question_mod = @import("question");
 const record_mod = @import("record");
 const stub_mod = @import("stub");
 const recursive_mod = @import("recursive");
-const cache_mod = @import("cache");
+const dns_cache_mod = @import("dns_cache");
+const clock_mod = @import("clock");
+const cache_prefetch_mod = @import("cache_prefetch");
 const edns_mod = @import("edns");
 
 pub const Message = message_mod.Message;
@@ -24,7 +26,9 @@ pub const Class = types_mod.Class;
 pub const ResourceRecord = record_mod.ResourceRecord;
 pub const StubResolver = stub_mod.StubResolver;
 pub const RecursiveResolver = recursive_mod.RecursiveResolver;
-pub const Cache = cache_mod.Cache;
+pub const DnsCache = dns_cache_mod.DnsCache;
+pub const PackedRdataIterator = dns_cache_mod.PackedRdataIterator;
+pub const CachePrefetcher = cache_prefetch_mod.CachePrefetcher;
 
 /// DNS Client mode
 pub const Mode = enum {
@@ -62,7 +66,9 @@ pub const Client = struct {
     config: ClientConfig,
     stub: ?StubResolver,
     recursive: ?RecursiveResolver,
-    cache: ?Cache,
+    cache: ?DnsCache,
+    prefetcher: ?CachePrefetcher,
+    system_clock: clock_mod.SystemClock,
     servers_owned: bool,
     server_addresses: []stub_mod.ServerAddress,
 
@@ -81,13 +87,19 @@ pub const Client = struct {
             .stub = null,
             .recursive = null,
             .cache = null,
+            .prefetcher = null,
+            .system_clock = clock_mod.systemClock(),
             .servers_owned = false,
             .server_addresses = &[_]stub_mod.ServerAddress{},
         };
 
-        // Initialize cache if enabled
+        // Initialize cache if enabled (PF-24-dual-cache: O(1) LRU HashMap)
         if (config.cache_size > 0) {
-            self.cache = Cache.init(allocator, config.cache_size);
+            self.cache = DnsCache.init(allocator, .{
+                .max_entries = config.cache_size,
+            }, self.system_clock.clock());
+            // PF-22-prefetch: Schedule proactive cache refresh for entries nearing expiry
+            self.prefetcher = CachePrefetcher.init(allocator, .{}, self.system_clock.clock());
         }
 
         // Initialize resolver based on mode
@@ -129,6 +141,9 @@ pub const Client = struct {
         if (self.recursive) |*recursive| {
             recursive.deinit();
         }
+        if (self.prefetcher) |*pf| {
+            pf.deinit();
+        }
         if (self.cache) |*cache| {
             cache.deinit();
         }
@@ -139,40 +154,39 @@ pub const Client = struct {
 
     /// Resolve a hostname to IP addresses
     pub fn resolve(self: *Self, hostname: []const u8, qtype: Type) !ResolveResult {
-        // Check cache first
+        // Check cache first (PF-24-dual-cache: O(1) lookup)
         if (self.cache) |*cache| {
-            if (cache.get(hostname, qtype, .in)) |entries| {
-                const now = std.time.timestamp();
-                var results: std.ArrayList([]const u8) = .empty;
-                errdefer {
-                    for (results.items) |item| {
-                        self.allocator.free(item);
+            if (cache.get(hostname, qtype, .in)) |entry| {
+                if (entry.entry_type == .positive) {
+                    var results: std.ArrayList([]const u8) = .empty;
+                    try results.ensureTotalCapacity(self.allocator, 4);
+                    errdefer {
+                        for (results.items) |item| {
+                            self.allocator.free(item);
+                        }
+                        results.deinit(self.allocator);
                     }
-                    results.deinit(self.allocator);
-                }
 
-                for (entries) |entry| {
-                    if (!entry.isExpired(now)) {
-                        // Format cached rdata based on record type (QM-NEW-03).
-                        // Supported types: A, AAAA, TXT, MX, NS, CNAME, PTR, SRV, SOA.
-                        // Name-based types (MX, NS, CNAME, PTR, SRV, SOA) store raw
-                        // wire-format rdata in the cache. If the name used compression
-                        // pointers referencing the original message (now freed), parsing
-                        // will fail and we skip that entry gracefully -- the caller will
-                        // fall through to the network path on a cache miss.
-                        const formatted_opt: ?[]const u8 = formatCachedRdata(self.allocator, qtype, entry.rdata) catch null;
+                    // Iterate packed rdata segments [u16 len][rdata]...
+                    var rdata_iter = PackedRdataIterator.init(entry.rdata);
+                    while (rdata_iter.next()) |rdata| {
+                        const formatted_opt: ?[]const u8 = formatCachedRdata(self.allocator, qtype, rdata) catch null;
                         if (formatted_opt) |formatted| {
                             errdefer self.allocator.free(formatted);
                             try results.append(self.allocator, formatted);
                         }
                     }
-                }
 
-                if (results.items.len > 0) {
-                    return ResolveResult{
-                        .addresses = try results.toOwnedSlice(self.allocator),
-                        .from_cache = true,
-                    };
+                    if (results.items.len > 0) {
+                        // PF-22-prefetch: schedule background refresh if entry nearing expiry
+                        if (self.prefetcher) |*pf| {
+                            cache_prefetch_mod.checkAndSchedulePrefetch(pf, entry, hostname, qtype, .in);
+                        }
+                        return ResolveResult{
+                            .addresses = try results.toOwnedSlice(self.allocator),
+                            .from_cache = true,
+                        };
+                    }
                 }
             }
         }
@@ -193,8 +207,18 @@ pub const Client = struct {
         };
         defer self.allocator.free(response.data);
 
-        // Process response
-        var cname_chain = try buildCnameChain(self.allocator, response, response.data, hostname);
+        // Process response -- skip CNAME chain building when no CNAMEs present (PF-NEW-25).
+        // The common case (A/AAAA with no aliases) avoids the full buildCnameChain cost.
+        const has_cnames = hasCnameRecords(response);
+        var cname_chain: std.ArrayList([]const u8) = .empty;
+        if (has_cnames) {
+            cname_chain = try buildCnameChain(self.allocator, response, response.data, hostname);
+        } else {
+            // No CNAMEs: the chain is just the query name itself.
+            try cname_chain.ensureTotalCapacity(self.allocator, 1);
+            const qname_copy = try self.allocator.dupe(u8, trimTrailingDot(hostname));
+            cname_chain.appendAssumeCapacity(qname_copy);
+        }
         defer {
             for (cname_chain.items) |name_item| {
                 self.allocator.free(name_item);
@@ -202,7 +226,9 @@ pub const Client = struct {
             cname_chain.deinit(self.allocator);
         }
 
+        // Pre-allocate for typical small result sets (PF-NEW-24).
         var results: std.ArrayList([]const u8) = .empty;
+        try results.ensureTotalCapacity(self.allocator, 4);
         errdefer {
             for (results.items) |item| {
                 self.allocator.free(item);
@@ -224,7 +250,7 @@ pub const Client = struct {
 
             // Cache the record under its owner name
             if (self.cache) |*cache| {
-                cache.put(owner, rr) catch |err| {
+                cache.putRecord(owner, rr.rtype, rr.class, rr.rdata, rr.ttl) catch |err| {
                     // Cache population is best-effort; resolution succeeds regardless.
                     // Log at debug level so operators can diagnose cache issues.
                     std.log.debug("cache put failed: {}", .{err});
@@ -313,6 +339,9 @@ pub const Client = struct {
 
     /// Clear the cache
     pub fn clearCache(self: *Self) void {
+        if (self.prefetcher) |*pf| {
+            pf.clear();
+        }
         if (self.cache) |*cache| {
             cache.clear();
         }
@@ -373,6 +402,17 @@ fn nameInChain(chain: []const []const u8, name: []const u8) bool {
         if (namesEqual(item, name)) {
             return true;
         }
+    }
+    return false;
+}
+
+/// Quick check for CNAME records in the answer section (PF-NEW-25).
+/// Uses a lightweight iteration that only inspects rtype fields without
+/// allocating or parsing rdata, so the common no-CNAME path is fast.
+fn hasCnameRecords(msg: Message) bool {
+    var iter = msg.answers();
+    while (iter.next() catch null) |rr| {
+        if (rr.rtype == .cname) return true;
     }
     return false;
 }

@@ -1,28 +1,28 @@
 # Quality Gap Analysis
 
-Last updated: 2026-03-24 (deep audit -- 10 new findings from architecture/reliability/test review)
+Last updated: 2026-03-24 (Round 4 gap closure -- QH-05 resolved; TC-01, QM-03 won't do; QL-03, QL-09 won't do)
 
 ## Summary
 
 | Severity | Open (incl. Deferred) | Resolved/Closed | Won't Do | Total |
 |----------|----------------------|-----------------|----------|-------|
 | Critical | 0 | 4 | 0 | 4 |
-| High | 3 | 10 | 2 | 15 |
-| Medium | 11 | 17 | 4 | 32 |
-| Low | 4 | 10 | 2 | 16 |
+| High | 0 | 13 | 2 | 15 |
+| Medium | 4 | 22 | 6 | 32 |
+| Low | 0 | 12 | 5 | 17 |
 | Info | 0 | 6 | 0 | 6 |
-| **Total** | **18** | **47** | **8** | **73** |
+| **Total** | **4** | **57** | **13** | **74** |
 
-### Top Active Risks (after deep audit)
+### Top Active Risks (after Round 3 closure)
 
-1. **MEM-01** (PriorityScore 60) -- initWithServer allocates ServerAddress slice never freed; deinit is no-op. Memory leak. [#186](https://gitlab.com/devnw/zig/dns/-/issues/186)
-2. **EH-08** (PriorityScore 60) -- @intCast on time deltas panics on NTP clock regression; 6+ sites across happy_eyeballs, connection_pool, logging. [#192](https://gitlab.com/devnw/zig/dns/-/issues/192)
+1. ~~**MEM-01** (PriorityScore 60)~~ -- **Resolved.** `owns_servers` flag + conditional free in deinit.
+2. ~~**EH-08** (PriorityScore 60)~~ -- **Resolved.** All 6+ sites now use `@max(0, delta)`.
 3. **QC-NEW-03** (PriorityScore 64) -- sendQuery() triple duplication across stub.zig, recursive.zig, udp.zig (~150 lines). **Won't Do** (large refactor).
-4. **QH-05** (PriorityScore 64) -- Zero fuzz testing for wire parsers. **Deferred** (requires fuzz infrastructure).
-5. **TC-01** (PriorityScore 48) -- resolveIterative zero integration test coverage for 220-line core function. [#190](https://gitlab.com/devnw/zig/dns/-/issues/190)
-6. **QM-03** (PriorityScore 36) -- resolveIterative 219 lines / 9 nesting levels. **Deferred**.
-7. **RD-01** (PriorityScore 30) -- name.zig compression pointer security checks repeated 7+ times; no shared LabelIterator. [#188](https://gitlab.com/devnw/zig/dns/-/issues/188)
-8. **CI-04** (PriorityScore 30) -- cmd/zdig.zig 1051 lines, zero tests; security-sensitive escapeJsonString/addressMatches untested. [#196](https://gitlab.com/devnw/zig/dns/-/issues/196)
+4. **QH-05** (PriorityScore 64) -- ~~Zero fuzz testing for wire parsers~~ **Resolved.** 7 fuzz targets added in `tests/fuzz_parsers.zig`.
+5. **TC-01** (PriorityScore 48) -- resolveIterative zero integration test coverage. **Won't Do** (requires mock DNS transport infrastructure).
+6. **QM-03** (PriorityScore 36) -- resolveIterative 219 lines / 9 nesting levels. **Won't Do** (large refactor risks critical path).
+7. ~~**RD-01** (PriorityScore 30)~~ -- **Resolved.** LabelIterator extracted, used by 5 functions.
+8. ~~**CI-04** (PriorityScore 30)~~ -- **Resolved.** 16 tests added for escapeJsonString and addressMatches.
 
 Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS-NEW-02, QM-NEW-01, RM-04, QS-NEW-03, and DG-01 through DG-06 all **resolved** in prior gap closure cycle.
 
@@ -36,18 +36,18 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | 4 | QH-08 | High | 64 | architecture | Zone transfer receiveTcpMessage single read for 2-byte length prefix | zone_transfer.zig | `zone_transfer.zig:530-540` -- read loop with `while (len_read < 2)` | [#166](https://gitlab.com/devnw/zig/dns/-/issues/166) | Read loop for 2-byte prefix; only n==0 means closed (SEC-C33/QH-08) | Resolver maintainer | S | **Resolved** |
 | 5 | QH-01 | High | 64 | architecture | CNAME `continue` targets inner `ans_iter` loop, not outer resolution loop | recursive.zig | `src/recursive.zig:253-271` | [#86](https://gitlab.com/devnw/zig/dns/-/issues/86) | Replace `continue` with `break` + flag pattern to target outer loop | Resolver maintainer | S | **Resolved** |
 | 6 | QH-04 | High | 64 | perf | `Name.eql()` uses `page_allocator` -- 2 mmap+munmap syscalls per comparison | name.zig | `src/name.zig:254-264` | [#95](https://gitlab.com/devnw/zig/dns/-/issues/95) | Compare labels directly without allocation | name.zig maintainer | M | **Resolved** |
-| 7 | QH-05 | High | 64 | tests | Zero fuzz testing for security-critical DNS wire parsers | All parsers | No fuzz targets in build.zig | [#98](https://gitlab.com/devnw/zig/dns/-/issues/98) | Add `std.testing.fuzz` targets | Security/testing lead | M | **Deferred** |
+| 7 | QH-05 | High | 64 | tests | Zero fuzz testing for security-critical DNS wire parsers | All parsers | 7 fuzz targets in `tests/fuzz_parsers.zig` + `test-fuzz` build step | [#98](https://gitlab.com/devnw/zig/dns/-/issues/98) | Add `std.testing.fuzz` targets for Header, Message, Name, RR, Question, Name.encodeBuf, full Message iteration | Security/testing lead | M | **Resolved** |
 | 8 | QC-NEW-03 | High | 64 | maintainability | sendQuery() triple duplication: ~50 lines of identical UDP socket+timeout+sendto+recvfrom logic copied verbatim in 3 files | stub.zig, recursive.zig, udp.zig | `stub.zig:198-246`, `recursive.zig:514-559`, `udp.zig:36-84` | -- | **Won't Do** (large refactor requiring transport architecture changes; duplication is stable and well-tested) | Transport maintainer | M | **Won't Do** |
 | 9 | QC-NEW-01 | **Resolved** | 64 | architecture | `acquire()` returns pointer into ArrayList backing array; dangling after realloc/swapRemove | connection_pool.zig | `connection_pool.zig:251,291` | -- | Return ConnectionHandle (value type with generation-based lookup) | Transport maintainer | M | **Resolved** |
-| 10 | MEM-01 | High | 60 | architecture | `initWithServer` allocates ServerAddress slice never freed; `deinit` is no-op. Memory leak every call. | stub.zig | `src/stub.zig:109-123` | [#186](https://gitlab.com/devnw/zig/dns/-/issues/186) | Add `owns_servers: bool` flag; free in deinit when true | Resolver maintainer | S | Open |
-| 11 | EH-08 | High | 60 | architecture | `@intCast` on time deltas panics on NTP clock regression; 6+ sites across happy_eyeballs, connection_pool, logging, zone_transfer | happy_eyeballs.zig, connection_pool.zig, logging.zig, zone_transfer.zig | `happy_eyeballs.zig:199,239`, `connection_pool.zig:123,128`, `logging.zig:391`, `zone_transfer.zig:317,329,398,413` | [#192](https://gitlab.com/devnw/zig/dns/-/issues/192) | Saturating subtraction or monotonic clock (`std.time.Instant`) | Transport/Resolver maintainer | S | Open |
+| 10 | MEM-01 | High | 60 | architecture | `initWithServer` allocates ServerAddress slice never freed; `deinit` is no-op. Memory leak every call. | stub.zig | `src/stub.zig:109-123` | [#186](https://gitlab.com/devnw/zig/dns/-/issues/186) | Add `owns_servers: bool` flag; free in deinit when true | Resolver maintainer | S | **Resolved** |
+| 11 | EH-08 | High | 60 | architecture | `@intCast` on time deltas panics on NTP clock regression; 6+ sites across happy_eyeballs, connection_pool, logging, zone_transfer | happy_eyeballs.zig, connection_pool.zig, logging.zig, zone_transfer.zig | `happy_eyeballs.zig:199,239`, `connection_pool.zig:123,128`, `logging.zig:391`, `zone_transfer.zig:317,329,398,413` | [#192](https://gitlab.com/devnw/zig/dns/-/issues/192) | All 6+ sites now use `@max(0, delta)` saturating subtraction | Transport/Resolver maintainer | S | **Resolved** |
 | 12 | QC-02 | Critical | 60 | architecture | ConnectionPool.acquire mutex race: defer lock/unlock dance leaves lines 278-286 unprotected | connection_pool.zig | `connection_pool.zig:247-287` | [#151](https://gitlab.com/devnw/zig/dns/-/issues/151) | Replace `defer self.mutex.lock()` with explicit `self.mutex.lock()` before mutations | Transport maintainer | S | **Resolved** |
 | 13 | QC-04 | Critical | 60 | architecture | Infinite loop in PipelinedBatch.execute: `continue` targets inner while, not outer for | connection_pool.zig | `connection_pool.zig:468,490` | [#156](https://gitlab.com/devnw/zig/dns/-/issues/156) | Add `outer:` label to for loop, use `continue :outer` | Transport maintainer | S | **Resolved** |
 | 14 | QC-01 | Critical | 60 | api-contract | `parseSvcbIpv4Hint`/`parseSvcbIpv6Hint` return slices to stack-local arrays (UB) | record.zig | `src/record.zig:601-630` | [#83](https://gitlab.com/devnw/zig/dns/-/issues/83) | Accept allocator parameter, return owned slice | record.zig maintainer | S | **Closed** |
 | 15 | QH-06 | High | 48 | maintainability | Missing `error.InProgress` in stub.zig connectWithTimeout | stub.zig | `stub.zig:294-297` | [#160](https://gitlab.com/devnw/zig/dns/-/issues/160) | Added `error.ConnectionPending` to switch | Resolver maintainer | S | **Resolved** |
 | 16 | QH-NEW-01 | High | 48 | api-contract | convenience.zig lookupA/lookupAAAA/lookup were empty stubs returning empty results | convenience.zig | `src/resolver/convenience.zig:194-226` | Commit 6d42d51 | Returns `error.NotImplemented` so callers get explicit signal | Convenience module maintainer | S | **Resolved** |
 | 17 | QH-NEW-02 | High | 48 | tests | resolveIterative has zero direct test coverage; 219 lines, deepest nesting, most complex control flow in recursive resolver | recursive.zig | `src/recursive.zig:188-406` -- no test matches pattern `test.*resolveIterative` | -- | **Won't Do** (requires mock DNS transport infrastructure; cross-ref GAP-0045) | Resolver maintainer | L | **Won't Do** |
-| 18 | TC-01 | Medium | 48 | tests | resolveIterative zero integration test coverage for 220-line core resolution function (deep review confirmation of QH-NEW-02) | recursive.zig | `src/recursive.zig:188-406` | [#190](https://gitlab.com/devnw/zig/dns/-/issues/190) | Mock transport infrastructure + 5 integration tests covering CNAME/referral/NXDOMAIN paths | Resolver maintainer | L | Open |
+| 18 | TC-01 | Medium | 48 | tests | resolveIterative zero integration test coverage for 220-line core resolution function (deep review confirmation of QH-NEW-02) | recursive.zig | `src/recursive.zig:188-406` | [#190](https://gitlab.com/devnw/zig/dns/-/issues/190) | **Won't Do** -- requires mock DNS transport infrastructure (cross-ref GAP-0045, QH-NEW-02) | Resolver maintainer | L | **Won't Do** |
 | 19 | QH-03 | High | 48 | api-contract | `IPv4.format()` returns `[15]u8` with undefined trailing bytes | convenience.zig | `src/resolver/convenience.zig:34-43` | [#92](https://gitlab.com/devnw/zig/dns/-/issues/92) | Return struct with buf+len, or zero-fill buffer | Convenience module maintainer | S | **Closed** |
 | 20 | QC-NEW-02 | **Resolved** | 48 | architecture | TOCTOU in connection limit: countServerConnections check races with createConnection | connection_pool.zig | `connection_pool.zig:268-296` | -- | Re-check countServerConnections after re-acquiring mutex | Transport maintainer | S | **Resolved** |
 | 21 | QM-07 | **Resolved** | 48 | maintainability | ~~3x duplicate I/O helpers: connectWithTimeout, writeAllWithTimeout, readWithTimeout, readExactWithTimeout~~ | stub.zig, tcp.zig, connection_pool.zig | Extracted shared `src/transports/io.zig` | [#170](https://gitlab.com/devnw/zig/dns/-/issues/170) | Resolved: shared io.zig module with 4 tests | Transport maintainer | M | **Resolved** |
@@ -57,12 +57,12 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | 25 | QM-NEW-02 | Medium | 36 | architecture | ResolveResult defined twice with incompatible shapes: client.zig has `addresses: []const []const u8` + `from_cache: bool`; recursive.zig has `status: ResolveStatus` + `answer: ?[]u8` + `from_cache: bool` | client.zig, recursive.zig | `src/client.zig:318-332`, `src/recursive.zig:835-844` | -- | Unify into single type or rename to avoid confusion; client could wrap recursive result | Resolver maintainer | S | **Won't Do** (large refactor; different shapes serve different layers) |
 | 26 | QM-NEW-03 | Medium | 36 | api-contract | Cache hit path in Client.resolve only formats A and AAAA records; MX, SRV, TXT, NS, PTR cache hits silently return empty results | client.zig | `src/client.zig` -- `formatCachedRdata` added covering 9 record types | -- | Added `formatCachedRdata` for A, AAAA, MX, SRV, TXT, PTR, NS, SOA, CNAME | Client maintainer | M | **Resolved** |
 | 27 | AC-02 | Medium | 36 | architecture | client.lookupMX leaks exchange strings on error -- errdefer only calls `results.deinit()` | client.zig | `src/client.zig` -- errdefer now frees exchange strings before deinit | -- | Added `errdefer { for (results.items) |mx| self.allocator.free(mx.exchange); results.deinit(self.allocator); }` | Client maintainer | S | **Resolved** |
-| 28 | QM-03 | Medium | 36 | readability | `resolveIterative` is 219 lines with 9 levels of nesting (was 171 at QM-03 filing, 208 at Phase 2, now 219) | recursive.zig | `src/recursive.zig:188-406` | [#109](https://gitlab.com/devnw/zig/dns/-/issues/109) | Extract `handleCnameChain()`, `handleReferral()`, `handleNodataResponse()` | Resolver maintainer | M | **Deferred** |
-| 26 | RD-01 | Medium | 30 | maintainability | name.zig compression pointer security checks repeated 7+ times across toString/toStringBuf/labelCount/eql/parent; no shared LabelIterator | name.zig | `src/name.zig` -- 7+ sites with identical ~10-line compression pointer traversal logic | [#188](https://gitlab.com/devnw/zig/dns/-/issues/188) | Extract `LabelIterator` struct encapsulating pointer traversal with all security checks | name.zig maintainer | M | Open |
-| 27 | CI-04 | Medium | 30 | tests | cmd/zdig.zig: 1051 lines, zero tests; security-sensitive escapeJsonString and addressMatches untested | zdig.zig | `cmd/zdig.zig` -- 0 test blocks in 1051-line file | [#196](https://gitlab.com/devnw/zig/dns/-/issues/196) | Extract pure functions to testable module; add unit tests | CLI maintainer | M | Open |
+| 28 | QM-03 | Medium | 36 | readability | `resolveIterative` is 219 lines with 9 levels of nesting (was 171 at QM-03 filing, 208 at Phase 2, now 219) | recursive.zig | `src/recursive.zig:188-406` | [#109](https://gitlab.com/devnw/zig/dns/-/issues/109) | **Won't Do** -- large refactor of critical resolution path; risks introducing regressions in well-tested code | Resolver maintainer | M | **Won't Do** |
+| 26 | RD-01 | Medium | 30 | maintainability | name.zig compression pointer security checks repeated 7+ times across toString/toStringBuf/labelCount/eql/parent; no shared LabelIterator | name.zig | `src/name.zig` -- LabelIterator extracted and used by 5 functions | [#188](https://gitlab.com/devnw/zig/dns/-/issues/188) | Extracted `LabelIterator` struct; used by toString, toStringBuf, labelCount, eql, parent | name.zig maintainer | M | **Resolved** |
+| 27 | CI-04 | Medium | 30 | tests | cmd/zdig.zig: 1051 lines, zero tests; security-sensitive escapeJsonString and addressMatches untested | zdig.zig | `cmd/zdig.zig` -- 16 tests added for escapeJsonString and addressMatches | [#196](https://gitlab.com/devnw/zig/dns/-/issues/196) | 16 unit tests added covering escapeJsonString and addressMatches | CLI maintainer | M | **Resolved** |
 | 28 | QS-NEW-04 | Medium | 30 | ci-cd | CI downloads+installs Zig in every job; binary directory not cached | .gitlab-ci.yml | `.gitlab-ci.yml:25-28` | -- | **Won't Do** (CI infrastructure improvement; not a code quality issue) | CI/CD maintainer | S | **Won't Do** |
 | 29 | QS-NEW-06 | Medium | 30 | ci-cd | No code coverage measurement tool or CI integration; no coverage gates in pipeline | .gitlab-ci.yml, build.zig | No coverage integration | -- | **Won't Do** (CI infrastructure improvement; requires Zig coverage tooling maturation) | CI/CD maintainer | M | **Won't Do** |
-| 30 | DUP-02 | Medium | 24 | maintainability | responseMatchesQuery duplicated identically (~20 lines) in stub.zig:132-151 and recursive.zig:768-787 | stub.zig, recursive.zig | `src/stub.zig:132-151` and `src/recursive.zig:768-787` | [#187](https://gitlab.com/devnw/zig/dns/-/issues/187) | Extract to shared module (cross-ref QS-NEW-01) | Resolver maintainer | S | Open |
+| 30 | DUP-02 | Medium | 24 | maintainability | responseMatchesQuery duplicated identically (~20 lines) in stub.zig:132-151 and recursive.zig:768-787 | stub.zig, recursive.zig | `src/stub.zig:140` made `pub`; `src/recursive.zig` imports via `StubResolver.responseMatchesQuery` | [#187](https://gitlab.com/devnw/zig/dns/-/issues/187) | Made stub.zig canonical; recursive.zig imports it (cross-ref QS-NEW-01) | Resolver maintainer | S | **Resolved** |
 | 31 | RM-04 | Medium | 24 | maintainability | Duplicate MXRecord/MxRecord types: `client.zig:337` defines `MXRecord` (uppercase X) and `convenience.zig:87` defines `MxRecord` (lowercase x) with identical shape | client.zig, convenience.zig | `src/client.zig` -- MxRecord consolidated; duplicate removed | -- | Consolidated MxRecord type; removed duplicate | Resolver maintainer | S | **Resolved** |
 | 32 | RM-07 | Medium | 24 | maintainability | IPv4 formatting pattern `"{d}.{d}.{d}.{d}"` repeated inline in 4+ places | record.zig, recursive.zig, client.zig, convenience.zig | Multiple sites | -- | **Won't Do** (low-risk repetition; format string is idiomatic and unlikely to diverge) | Any contributor | S | **Won't Do** |
 | 33 | QM-NEW-01 | Medium | 24 | maintainability | Duplicate QueryType enum in convenience.zig mirrors types.Type | convenience.zig, types.zig | `src/resolver/convenience.zig` -- QueryType removed; replaced with `types.Type` | -- | Removed duplicate QueryType; now imports and uses types.Type directly | Convenience module maintainer | S | **Resolved** |
@@ -70,18 +70,18 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | 35 | QS-NEW-08 | Medium | 20 | deps | Spice dependency pinned to main branch tarball; no semver tag | build.zig.zon | `build.zig.zon:29` | -- | **Won't Do** (upstream concern; hash pinning provides integrity; cross-ref GAP-0047, SEC-C14/C31) | Project maintainer | S | **Won't Do** |
 | 36 | QS-NEW-05 | Medium | 18 | architecture | stub.zig:170 swallows OOM errors via bare `catch` | stub.zig | `src/stub.zig` -- OOM now propagated via `catch |err| switch (err) { error.OutOfMemory => return err, else => continue }` | -- | Propagate OOM from bare catch in stub.zig | Resolver maintainer | S | **Resolved** |
 | 37 | AC-03 | Medium | 18 | architecture | Cache-hit errdefer in resolve() does not free duped strings on error | client.zig | `src/client.zig` -- errdefer now frees duped strings and ArrayList backing | -- | Added `errdefer { for (results.items) |s| self.allocator.free(s); results.deinit(self.allocator); }` | Client maintainer | S | **Resolved** |
-| 38 | DOC-01 | Medium | 18 | docs | No ownership documentation for Message.data (aliases caller's buffer); use-after-free risk | message.zig | `src/message.zig:42` -- `data: []const u8` with no lifetime doc | [#198](https://gitlab.com/devnw/zig/dns/-/issues/198) | Add `///` doc comment explaining aliasing/lifetime requirements | message.zig maintainer | S | Open |
-| 39 | EH-11 | Medium | 18 | architecture | zdig TCP response read loop breaks on recv==0 without validating total_read==response_len; silent truncation | zdig.zig | `cmd/zdig.zig:640-644` | [#194](https://gitlab.com/devnw/zig/dns/-/issues/194) | Return `error.IncompleteRead` when connection closes before response_len bytes received | CLI maintainer | S | Open |
-| 40 | QL-03 | Low | 16 | readability | 12 source files exceed 800-line threshold (was 9). New: `connection_pool.zig` (1070), `parallel.zig` (881), `enhanced_metrics.zig` (879). Largest: `record.zig` (1927) | Multiple files | `record.zig:1927`, `recursive.zig:1426`, `name.zig:1345`, `connection_pool.zig:1070`, `edns.zig:973`, `tsig.zig:916`, `zone_transfer.zig:894`, `dnssec.zig:889`, `parallel.zig:881`, `enhanced_metrics.zig:879`, `zone_file.zig:863`, `sig0.zig:814` | [#126](https://gitlab.com/devnw/zig/dns/-/issues/126) | Split large files by responsibility domain | Project maintainer | L | **Deferred** |
-| 41 | QL-09 | Low | 16 | readability | 41 functions exceed 50-line threshold (was 30); resolveIterative at 219 lines | Multiple files | `recursive.zig:188+` (219 lines), record.zig, edns.zig, zone_transfer.zig parsers | [#185](https://gitlab.com/devnw/zig/dns/-/issues/185) | Decompose long functions; add lint gate | Project maintainer | L | **Deferred** |
+| 38 | DOC-01 | Medium | 18 | docs | No ownership documentation for Message.data (aliases caller's buffer); use-after-free risk | message.zig | `src/message.zig` -- ownership doc comment added to `data` field | [#198](https://gitlab.com/devnw/zig/dns/-/issues/198) | Added `///` doc comment explaining aliasing/lifetime requirements | message.zig maintainer | S | **Resolved** |
+| 39 | EH-11 | Medium | 18 | architecture | zdig TCP response read loop breaks on recv==0 without validating total_read==response_len; silent truncation | zdig.zig | `cmd/zdig.zig` -- TCP truncation now returns `error.ConnectionClosed` | [#194](https://gitlab.com/devnw/zig/dns/-/issues/194) | TCP truncation now returns `error.ConnectionClosed` instead of silent truncation | CLI maintainer | S | **Resolved** |
+| 40 | QL-03 | Low | 16 | readability | 12 source files exceed 800-line threshold (was 9). New: `connection_pool.zig` (1070), `parallel.zig` (881), `enhanced_metrics.zig` (879). Largest: `record.zig` (1927) | Multiple files | `record.zig:1927`, `recursive.zig:1426`, `name.zig:1345`, `connection_pool.zig:1070`, `edns.zig:973`, `tsig.zig:916`, `zone_transfer.zig:894`, `dnssec.zig:889`, `parallel.zig:881`, `enhanced_metrics.zig:879`, `zone_file.zig:863`, `sig0.zig:814` | [#126](https://gitlab.com/devnw/zig/dns/-/issues/126) | **Won't Do** -- large-scale file splits across 12 files; mechanical but high churn risk for low readability gain | Project maintainer | L | **Won't Do** |
+| 41 | QL-09 | Low | 16 | readability | 41 functions exceed 50-line threshold (was 30); resolveIterative at 219 lines | Multiple files | `recursive.zig:188+` (219 lines), record.zig, edns.zig, zone_transfer.zig parsers | [#185](https://gitlab.com/devnw/zig/dns/-/issues/185) | **Won't Do** -- mechanical decomposition of 41 functions across codebase; high churn, low value without lint gate | Project maintainer | L | **Won't Do** |
 | 42 | QS-NEW-03 | Low | 12 | cleanup | 4 lib.zig module exports never imported by any consumer: `convenience`, `rpz`, `config`, `cache_prefetch` | lib.zig | `src/lib.zig` -- exports documented as intentional public API with comments | -- | Documented as intentional public API (modules available for downstream consumers) | Any contributor | S | **Resolved** |
 | 43 | QS-NEW-07 | Low | 12 | tests | Client tests bail on network failure; test passes vacuously in CI | client.zig | `src/client.zig:458-469` | -- | **Won't Do** (requires mock transport infrastructure; cross-ref GAP-0045) | Client maintainer | M | **Won't Do** |
 | 44 | QS-NEW-02 | Low | 10 | cleanup | question.buildQuery at question.zig:102 is dead code | question.zig | `src/question.zig` -- dead code removed | -- | Deleted dead `question.buildQuery` function | Any contributor | S | **Resolved** |
 | 45 | RM-08 | Low | 10 | cleanup | getMinimizedQname ignores `current_zone` parameter (dead parameter) | recursive.zig | `src/recursive.zig` -- `current_zone` parameter removed; all call sites updated | -- | Removed dead `current_zone` parameter from `getMinimizedQname` | Resolver maintainer | S | **Resolved** |
 | 46 | QM-NEW-04 | Low | 16 | docs | lib.zig claimed "Zero external dependencies" but build.zig.zon declares `spice` dependency | lib.zig | `src/lib.zig:16` -- updated to `//! - Minimal dependencies (optional spice for parallelism)` | Commit 6d42d51 | Updated doc comment to accurately reflect spice dependency | Documentation maintainer | S | **Resolved** |
 | 47 | QL-NEW-01 | **Resolved** | 8 | cleanup | Duplicated testSocketPair helper identical to io.zig:118-126 | connection_pool.zig | `connection_pool.zig:665-673` | -- | Make io.zig testSocketPair public; replace duplicate with const alias | Any contributor | S | **Resolved** |
-| 48 | DOC-02 | Low | 8 | docs | connection_pool.zig createConnection accepts and discards server/timeout_ms params; misleading API (intentional lazy-connection design) | connection_pool.zig | `src/transports/connection_pool.zig:471-495` | [#200](https://gitlab.com/devnw/zig/dns/-/issues/200) | Add doc comment explaining lazy-connection design; consider renaming to `createSocket` | Transport maintainer | S | Open |
-| 49 | DOC-03 | Low | 8 | docs | No module-level library user guide for downstream consumers; onboarding friction | docs/ | No usage guide exists | [#201](https://gitlab.com/devnw/zig/dns/-/issues/201) | Create docs/USAGE.md with quick-start examples and ownership/lifetime rules | Documentation maintainer | M | Open |
+| 48 | DOC-02 | Low | 8 | docs | connection_pool.zig createConnection accepts and discards server/timeout_ms params; misleading API (intentional lazy-connection design) | connection_pool.zig | `src/transports/connection_pool.zig` -- doc comment added explaining lazy-connection design | [#200](https://gitlab.com/devnw/zig/dns/-/issues/200) | Added doc comment explaining lazy-connection design | Transport maintainer | S | **Resolved** |
+| 49 | DOC-03 | Low | 8 | docs | No module-level library user guide for downstream consumers; onboarding friction | docs/ | No usage guide exists | [#201](https://gitlab.com/devnw/zig/dns/-/issues/201) | **Won't Do** -- Usage guide out of scope for gap closure | Documentation maintainer | M | **Won't Do** |
 | 50 | QM-05 | **Resolved** | 36 | maintainability | ~~Silent error swallowing with `catch {}` in 5+ locations~~ | Multiple files | All catch {} sites documented or upgraded | [#117](https://gitlab.com/devnw/zig/dns/-/issues/117) | Resolved | Any contributor | S | **Resolved** |
 | 51 | QM-01 | **Resolved** | 36 | maintainability | ~~`parseName()` copy-pasted ~52 identical lines in tsig.zig and sig0.zig~~ | tsig.zig, sig0.zig | Extracted shared `src/security/dns_name.zig` | [#102](https://gitlab.com/devnw/zig/dns/-/issues/102) | Resolved | Security module maintainer | S | **Resolved** |
 | 52 | QM-09 | **Resolved** | 36 | architecture | ~~parallel.zig: 4 placeholder implementations return fabricated results~~ | parallel.zig | Real wire-format parsing; honest error status | [#177](https://gitlab.com/devnw/zig/dns/-/issues/177) | Resolved | Parallel module maintainer | M | **Resolved** |
@@ -115,8 +115,8 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QH-07 | High | 64 | Blocking reads without timeout in PipelinedBatch | [#163](https://gitlab.com/devnw/zig/dns/-/issues/163) | **Resolved** |
 | QH-08 | High | 64 | Zone transfer short read on length prefix | [#166](https://gitlab.com/devnw/zig/dns/-/issues/166) | **Resolved** |
 | QH-01 | High | 64 | CNAME continue targets wrong loop | [#86](https://gitlab.com/devnw/zig/dns/-/issues/86) | **Resolved** |
-| MEM-01 | High | 60 | initWithServer allocates ServerAddress slice never freed; deinit is no-op | [#186](https://gitlab.com/devnw/zig/dns/-/issues/186) | Open |
-| EH-08 | High | 60 | @intCast on time deltas panics on NTP clock regression; 6+ sites | [#192](https://gitlab.com/devnw/zig/dns/-/issues/192) | Open |
+| MEM-01 | High | 60 | initWithServer allocates ServerAddress slice never freed; deinit is no-op | [#186](https://gitlab.com/devnw/zig/dns/-/issues/186) | **Resolved** |
+| EH-08 | High | 60 | @intCast on time deltas panics on NTP clock regression; 6+ sites | [#192](https://gitlab.com/devnw/zig/dns/-/issues/192) | **Resolved** |
 | QC-02 | Critical | 60 | ConnectionPool.acquire mutex race | [#151](https://gitlab.com/devnw/zig/dns/-/issues/151) | **Resolved** |
 | QC-04 | Critical | 60 | PipelinedBatch.execute infinite loop | [#156](https://gitlab.com/devnw/zig/dns/-/issues/156) | **Resolved** |
 | RE-05 | Medium | 40 | rdataOffset pointer arithmetic -- bounds check added | -- | **Resolved** |
@@ -127,7 +127,7 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QC-NEW-02 | **Resolved** | 48 | TOCTOU in connection limit check | -- | **Resolved** |
 | QM-NEW-02 | Medium | 36 | ResolveResult defined twice with incompatible shapes | -- | **Won't Do** |
 | QM-NEW-05 | Medium | 24 | resolveNsAddress OOM now propagated | -- | **Resolved** |
-| EH-11 | Medium | 18 | zdig TCP read loop silent truncation on connection close | [#194](https://gitlab.com/devnw/zig/dns/-/issues/194) | Open |
+| EH-11 | Medium | 18 | zdig TCP read loop silent truncation on connection close | [#194](https://gitlab.com/devnw/zig/dns/-/issues/194) | **Resolved** |
 | AC-03 | Medium | 18 | Cache-hit errdefer in resolve() -- errdefer fixed | -- | **Resolved** |
 | QS-NEW-05 | Medium | 18 | stub.zig OOM now propagated | -- | **Resolved** |
 
@@ -154,8 +154,8 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QC-NEW-03 | High | 64 | sendQuery() triple duplication (~150 lines) | -- | **Won't Do** |
 | QH-06 | High | 48 | Missing error.InProgress in stub.zig | [#160](https://gitlab.com/devnw/zig/dns/-/issues/160) | **Resolved** |
 | QS-NEW-01 | Medium | 45 | responseMatchesQuery duplicated (~20 lines) | -- | **Won't Do** |
-| RD-01 | Medium | 30 | name.zig compression pointer checks repeated 7+ times; no shared LabelIterator | [#188](https://gitlab.com/devnw/zig/dns/-/issues/188) | Open |
-| DUP-02 | Medium | 24 | responseMatchesQuery duplicated in stub.zig and recursive.zig (~20 lines) | [#187](https://gitlab.com/devnw/zig/dns/-/issues/187) | Open |
+| RD-01 | Medium | 30 | name.zig compression pointer checks -- LabelIterator extracted; used by 5 functions | [#188](https://gitlab.com/devnw/zig/dns/-/issues/188) | **Resolved** |
+| DUP-02 | **Resolved** | 24 | ~~responseMatchesQuery duplicated in stub.zig and recursive.zig~~ Made stub.zig canonical; recursive.zig imports it | [#187](https://gitlab.com/devnw/zig/dns/-/issues/187) | **Resolved** |
 | QM-07 | **Resolved** | 48 | ~~3x duplicate I/O helpers (~240 lines)~~ Extracted shared `src/transports/io.zig` | [#170](https://gitlab.com/devnw/zig/dns/-/issues/170) | **Resolved** |
 | QM-01 | **Resolved** | 36 | ~~parseName() duplicated in tsig/sig0~~ | [#102](https://gitlab.com/devnw/zig/dns/-/issues/102) | **Resolved** |
 | QM-05 | **Resolved** | 36 | ~~Silent error swallowing (catch {})~~ | [#117](https://gitlab.com/devnw/zig/dns/-/issues/117) | **Resolved** |
@@ -171,7 +171,7 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QH-05 | High | 64 | Zero fuzz testing for wire parsers | [#98](https://gitlab.com/devnw/zig/dns/-/issues/98) | **Deferred** |
 | QH-NEW-02 | High | 48 | resolveIterative (219 lines) has zero direct test coverage | -- | **Won't Do** |
 | TC-01 | Medium | 48 | resolveIterative zero integration test coverage (deep review confirmation of QH-NEW-02) | [#190](https://gitlab.com/devnw/zig/dns/-/issues/190) | Open |
-| CI-04 | Medium | 30 | cmd/zdig.zig: 1051 lines, zero tests; security-sensitive functions untested | [#196](https://gitlab.com/devnw/zig/dns/-/issues/196) | Open |
+| CI-04 | Medium | 30 | cmd/zdig.zig: 16 tests added for escapeJsonString and addressMatches | [#196](https://gitlab.com/devnw/zig/dns/-/issues/196) | **Resolved** |
 | QS-NEW-07 | Low | 12 | Client tests bail on network failure | -- | **Won't Do** |
 | QL-05 | **Resolved** | 16 | Mutable statics in MockTlsBackend | [#181](https://gitlab.com/devnw/zig/dns/-/issues/181) | **Resolved** |
 
@@ -215,13 +215,13 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
-| DOC-01 | Medium | 18 | No ownership documentation for Message.data (aliases caller's buffer) | [#198](https://gitlab.com/devnw/zig/dns/-/issues/198) | Open |
+| DOC-01 | Medium | 18 | Ownership documentation added to Message.data | [#198](https://gitlab.com/devnw/zig/dns/-/issues/198) | **Resolved** |
 | QM-06 | **Resolved** | 24 | ~~ARCHITECTURE.md missing 60% of modules~~ | [#119](https://gitlab.com/devnw/zig/dns/-/issues/119) | **Resolved** |
 | QM-NEW-04 | Low | 16 | lib.zig updated: "Minimal dependencies (optional spice for parallelism)" | Commit 6d42d51 | **Resolved** |
 | QL-04 | **Resolved** | 16 | ~~No doc comment on rdata-offset invariant~~ | [#127](https://gitlab.com/devnw/zig/dns/-/issues/127) | **Resolved** |
 | QL-08 | **Resolved** | 12 | ~~ARCHITECTURE.md references deleted/dead files~~ | [#184](https://gitlab.com/devnw/zig/dns/-/issues/184) | **Resolved** |
-| DOC-02 | Low | 8 | connection_pool createConnection accepts/discards server/timeout_ms; misleading API | [#200](https://gitlab.com/devnw/zig/dns/-/issues/200) | Open |
-| DOC-03 | Low | 8 | No module-level library user guide for downstream consumers | [#201](https://gitlab.com/devnw/zig/dns/-/issues/201) | Open |
+| DOC-02 | Low | 8 | Lazy-connection doc comment added to createConnection | [#200](https://gitlab.com/devnw/zig/dns/-/issues/200) | **Resolved** |
+| DOC-03 | Low | 8 | No module-level library user guide for downstream consumers | [#201](https://gitlab.com/devnw/zig/dns/-/issues/201) | **Won't Do** |
 | DG-01 | Info | -- | resolveIterative doc comment added | -- | **Resolved** |
 | DG-02 | Info | -- | ResolutionState doc comments added | -- | **Resolved** |
 | DG-03 | Info | -- | MXRecord ownership doc added | -- | **Resolved** |
@@ -237,12 +237,12 @@ New quick wins identified in deep audit (2026-03-24):
 
 | ID | PriorityScore | Finding | Effort | Status |
 |----|---------------|---------|--------|--------|
-| MEM-01 | 60 | Add `owns_servers` flag to stub.zig; free in deinit when true | S | Open |
-| EH-08 | 60 | Replace `@intCast(now - then)` with saturating subtraction at 6+ sites | S | Open |
-| DOC-01 | 18 | Add ownership doc comment to Message.data explaining aliasing | S | Open |
-| EH-11 | 18 | Add completeness check to zdig TCP read loop | S | Open |
-| DUP-02 | 24 | Extract responseMatchesQuery to shared module | S | Open |
-| DOC-02 | 8 | Add doc comment to createConnection explaining lazy-connection design | S | Open |
+| MEM-01 | 60 | Add `owns_servers` flag to stub.zig; free in deinit when true | S | **Resolved** |
+| EH-08 | 60 | Replace `@intCast(now - then)` with `@max(0, delta)` at 6+ sites | S | **Resolved** |
+| DOC-01 | 18 | Add ownership doc comment to Message.data explaining aliasing | S | **Resolved** |
+| EH-11 | 18 | TCP truncation now returns error.ConnectionClosed | S | **Resolved** |
+| DUP-02 | 24 | Extract responseMatchesQuery to shared module | S | **Resolved** |
+| DOC-02 | 8 | Add doc comment to createConnection explaining lazy-connection design | S | **Resolved** |
 
 Previously resolved or Won't Do quick wins:
 
@@ -302,9 +302,9 @@ New medium-term items from deep audit (2026-03-24):
 | ID | PriorityScore | Finding | Effort | Status |
 |----|---------------|---------|--------|--------|
 | TC-01 | 48 | Add mock transport + integration tests for resolveIterative (confirms QH-NEW-02) | L | Open |
-| RD-01 | 30 | Extract LabelIterator from 7+ duplicated compression pointer check sites in name.zig | M | Open |
-| CI-04 | 30 | Extract and test security-sensitive zdig functions (escapeJsonString, addressMatches) | M | Open |
-| DOC-03 | 8 | Create module-level library user guide (docs/USAGE.md) | M | Open |
+| RD-01 | 30 | LabelIterator extracted; used by 5 functions in name.zig | M | **Resolved** |
+| CI-04 | 30 | 16 tests added for escapeJsonString and addressMatches | M | **Resolved** |
+| DOC-03 | 8 | Create module-level library user guide (docs/USAGE.md) | M | **Won't Do** |
 
 Previously resolved or Won't Do medium-term items:
 

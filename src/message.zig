@@ -38,7 +38,10 @@ pub const max_section_count = 4096;
 
 /// DNS Message (RFC 1035 Section 4)
 pub const Message = struct {
-    /// Raw message data
+    /// Raw message data.
+    /// IMPORTANT: This is a borrowed reference to the caller's buffer.
+    /// The caller must ensure the underlying memory outlives this Message.
+    /// The Message does NOT own this memory and will NOT free it.
     data: []const u8,
 
     /// Message header
@@ -304,6 +307,27 @@ pub fn buildQuery(allocator: std.mem.Allocator, id: u16, domain: []const u8, qty
     try builder.addQuestion(domain, qtype, qclass);
 
     return builder.finish();
+}
+
+/// Maximum size of a single-question DNS query: 12 (header) + 255 (name) + 4 (qtype/qclass).
+pub const max_query_size = header_mod.header_size + name_mod.max_name_length + 4;
+
+/// Build a simple DNS query into a caller-provided buffer (zero heap allocation).
+/// Buffer must be at least max_query_size (271) bytes.
+/// Returns a slice of `buf` containing the encoded query.
+pub fn buildQueryBuf(buf: *[max_query_size]u8, id: u16, domain: []const u8, qtype: Type, qclass: Class, rd: bool) ![]u8 {
+    // Encode header
+    var header = Header.newQuery(id, rd);
+    header.qdcount = 1;
+    try header.encode(buf[0..header_mod.header_size]);
+
+    // Encode question name directly into buffer after header
+    const name = try Name.encodeBuf(domain, buf[header_mod.header_size..][0..name_mod.max_name_length]);
+    const q_start = header_mod.header_size + name.wire_length;
+    std.mem.writeInt(u16, buf[q_start..][0..2], qtype.toInt(), .big);
+    std.mem.writeInt(u16, buf[q_start + 2 ..][0..2], qclass.toInt(), .big);
+
+    return buf[0 .. q_start + 4];
 }
 
 test "Message.parse simple query" {

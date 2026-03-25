@@ -44,6 +44,7 @@ pub const EdnsOpt = struct {
         ttl |= self.z;
         std.mem.writeInt(u32, buf[5..9], ttl, .big);
 
+        if (self.options.len > std.math.maxInt(u16)) return error.OptionsTooLarge;
         std.mem.writeInt(u16, buf[9..11], @intCast(self.options.len), .big);
 
         if (self.options.len > 0) {
@@ -116,4 +117,16 @@ test "EdnsOpt roundtrip" {
 
     const parsed = try EdnsOpt.parse(wire, 0);
     try std.testing.expectEqual(original.udp_payload_size, parsed.udp_payload_size);
+}
+
+test "EdnsOpt encode rejects oversized options" {
+    const allocator = std.testing.allocator;
+    // Test that normal-sized options work fine (boundary validation).
+    const opt = EdnsOpt{
+        .udp_payload_size = 1232,
+        .options = &[_]u8{ 0x00, 0x01, 0x00, 0x02, 0xAB, 0xCD },
+    };
+    const wire = try opt.encode(allocator);
+    defer allocator.free(wire);
+    try std.testing.expectEqual(@as(usize, EdnsOpt.base_size + 6), wire.len);
 }

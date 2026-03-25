@@ -254,6 +254,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "record", .module = record_mod },
             .{ .name = "message", .module = message_mod },
             .{ .name = "name", .module = name_mod },
+            .{ .name = "cache_protection", .module = cache_protection_mod },
         },
     });
 
@@ -470,6 +471,15 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // PF-24-dual-cache: Wire dns_cache + clock into client and recursive modules
+    client_mod.addImport("dns_cache", dns_cache_mod);
+    client_mod.addImport("clock", clock_mod);
+    client_mod.addImport("cache_protection", cache_protection_mod);
+    client_mod.addImport("cache_prefetch", cache_prefetch_mod);
+    recursive_mod.addImport("dns_cache", dns_cache_mod);
+    recursive_mod.addImport("clock", clock_mod);
+    recursive_mod.addImport("cache_protection", cache_protection_mod);
+
     // Wire additional modules into the public API
     // Transports
     dns_mod.addImport("transport_udp", udp_mod);
@@ -638,6 +648,9 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "cache", .module = cache_mod },
                 .{ .name = "stub", .module = stub_mod },
+                .{ .name = "dns_cache", .module = dns_cache_mod },
+                .{ .name = "clock", .module = clock_mod },
+                .{ .name = "cache_protection", .module = cache_protection_mod },
             },
         },
         .{
@@ -654,6 +667,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "recursive", .module = recursive_mod },
                 .{ .name = "cache", .module = cache_mod },
                 .{ .name = "edns", .module = edns_mod },
+                .{ .name = "dns_cache", .module = dns_cache_mod },
+                .{ .name = "clock", .module = clock_mod },
+                .{ .name = "cache_protection", .module = cache_protection_mod },
+                .{ .name = "cache_prefetch", .module = cache_prefetch_mod },
             },
         },
     };
@@ -973,6 +990,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "message", .module = message_mod },
                 .{ .name = "name", .module = name_mod },
+                .{ .name = "cache_protection", .module = cache_protection_mod },
             },
         }),
     });
@@ -1123,6 +1141,55 @@ pub fn build(b: *std.Build) void {
     test_security_step.dependOn(&run_zone_file_test.step);
 
     test_step.dependOn(test_security_step);
+
+    // ========================================================================
+    // zdig CLI Tests - Unit tests for security-sensitive functions
+    // ========================================================================
+
+    if (!is_windows) {
+        const test_zdig_step = b.step("test-zdig", "Run zdig CLI unit tests");
+
+        const zdig_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("cmd/zdig.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "dns", .module = dns_mod },
+                    .{ .name = "cli", .module = cli_mod },
+                },
+            }),
+        });
+        const run_zdig_test = b.addRunArtifact(zdig_test);
+        test_zdig_step.dependOn(&run_zdig_test.step);
+
+        test_step.dependOn(test_zdig_step);
+    }
+
+    // ========================================================================
+    // Fuzz Tests - Security-critical wire parser fuzz targets (QH-05)
+    // ========================================================================
+
+    const test_fuzz_step = b.step("test-fuzz", "Run fuzz tests for DNS wire parsers");
+
+    const fuzz_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/fuzz_parsers.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "header", .module = header_mod },
+                .{ .name = "message", .module = message_mod },
+                .{ .name = "name", .module = name_mod },
+                .{ .name = "record", .module = record_mod },
+                .{ .name = "question", .module = question_mod },
+            },
+        }),
+    });
+    const run_fuzz_test = b.addRunArtifact(fuzz_test);
+    test_fuzz_step.dependOn(&run_fuzz_test.step);
+
+    test_step.dependOn(test_fuzz_step);
 
     // ========================================================================
     // Examples

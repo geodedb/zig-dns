@@ -123,9 +123,9 @@ pub const CachePrefetcher = struct {
         // Check if remaining TTL is below threshold
         if (remaining >= threshold) return false;
 
-        // Check if already in flight
-        const key = self.makeKey(name, qtype, qclass) catch return false;
-        defer self.allocator.free(key);
+        // Check if already in flight (ephemeral lookup -- stack buffer, no heap)
+        var key_buf: [280]u8 = undefined;
+        const key = makeKeyBuf(&key_buf, name, qtype, qclass) orelse return false;
 
         if (self.in_flight.contains(key)) return false;
         if (self.pending.contains(key)) return false;
@@ -143,20 +143,17 @@ pub const CachePrefetcher = struct {
         // Check queue limit
         if (self.pending.count() >= self.options.max_pending) return false;
 
+        // Fast duplicate check using stack buffer -- avoids heap alloc on early exit
+        var key_buf: [280]u8 = undefined;
+        const stack_key = makeKeyBuf(&key_buf, name, qtype, qclass);
+        if (stack_key) |sk| {
+            if (self.pending.contains(sk)) return false;
+            if (self.in_flight.contains(sk)) return false;
+        }
+
+        // Heap-allocate key for ownership transfer into HashMap
         const key = try self.makeKey(name, qtype, qclass);
         errdefer self.allocator.free(key);
-
-        // Already scheduled?
-        if (self.pending.contains(key)) {
-            self.allocator.free(key);
-            return false;
-        }
-
-        // Already in flight?
-        if (self.in_flight.contains(key)) {
-            self.allocator.free(key);
-            return false;
-        }
 
         const name_copy = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(name_copy);
@@ -202,8 +199,9 @@ pub const CachePrefetcher = struct {
     /// Removes the entry from the in_flight set.
     /// The name memory is freed.
     pub fn completePrefetch(self: *Self, name: []const u8, qtype: Type, qclass: Class) void {
-        const key = self.makeKey(name, qtype, qclass) catch return;
-        defer self.allocator.free(key);
+        // Ephemeral lookup -- stack buffer, no heap allocation
+        var key_buf: [280]u8 = undefined;
+        const key = makeKeyBuf(&key_buf, name, qtype, qclass) orelse return;
 
         if (self.in_flight.fetchRemove(key)) |kv| {
             self.allocator.free(kv.key);
@@ -215,8 +213,9 @@ pub const CachePrefetcher = struct {
 
     /// Cancel a pending prefetch request
     pub fn cancelPrefetch(self: *Self, name: []const u8, qtype: Type, qclass: Class) void {
-        const key = self.makeKey(name, qtype, qclass) catch return;
-        defer self.allocator.free(key);
+        // Ephemeral lookup -- stack buffer, no heap allocation
+        var key_buf: [280]u8 = undefined;
+        const key = makeKeyBuf(&key_buf, name, qtype, qclass) orelse return;
 
         if (self.pending.fetchRemove(key)) |kv| {
             self.allocator.free(kv.value.name);
@@ -254,23 +253,36 @@ pub const CachePrefetcher = struct {
 
     /// Check if a key is in the prefetch queue or in flight
     pub fn isPending(self: *Self, name: []const u8, qtype: Type, qclass: Class) bool {
-        const key = self.makeKey(name, qtype, qclass) catch return false;
-        defer self.allocator.free(key);
+        // Ephemeral lookup -- stack buffer, no heap allocation
+        var key_buf: [280]u8 = undefined;
+        const key = makeKeyBuf(&key_buf, name, qtype, qclass) orelse return false;
         return self.pending.contains(key) or self.in_flight.contains(key);
     }
 
-    fn makeKey(self: *Self, name: []const u8, qtype: Type, qclass: Class) ![]u8 {
-        // Lowercase into a stack buffer for case-insensitive matching.
-        // DNS names are at most 255 bytes (RFC 1035 Section 2.3.4).
-        // This avoids the extra heap allocation that the old code performed
-        // (PF-22: apply PF-15 stack-buffer pattern from DnsCache.makeKey).
+    /// Format cache key into a caller-provided buffer, returning the formatted slice.
+    /// Used by ephemeral callers (contains/lookup only) to avoid heap allocation.
+    /// DNS names are at most 255 bytes; with "PF:" prefix and type/class fields,
+    /// the key fits comfortably in a 280-byte stack buffer.
+    fn makeKeyBuf(buf: []u8, name: []const u8, qtype: Type, qclass: Class) ?[]const u8 {
         var lower_buf: [types.max_name_length]u8 = undefined;
         const clamped_len = @min(name.len, lower_buf.len);
         for (name[0..clamped_len], 0..) |c, i| {
             lower_buf[i] = std.ascii.toLower(c);
         }
+        return std.fmt.bufPrint(buf, "PF:{s}:{d}:{d}", .{
+            lower_buf[0..clamped_len],
+            @intFromEnum(qtype),
+            @intFromEnum(qclass),
+        }) catch null;
+    }
 
-        // Single heap allocation for the final key string
+    /// Heap-allocating key builder for callers that need ownership (e.g., HashMap put).
+    fn makeKey(self: *Self, name: []const u8, qtype: Type, qclass: Class) ![]u8 {
+        var lower_buf: [types.max_name_length]u8 = undefined;
+        const clamped_len = @min(name.len, lower_buf.len);
+        for (name[0..clamped_len], 0..) |c, i| {
+            lower_buf[i] = std.ascii.toLower(c);
+        }
         return std.fmt.allocPrint(self.allocator, "PF:{s}:{d}:{d}", .{
             lower_buf[0..clamped_len],
             @intFromEnum(qtype),

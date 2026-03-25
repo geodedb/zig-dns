@@ -35,6 +35,227 @@ pub const Name = struct {
 
     const Self = @This();
 
+    /// Iterator that yields successive DNS labels from a (possibly compressed)
+    /// name, encapsulating all compression pointer traversal and security checks
+    /// (hop counting, forward pointer rejection) in one place.
+    ///
+    /// Each call to `next()` returns the raw label bytes (without the length
+    /// prefix) or `null` when the root terminator is reached.
+    ///
+    /// SECURITY: Limits compression pointer hops to prevent infinite loops
+    /// from maliciously crafted packets with circular pointers (CWE-835).
+    /// SECURITY: Rejects forward compression pointers (SEC-SCAN-07) by
+    /// enforcing that each successive pointer target is strictly less than
+    /// the previous one.
+    pub const LabelIterator = struct {
+        /// Current data slice being walked (may change on pointer hops)
+        data: []const u8,
+        /// Full DNS message for resolving compression pointers (null if uncompressed)
+        message: ?[]const u8,
+        /// Current position within `data`
+        pos: usize,
+        /// Number of compression pointer hops followed so far
+        pointer_hops: u8,
+        /// Last compression pointer target (for forward pointer rejection)
+        last_ptr_target: ?u16,
+        /// Whether the iterator has finished (reached root label or error)
+        done: bool,
+
+        pub fn init(name: Self, message: ?[]const u8) LabelIterator {
+            return .{
+                .data = name.labels,
+                .message = message,
+                .pos = 0,
+                .pointer_hops = 0,
+                .last_ptr_target = null,
+                .done = false,
+            };
+        }
+
+        /// Returns the next label as a slice of raw bytes (without the length
+        /// prefix), or `null` when done.  Follows compression pointers with
+        /// all security checks.
+        pub fn next(self: *LabelIterator) !?[]const u8 {
+            if (self.done) return null;
+
+            while (self.pos < self.data.len) {
+                const len_byte = self.data[self.pos];
+
+                // Root label -- end of name
+                if (len_byte == 0) {
+                    self.done = true;
+                    return null;
+                }
+
+                // Compression pointer
+                if ((len_byte & compression_marker) == compression_marker) {
+                    if (self.message) |msg| {
+                        if (self.pos + 1 >= self.data.len) {
+                            self.done = true;
+                            return error.InvalidCompression;
+                        }
+                        self.pointer_hops += 1;
+                        if (self.pointer_hops > max_compression_hops) {
+                            self.done = true;
+                            return error.CompressionLoopDetected;
+                        }
+                        const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | self.data[self.pos + 1];
+                        // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
+                        if (self.last_ptr_target) |prev| {
+                            if (ptr_offset >= prev) {
+                                self.done = true;
+                                return error.ForwardPointer;
+                            }
+                        }
+                        self.last_ptr_target = ptr_offset;
+                        self.data = msg[ptr_offset..];
+                        self.pos = 0;
+                        continue;
+                    } else {
+                        // Compressed name without full message -- cannot resolve
+                        self.done = true;
+                        return error.CompressionRequiresFullMessage;
+                    }
+                }
+
+                // Regular label
+                const label_len: usize = len_byte;
+                if (self.pos + 1 + label_len > self.data.len) {
+                    self.done = true;
+                    return error.UnexpectedEnd;
+                }
+
+                const label = self.data[self.pos + 1 ..][0..label_len];
+                self.pos += 1 + label_len;
+                return label;
+            }
+
+            self.done = true;
+            return null;
+        }
+
+        /// Variant of `next()` that silently stops on unresolvable compression
+        /// pointers instead of returning an error.  Used by `labelCount` which
+        /// historically treated missing full_message as end-of-name.
+        pub fn nextOrStop(self: *LabelIterator) error{ CompressionLoopDetected, ForwardPointer }!?[]const u8 {
+            if (self.done) return null;
+
+            while (self.pos < self.data.len) {
+                const len_byte = self.data[self.pos];
+
+                if (len_byte == 0) {
+                    self.done = true;
+                    return null;
+                }
+
+                if ((len_byte & compression_marker) == compression_marker) {
+                    if (self.message) |msg| {
+                        if (self.pos + 1 >= self.data.len) {
+                            self.done = true;
+                            return null;
+                        }
+                        self.pointer_hops += 1;
+                        if (self.pointer_hops > max_compression_hops) {
+                            self.done = true;
+                            return error.CompressionLoopDetected;
+                        }
+                        const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | self.data[self.pos + 1];
+                        if (self.last_ptr_target) |prev| {
+                            if (ptr_offset >= prev) {
+                                self.done = true;
+                                return error.ForwardPointer;
+                            }
+                        }
+                        self.last_ptr_target = ptr_offset;
+                        self.data = msg[ptr_offset..];
+                        self.pos = 0;
+                        continue;
+                    } else {
+                        // No full message -- stop iteration silently
+                        self.done = true;
+                        return null;
+                    }
+                }
+
+                const label_len: usize = len_byte;
+                if (self.pos + 1 + label_len > self.data.len) {
+                    self.done = true;
+                    return null;
+                }
+
+                const label = self.data[self.pos + 1 ..][0..label_len];
+                self.pos += 1 + label_len;
+                return label;
+            }
+
+            self.done = true;
+            return null;
+        }
+
+        /// Variant of `next()` used by `eql()` which returns `false` on any
+        /// error instead of propagating it.  Returns `.done` sentinel when
+        /// the root label is reached or an error occurs.
+        pub const EqlResult = union(enum) {
+            label: []const u8,
+            done: void,
+            err: void,
+        };
+
+        pub fn nextForEql(self: *LabelIterator) EqlResult {
+            if (self.done) return .{ .done = {} };
+
+            while (self.pos < self.data.len) {
+                const len_byte = self.data[self.pos];
+
+                if (len_byte == 0) {
+                    self.done = true;
+                    return .{ .done = {} };
+                }
+
+                if ((len_byte & compression_marker) == compression_marker) {
+                    if (self.message) |msg| {
+                        if (self.pos + 1 >= self.data.len) {
+                            self.done = true;
+                            return .{ .err = {} };
+                        }
+                        self.pointer_hops += 1;
+                        if (self.pointer_hops > max_compression_hops) {
+                            self.done = true;
+                            return .{ .err = {} };
+                        }
+                        const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | self.data[self.pos + 1];
+                        if (self.last_ptr_target) |prev| {
+                            if (ptr_offset >= prev) {
+                                self.done = true;
+                                return .{ .err = {} };
+                            }
+                        }
+                        self.last_ptr_target = ptr_offset;
+                        self.data = msg;
+                        self.pos = ptr_offset;
+                        continue;
+                    } else {
+                        self.done = true;
+                        return .{ .err = {} };
+                    }
+                }
+
+                const label_len: usize = len_byte;
+                if (self.pos + 1 + label_len > self.data.len) {
+                    self.done = true;
+                    return .{ .err = {} };
+                }
+
+                const label = self.data[self.pos + 1 ..][0..label_len];
+                self.pos += 1 + label_len;
+                return .{ .label = label };
+            }
+
+            self.done = true;
+            return .{ .done = {} };
+        }
+    };
+
     /// Parse a DNS name from wire format
     /// Handles compression pointers (RFC 1035 Section 4.1.4)
     ///
@@ -212,66 +433,22 @@ pub const Name = struct {
 
     /// Convert wire format name to human-readable string (e.g., "example.com")
     ///
-    /// SECURITY: Limits compression pointer hops to prevent infinite loops
-    /// from maliciously crafted packets with circular pointers (CWE-835).
+    /// SECURITY: Compression pointer traversal with hop counting and forward
+    /// pointer rejection is handled by `LabelIterator`.
     pub fn toString(self: Self, allocator: std.mem.Allocator, full_message: ?[]const u8) ![]u8 {
         var result: std.ArrayList(u8) = .empty;
         defer result.deinit(allocator);
 
-        var pos: usize = 0;
-        var data = self.labels;
         var first = true;
-        var pointer_hops: u8 = 0;
-        // SECURITY (SEC-SCAN-07): Track last pointer target to reject forward pointers.
-        // Each successive compression pointer must target a strictly earlier offset,
-        // preventing forward-pointer attacks (RFC 1035 compliance).
-        var last_ptr_target: ?u16 = null;
+        var iter = LabelIterator.init(self, full_message);
 
-        while (pos < data.len) {
-            const len_byte = data[pos];
-
-            if (len_byte == 0) {
-                break;
-            }
-
-            // Handle compression pointer
-            if ((len_byte & compression_marker) == compression_marker) {
-                if (full_message) |msg| {
-                    if (pos + 1 >= data.len) {
-                        return error.InvalidCompression;
-                    }
-                    pointer_hops += 1;
-                    if (pointer_hops > max_compression_hops) {
-                        return error.CompressionLoopDetected;
-                    }
-                    const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | data[pos + 1];
-                    // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
-                    // Each pointer target must be strictly less than the previous target
-                    // to ensure we always move backwards in the message.
-                    if (last_ptr_target) |prev| {
-                        if (ptr_offset >= prev) return error.ForwardPointer;
-                    }
-                    last_ptr_target = ptr_offset;
-                    data = msg[ptr_offset..];
-                    pos = 0;
-                    continue;
-                } else {
-                    return error.CompressionRequiresFullMessage;
-                }
-            }
-
-            const label_len = len_byte;
-            if (pos + 1 + label_len > data.len) {
-                return error.UnexpectedEnd;
-            }
-
+        while (try iter.next()) |label| {
             if (!first) {
                 try result.append(allocator, '.');
             }
             first = false;
 
-            try result.appendSlice(allocator, data[pos + 1 ..][0..label_len]);
-            pos += 1 + label_len;
+            try result.appendSlice(allocator, label);
         }
 
         // Return root if empty
@@ -286,51 +463,15 @@ pub const Name = struct {
     /// Returns a slice of `buf` containing the dotted name (e.g., "example.com").
     /// Avoids heap allocation -- DNS names are at most 253 chars, so a 256-byte
     /// stack buffer always suffices.
+    ///
+    /// SECURITY: Compression pointer traversal with hop counting and forward
+    /// pointer rejection is handled by `LabelIterator`.
     pub fn toStringBuf(self: Self, buf: []u8, full_message: ?[]const u8) ![]const u8 {
         var out_pos: usize = 0;
-        var pos: usize = 0;
-        var data = self.labels;
         var first = true;
-        var pointer_hops: u8 = 0;
-        // SECURITY (SEC-SCAN-07): Track last pointer target to reject forward pointers.
-        var last_ptr_target: ?u16 = null;
+        var iter = LabelIterator.init(self, full_message);
 
-        while (pos < data.len) {
-            const len_byte = data[pos];
-
-            if (len_byte == 0) {
-                break;
-            }
-
-            // Handle compression pointer
-            if ((len_byte & compression_marker) == compression_marker) {
-                if (full_message) |msg| {
-                    if (pos + 1 >= data.len) {
-                        return error.InvalidCompression;
-                    }
-                    pointer_hops += 1;
-                    if (pointer_hops > max_compression_hops) {
-                        return error.CompressionLoopDetected;
-                    }
-                    const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | data[pos + 1];
-                    // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
-                    if (last_ptr_target) |prev| {
-                        if (ptr_offset >= prev) return error.ForwardPointer;
-                    }
-                    last_ptr_target = ptr_offset;
-                    data = msg[ptr_offset..];
-                    pos = 0;
-                    continue;
-                } else {
-                    return error.CompressionRequiresFullMessage;
-                }
-            }
-
-            const label_len: usize = len_byte;
-            if (pos + 1 + label_len > data.len) {
-                return error.UnexpectedEnd;
-            }
-
+        while (try iter.next()) |label| {
             if (!first) {
                 if (out_pos >= buf.len) return error.NameTooLong;
                 buf[out_pos] = '.';
@@ -338,10 +479,9 @@ pub const Name = struct {
             }
             first = false;
 
-            if (out_pos + label_len > buf.len) return error.NameTooLong;
-            @memcpy(buf[out_pos..][0..label_len], data[pos + 1 ..][0..label_len]);
-            out_pos += label_len;
-            pos += 1 + label_len;
+            if (out_pos + label.len > buf.len) return error.NameTooLong;
+            @memcpy(buf[out_pos..][0..label.len], label);
+            out_pos += label.len;
         }
 
         // Return root if empty
@@ -356,45 +496,14 @@ pub const Name = struct {
 
     /// Get the number of labels in the name
     ///
-    /// SECURITY: Limits compression pointer hops to prevent infinite loops
-    /// from maliciously crafted packets with circular pointers (CWE-835).
+    /// SECURITY: Compression pointer traversal with hop counting and forward
+    /// pointer rejection is handled by `LabelIterator`.
     pub fn labelCount(self: Self, full_message: ?[]const u8) error{ CompressionLoopDetected, ForwardPointer }!usize {
         var count: usize = 0;
-        var pos: usize = 0;
-        var data = self.labels;
-        var pointer_hops: u8 = 0;
-        // SECURITY (SEC-SCAN-07): Track last pointer target to reject forward pointers.
-        var last_ptr_target: ?u16 = null;
+        var iter = LabelIterator.init(self, full_message);
 
-        while (pos < data.len) {
-            const len_byte = data[pos];
-
-            if (len_byte == 0) {
-                break;
-            }
-
-            if ((len_byte & compression_marker) == compression_marker) {
-                if (full_message) |msg| {
-                    pointer_hops += 1;
-                    if (pointer_hops > max_compression_hops) {
-                        return error.CompressionLoopDetected;
-                    }
-                    const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | data[pos + 1];
-                    // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
-                    if (last_ptr_target) |prev| {
-                        if (ptr_offset >= prev) return error.ForwardPointer;
-                    }
-                    last_ptr_target = ptr_offset;
-                    data = msg[ptr_offset..];
-                    pos = 0;
-                    continue;
-                } else {
-                    break;
-                }
-            }
-
+        while (try iter.nextOrStop()) |_| {
             count += 1;
-            pos += 1 + len_byte;
         }
 
         return count;
@@ -402,88 +511,37 @@ pub const Name = struct {
 
     /// Compare two names for equality (case-insensitive per RFC 1035)
     /// Zero-allocation: walks wire-format labels directly, following compression pointers.
+    ///
+    /// SECURITY: Compression pointer traversal with hop counting and forward
+    /// pointer rejection is handled by `LabelIterator`.
     pub fn eql(self: Self, other: Self, self_msg: ?[]const u8, other_msg: ?[]const u8) bool {
-        var self_data = self.labels;
-        var self_pos: usize = 0;
-        var self_hops: u8 = 0;
-        // SECURITY (SEC-SCAN-07): Track last pointer target to reject forward pointers.
-        var self_last_ptr: ?u16 = null;
-
-        var other_data = other.labels;
-        var other_pos: usize = 0;
-        var other_hops: u8 = 0;
-        var other_last_ptr: ?u16 = null;
+        var self_iter = LabelIterator.init(self, self_msg);
+        var other_iter = LabelIterator.init(other, other_msg);
 
         while (true) {
-            // Follow compression pointers for self
-            while (self_pos < self_data.len and
-                (self_data[self_pos] & compression_marker) == compression_marker)
-            {
-                self_hops += 1;
-                if (self_hops > max_compression_hops) return false;
-                if (self_msg) |msg| {
-                    if (self_pos + 1 >= self_data.len) return false;
-                    const ptr = (@as(u16, self_data[self_pos] & 0x3F) << 8) | self_data[self_pos + 1];
-                    // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
-                    if (self_last_ptr) |prev| {
-                        if (ptr >= prev) return false;
+            const self_result = self_iter.nextForEql();
+            const other_result = other_iter.nextForEql();
+
+            switch (self_result) {
+                .err => return false,
+                .done => {
+                    // Self is done; other must also be done for equality
+                    return switch (other_result) {
+                        .done => true,
+                        else => false,
+                    };
+                },
+                .label => |self_label| {
+                    switch (other_result) {
+                        .label => |other_label| {
+                            // Compare label lengths and bytes case-insensitively
+                            if (self_label.len != other_label.len) return false;
+                            if (!std.ascii.eqlIgnoreCase(self_label, other_label)) return false;
+                        },
+                        else => return false,
                     }
-                    self_last_ptr = ptr;
-                    self_data = msg;
-                    self_pos = ptr;
-                } else {
-                    return false; // compressed name without full message
-                }
+                },
             }
-
-            // Follow compression pointers for other
-            while (other_pos < other_data.len and
-                (other_data[other_pos] & compression_marker) == compression_marker)
-            {
-                other_hops += 1;
-                if (other_hops > max_compression_hops) return false;
-                if (other_msg) |msg| {
-                    if (other_pos + 1 >= other_data.len) return false;
-                    const ptr = (@as(u16, other_data[other_pos] & 0x3F) << 8) | other_data[other_pos + 1];
-                    // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
-                    if (other_last_ptr) |prev| {
-                        if (ptr >= prev) return false;
-                    }
-                    other_last_ptr = ptr;
-                    other_data = msg;
-                    other_pos = ptr;
-                } else {
-                    return false;
-                }
-            }
-
-            // Bounds check
-            if (self_pos >= self_data.len or other_pos >= other_data.len) return false;
-
-            const self_len = self_data[self_pos];
-            const other_len = other_data[other_pos];
-
-            // Both at root label -- names are equal
-            if (self_len == 0 and other_len == 0) return true;
-
-            // One at root but not the other -- different number of labels
-            if (self_len == 0 or other_len == 0) return false;
-
-            // Label lengths differ
-            if (self_len != other_len) return false;
-
-            // Bounds check for label data
-            if (self_pos + 1 + self_len > self_data.len) return false;
-            if (other_pos + 1 + other_len > other_data.len) return false;
-
-            // Compare label bytes case-insensitively (ASCII only per RFC 4343)
-            const self_label = self_data[self_pos + 1 ..][0..self_len];
-            const other_label = other_data[other_pos + 1 ..][0..other_len];
-            if (!std.ascii.eqlIgnoreCase(self_label, other_label)) return false;
-
-            // Advance past this label
-            self_pos += 1 + self_len;
-            other_pos += 1 + other_len;
         }
     }
 
@@ -494,70 +552,36 @@ pub const Name = struct {
     /// Get the parent domain by removing the leftmost label
     /// Returns null if this is already the root domain
     ///
-    /// SECURITY: Limits compression pointer hops to prevent infinite loops
-    /// from maliciously crafted packets with circular pointers (CWE-835).
+    /// SECURITY: Compression pointer traversal with hop counting and forward
+    /// pointer rejection is handled by `LabelIterator`.
     pub fn parent(self: Self, allocator: std.mem.Allocator, full_message: ?[]const u8) !?[]u8 {
-        var pos: usize = 0;
-        var data = self.labels;
-        var first_label_len: usize = 0;
-        var pointer_hops: u8 = 0;
-        // SECURITY (SEC-SCAN-07): Track last pointer target to reject forward pointers.
-        var last_ptr_target: ?u16 = null;
+        var iter = LabelIterator.init(self, full_message);
 
-        // Handle compression first
-        while (pos < data.len) {
-            const len_byte = data[pos];
-
-            if (len_byte == 0) {
-                break;
-            }
-
-            if ((len_byte & compression_marker) == compression_marker) {
-                if (full_message) |msg| {
-                    if (pos + 1 >= data.len) {
-                        return error.InvalidCompression;
-                    }
-                    pointer_hops += 1;
-                    if (pointer_hops > max_compression_hops) {
-                        return error.CompressionLoopDetected;
-                    }
-                    const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | data[pos + 1];
-                    // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
-                    if (last_ptr_target) |prev| {
-                        if (ptr_offset >= prev) return error.ForwardPointer;
-                    }
-                    last_ptr_target = ptr_offset;
-                    data = msg[ptr_offset..];
-                    pos = 0;
-                    continue;
-                } else {
-                    return error.CompressionRequiresFullMessage;
-                }
-            }
-
-            first_label_len = len_byte;
-            break;
-        }
-
-        // If already root, return null
-        if (first_label_len == 0) {
+        // Skip the first label; if there is none, this is root
+        const first_label = try iter.next();
+        if (first_label == null) {
             return null;
         }
 
-        // Convert to string first, then remove first label
-        const full_str = try self.toString(allocator, full_message);
-        defer allocator.free(full_str);
+        // Build the parent string from the remaining labels
+        var result: std.ArrayList(u8) = .empty;
+        defer result.deinit(allocator);
 
-        // Find first dot
-        const dot_pos = std.mem.indexOfScalar(u8, full_str, '.');
-        if (dot_pos) |dp| {
-            if (dp + 1 < full_str.len) {
-                return try allocator.dupe(u8, full_str[dp + 1 ..]);
+        var first = true;
+        while (try iter.next()) |label| {
+            if (!first) {
+                try result.append(allocator, '.');
             }
+            first = false;
+            try result.appendSlice(allocator, label);
         }
 
-        // Only one label, return root
-        return try allocator.dupe(u8, ".");
+        // If no remaining labels, parent is root
+        if (result.items.len == 0) {
+            return try allocator.dupe(u8, ".");
+        }
+
+        return try result.toOwnedSlice(allocator);
     }
 
     /// Get minimized QNAME for QNAME minimization (RFC 7816)
@@ -636,18 +660,20 @@ pub const Name = struct {
         const include_count = @min(depth, label_count);
         const start_index = label_count - include_count;
 
-        // Build result
-        var result: std.ArrayList(u8) = .empty;
-        defer result.deinit(allocator);
+        // Build result using stack buffer (DNS names are at most 253 text bytes)
+        var buf: [max_name_length]u8 = undefined;
+        var pos: usize = 0;
 
         for (start_index..label_count) |i| {
-            if (result.items.len > 0) {
-                try result.append(allocator, '.');
+            if (pos > 0) {
+                buf[pos] = '.';
+                pos += 1;
             }
-            try result.appendSlice(allocator, labels[i]);
+            @memcpy(buf[pos..][0..labels[i].len], labels[i]);
+            pos += labels[i].len;
         }
 
-        return try result.toOwnedSlice(allocator);
+        return try allocator.dupe(u8, buf[0..pos]);
     }
 };
 
@@ -758,6 +784,92 @@ test "Name.encode simple domain" {
         7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
         3, 'c', 'o', 'm', 0,
     }, encoded);
+}
+
+// ============================================================
+// Tests for LabelIterator
+// ============================================================
+
+test "LabelIterator yields labels for uncompressed name" {
+    const wire_data = [_]u8{
+        3,   'w', 'w', 'w',
+        7,   'e', 'x', 'a',
+        'm', 'p', 'l', 'e',
+        3,   'c', 'o', 'm',
+        0,
+    };
+    const name = try Name.parse(&wire_data, 0);
+    var iter = Name.LabelIterator.init(name, null);
+
+    const label1 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("www", label1);
+
+    const label2 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("example", label2);
+
+    const label3 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("com", label3);
+
+    // Should be done
+    try std.testing.expect((try iter.next()) == null);
+    // Calling again should still return null
+    try std.testing.expect((try iter.next()) == null);
+}
+
+test "LabelIterator yields labels through compression pointers" {
+    const wire_data = [_]u8{
+        // Name 1: example.com at offset 0
+        7,   'e',  'x',  'a', 'm', 'p', 'l', 'e',
+        3,   'c',  'o',  'm', 0,
+        // Name 2: www.<pointer to offset 0> at offset 13
+          3,   'w', 'w',
+        'w', 0xC0, 0x00,
+    };
+    const name = try Name.parse(&wire_data, 13);
+    var iter = Name.LabelIterator.init(name, &wire_data);
+
+    const label1 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("www", label1);
+
+    const label2 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("example", label2);
+
+    const label3 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("com", label3);
+
+    try std.testing.expect((try iter.next()) == null);
+}
+
+test "LabelIterator returns null for root domain" {
+    const wire_data = [_]u8{0};
+    const name = try Name.parse(&wire_data, 0);
+    var iter = Name.LabelIterator.init(name, null);
+
+    try std.testing.expect((try iter.next()) == null);
+}
+
+test "LabelIterator detects forward pointer" {
+    const msg = [_]u8{ 0xC0, 0x04, 0xAA, 0xBB, 0xC0, 0x04, 0x03, 'c', 'o', 'm', 0x00 };
+    const name = Name{
+        .labels = msg[0..2],
+        .wire_length = 2,
+        .compressed = true,
+    };
+    var iter = Name.LabelIterator.init(name, &msg);
+
+    try std.testing.expectError(error.ForwardPointer, iter.next());
+}
+
+test "LabelIterator detects self-referencing pointer" {
+    const circular = [_]u8{ 0xC0, 0x00 };
+    const name = Name{
+        .labels = &circular,
+        .wire_length = 2,
+        .compressed = true,
+    };
+    var iter = Name.LabelIterator.init(name, &circular);
+
+    try std.testing.expectError(error.ForwardPointer, iter.next());
 }
 
 test "Name.encodeBuf simple domain" {

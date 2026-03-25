@@ -51,12 +51,12 @@ This document tracks zigdns implementation status for relevant DNS RFCs.
 ## DNSSEC
 
 ### RFC 4033 - DNS Security Introduction and Requirements
-**Status: Complete**
+**Status: Partial (Ed25519/ECDSA complete; RSA algorithms 5/8/10 not implemented)**
 
 Foundation for DNSSEC validation implemented in `src/resolver/dnssec.zig`.
 
 ### RFC 4034 - Resource Records for DNSSEC
-**Status: Complete**
+**Status: Partial (Ed25519/ECDSA complete; RSA algorithms 5/8/10 not implemented)**
 
 | Record Type | Status | Issue | Notes |
 |-------------|--------|-------|-------|

@@ -1,6 +1,6 @@
 # Gap Analysis -- Resolved
 
-Last updated: 2026-03-24 (Phase 3 adversarial review: 9 previously-unknown items verified resolved)
+Last updated: 2026-03-24 (Round 4 gap closure: 5 resolved, 1 blocked, 8 won't do -- PF-24-dual-cache, PF-22-prefetch, PF-NEW-21, PF-NEW-30, QH-05 resolved; PF-23-spice blocked; PF-13, PF-16, PF-10, PF-NEW-28, TC-01, QM-03, QL-03, QL-09 won't do)
 
 Items below were identified in prior gap analyses and verified as resolved. They are listed here for audit trail purposes.
 
@@ -847,13 +847,193 @@ The following items were evaluated and intentionally classified as Won't Do with
 - **Category:** Security (Medium)
 - **Reason:** Upstream concern. Hash pinning provides partial mitigation.
 
+---
+
+## Resolved in Round 3 Gap Closure (2026-03-24)
+
+14 security findings and 3 gap items resolved; 1 gap item classified Won't Do.
+
+### GAP-0048: RPZ wildcard boundary bypass test missing [RESOLVED]
+- **Category:** Test (Low)
+- **Resolution:** Test added verifying wildcard boundary matching for RPZ.
+- **Evidence:** `src/resolver/rpz.zig` -- test asserts `*example.com` matches `sub.example.com` but NOT `fakeexample.com`
+- **Resolved date:** 2026-03-24
+
+### GAP-0049: DNSSEC canonical RRset sorting (RFC 4034 S6.3) [RESOLVED]
+- **Category:** Bug (Medium)
+- **Resolution:** Canonical RRset sorting implemented in `appendCanonicalRrset` per RFC 4034 S6.3.
+- **Evidence:** `src/resolver/dnssec.zig` -- `appendCanonicalRrset` sorts RRsets before RRSIG verification
+- **Resolved date:** 2026-03-24
+
+### GAP-0050: RFC_COMPLIANCE.md claims Complete for RFC 4033/4034 [RESOLVED]
+- **Category:** Docs (Low)
+- **Resolution:** RFC_COMPLIANCE.md RFC 4033 and 4034 statuses updated to "Partial (Ed25519/ECDSA complete; RSA algorithms 5/8/10 not implemented)".
+- **Evidence:** `docs/RFC_COMPLIANCE.md:53-59` -- entries say "Partial" with RSA caveat
+- **Resolved date:** 2026-03-24
+
+### GAP-0051: DoQ feature gate blocks CI tests [WON'T DO]
+- **Category:** CI-CD (Low)
+- **Reason:** Requires QUIC dependencies not available in Zig ecosystem. DoQ transport behind feature gate by design. Cross-ref GAP-0014.
+
+### SEC-SCAN-09 (HIGH): Trust anchor digest truncation -- DNSSEC bypass [RESOLVED]
+- **Category:** Security (High)
+- **Resolution:** Trust anchor comparison now uses exact length + `constantTimeEql` instead of `@min` truncation.
+- **Evidence:** `src/resolver/dnssec.zig` -- exact length comparison + `std.crypto.utils.timingSafeEql`
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-08 (MEDIUM): Non-constant-time DS digest comparison [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** All DS digest comparisons use `constantTimeEql`.
+- **Evidence:** `src/resolver/dnssec.zig` -- `constantTimeEql` at all digest comparison sites
+- **Resolved date:** 2026-03-24
+
+### SEC-NEW-04b (MEDIUM): NSEC3 iterations not capped [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** NSEC3 iterations capped at 150 per RFC 9276 recommendation.
+- **Evidence:** `src/resolver/dnssec.zig` -- iterations cap enforced
+- **Resolved date:** 2026-03-24
+
+### SEC-NEW-02b (MEDIUM): Zone transfer question section OOB read [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** Question section bounds checking added to zone transfer parsing.
+- **Evidence:** `src/resolver/zone_transfer.zig` -- bounds check before question section access
+- **Resolved date:** 2026-03-24
+
+### SEC-NEW-03b (MEDIUM): Zone transfer qdcount not validated [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** `qdcount` validated before use in zone transfer parsing.
+- **Evidence:** `src/resolver/zone_transfer.zig` -- qdcount validation
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-10 (MEDIUM): resolver/edns.zig options.len @intCast unchecked [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** `options.len` checked before `@intCast`.
+- **Evidence:** `src/resolver/edns.zig` -- bounds check before cast
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-11 (MEDIUM): resolver/config.zig user config @intCast unchecked [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** Config values clamped via `clampToUnsigned`.
+- **Evidence:** `src/resolver/config.zig` -- `clampToUnsigned` applied to user config values
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-12 (MEDIUM): zone_transfer.zig label.len @intCast unchecked [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** Label length checked before `@intCast`.
+- **Evidence:** `src/resolver/zone_transfer.zig` -- label length validation
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-13 (MEDIUM): zone_transfer.zig message.len @intCast unchecked [RESOLVED]
+- **Category:** Security (Medium)
+- **Resolution:** Message length checked before `@intCast`.
+- **Evidence:** `src/resolver/zone_transfer.zig` -- message length validation
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-14 (LOW): stub.zig query.len @intCast [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** Query length checked before `@intCast`.
+- **Evidence:** `src/stub.zig` -- bounds check before cast
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-15 (LOW): zone_transfer TsigKey.secret not zeroed [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** `TsigKey.deinit` uses volatile zero to clear secret on destruction.
+- **Evidence:** `src/resolver/zone_transfer.zig` -- volatile zero on TsigKey secret
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-16 (LOW): connection_pool time delta @intCast [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** `@max(0, delta)` saturating subtraction in connection_pool.
+- **Evidence:** `src/transports/connection_pool.zig` -- `@max(0, delta)` pattern
+- **Resolved date:** 2026-03-24
+
+### SEC-SCAN-17 (LOW): happy_eyeballs time delta @intCast [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** `@max(0, delta)` saturating subtraction in happy_eyeballs.
+- **Evidence:** `src/transports/happy_eyeballs.zig` -- `@max(0, delta)` pattern
+- **Resolved date:** 2026-03-24
+
+### SEC-NEW-01b (LOW): logging.zig time delta @intCast [RESOLVED]
+- **Category:** Security (Low)
+- **Resolution:** `@max(0, delta)` saturating subtraction in logging.
+- **Evidence:** `src/resolver/logging.zig` -- `@max(0, delta)` pattern
+- **Resolved date:** 2026-03-24
+
+### MEM-01: initWithServer memory leak [RESOLVED]
+- **Category:** Quality / Architecture (High)
+- **Resolution:** Added `owns_servers: bool` flag to stub resolver; deinit conditionally frees server allocation.
+- **Evidence:** `src/stub.zig` -- `owns_servers` flag + conditional free in `deinit`
+- **Resolved date:** 2026-03-24
+
+### EH-08: @intCast time delta panic [RESOLVED]
+- **Category:** Quality / Architecture (High)
+- **Resolution:** All 6+ sites now use `@max(0, delta)` saturating subtraction.
+- **Evidence:** `happy_eyeballs.zig`, `connection_pool.zig`, `logging.zig`, `zone_transfer.zig` -- `@max(0, delta)` pattern
+- **Resolved date:** 2026-03-24
+
+### RD-01: name.zig compression pointer duplication [RESOLVED]
+- **Category:** Quality / Maintainability (Medium)
+- **Resolution:** `LabelIterator` extracted; used by 5 functions (toString, toStringBuf, labelCount, eql, parent).
+- **Evidence:** `src/name.zig` -- `LabelIterator` struct
+- **Resolved date:** 2026-03-24
+
+### CI-04: zdig zero test coverage [RESOLVED]
+- **Category:** Quality / Tests (Medium)
+- **Resolution:** 16 tests added for `escapeJsonString` and `addressMatches`.
+- **Evidence:** `cmd/zdig.zig` -- 16 test blocks
+- **Resolved date:** 2026-03-24
+
+### DOC-01: Message.data ownership doc [RESOLVED]
+- **Category:** Quality / Documentation (Medium)
+- **Resolution:** Ownership doc comment added to `Message.data` explaining aliasing/lifetime.
+- **Evidence:** `src/message.zig` -- `///` doc comment on `data` field
+- **Resolved date:** 2026-03-24
+
+### DOC-02: createConnection lazy-connection doc [RESOLVED]
+- **Category:** Quality / Documentation (Low)
+- **Resolution:** Doc comment added explaining lazy-connection design.
+- **Evidence:** `src/transports/connection_pool.zig` -- doc comment on `createConnection`
+- **Resolved date:** 2026-03-24
+
+### EH-11: zdig TCP truncation [RESOLVED]
+- **Category:** Quality / Architecture (Medium)
+- **Resolution:** TCP truncation now returns `error.ConnectionClosed` instead of silent truncation.
+- **Evidence:** `cmd/zdig.zig` -- error return on premature connection close
+- **Resolved date:** 2026-03-24
+
+### DOC-03: Usage guide [WON'T DO]
+- **Category:** Quality / Documentation (Low)
+- **Reason:** Usage guide out of scope for gap closure cycle.
+
+### PF-NEW-25: buildCnameChain unnecessary on no-CNAME responses [RESOLVED]
+- **Category:** Performance (P3)
+- **Resolution:** CNAME chain skipped when no CNAMEs present in response.
+- **Evidence:** `src/client.zig` -- early return when no CNAME records
+- **Resolved date:** 2026-03-24
+
+### PF-NEW-24: ArrayList without capacity hint in resolve results [RESOLVED]
+- **Category:** Performance (P3)
+- **Resolution:** ArrayList capacity hints added for result lists.
+- **Evidence:** `src/client.zig` -- `ensureTotalCapacity` / initial capacity
+- **Resolved date:** 2026-03-24
+
 ### GAP-0015 / GAP-0017 / GAP-0041 / GAP-0042 / GAP-0044: Feature/infra gaps [WON'T DO]
 - **Category:** Various (Medium)
 - **Reason:** Administrative (GAP-0015), architectural refactors (GAP-0017, GAP-0044), feature additions (GAP-0041, GAP-0042). Outside scope of gap closure.
 
-### QH-05 / QM-03 / QL-03 / QL-09: Deferred items [DEFERRED]
-- **Category:** Various
-- **Reason:** QH-05 requires fuzz infrastructure. QM-03/QL-03/QL-09 are large-scale refactoring efforts.
+### QH-05: Zero fuzz testing for wire parsers [RESOLVED]
+- **Category:** Quality (High, PriorityScore 64)
+- **Resolution:** 7 fuzz targets added in `tests/fuzz_parsers.zig` covering Header, Message, Name, ResourceRecord, Question parsers + Name.encodeBuf + full Message iteration
+- **Evidence:** `tests/fuzz_parsers.zig` + `test-fuzz` build step in `build.zig`
+- **Resolved date:** 2026-03-24 (Round 4)
+
+### QM-03 / QL-03 / QL-09: Large-scale refactoring items [WON'T DO]
+- **Category:** Quality (Medium/Low)
+- **Reason:** QM-03 (resolveIterative decomposition) risks critical resolution path. QL-03 (12 files >800 lines) and QL-09 (41 functions >50 lines) are mechanical but high churn for low value.
+
+### TC-01: resolveIterative integration test coverage [WON'T DO]
+- **Category:** Quality (Medium, PriorityScore 48)
+- **Reason:** Requires mock DNS transport infrastructure that doesn't exist. Cross-ref GAP-0045, QH-NEW-02.
 
 ---
 
@@ -922,6 +1102,42 @@ The following 9 GitLab issues were previously in "Unknown" status and have been 
 - **Resolution:** Verified resolved -- DoH and DoT transport documentation updated in ARCHITECTURE.md and SECURITY.md to reflect interface-only status with backend requirements
 - **Evidence:** Phase 3 adversarial review audit verification; cross-ref GAP-0014 (Won't Do), GAP-0040 (Resolved)
 - **Resolved date:** verified 2026-03-24
+
+---
+
+## Round 4 Gap Closure -- Performance Items (2026-03-24)
+
+### PF-24-dual-cache: Two cache implementations; hot path uses slower O(n) one [RESOLVED]
+- **Category:** Performance (P1, PerfScore 324)
+- **Resolution:** Migrated `client.zig` and `recursive.zig` from O(n) `Cache` to O(1) `DnsCache` (LRU HashMap). Added packed multi-record rdata format with `PackedRdataIterator` for storing multiple records per cache key.
+- **Evidence:** `src/client.zig`, `src/recursive.zig`, `src/resolver/dns_cache.zig` -- imports changed from `cache` to `dns_cache`; `putRecord`/`putRecordWithBailiwick` APIs; PackedRdataIterator + 2 new tests
+- **Resolved date:** 2026-03-24 (Round 4)
+
+### PF-22-prefetch: Cache prefetching module not wired into hot path [RESOLVED]
+- **Category:** Performance (P2, PerfScore 42)
+- **Resolution:** Wired `CachePrefetcher` into `client.zig` resolve() cache hit path. `checkAndSchedulePrefetch` called when cache entries approach TTL expiry.
+- **Evidence:** `src/client.zig` -- `cache_prefetch_mod` import, `prefetcher` field on Client struct, prefetch scheduling on cache hit
+- **Resolved date:** 2026-03-24 (Round 4)
+
+### PF-NEW-21: buildQuery heap-allocates for bounded-size message [RESOLVED]
+- **Category:** Performance (P2, PerfScore 18)
+- **Resolution:** Added `buildQueryBuf` in `message.zig` using `[271]u8` stack buffer (12 header + 255 name + 4 qtype/qclass). `stub.zig` and `recursive.zig` migrated from heap-allocating `buildQuery` to stack-buffer `buildQueryBuf`.
+- **Evidence:** `src/message.zig:buildQueryBuf`, `src/stub.zig`, `src/recursive.zig` -- `var query_buf: [message_mod.max_query_size]u8`
+- **Resolved date:** 2026-03-24 (Round 4)
+
+### PF-NEW-30: zoneAtDepth uses ArrayList instead of stack buffer [RESOLVED]
+- **Category:** Performance (Info, PerfScore 0.5)
+- **Resolution:** Replaced `ArrayList(u8)` with `[max_name_length]u8` stack buffer + `allocator.dupe`, matching PF-NEW-04 pattern.
+- **Evidence:** `src/name.zig:zoneAtDepth` -- stack buffer replaces ArrayList
+- **Resolved date:** 2026-03-24 (Round 4)
+
+### PF-23-spice: spice parallel module not integrated into query dispatch [BLOCKED]
+- **Category:** Performance (P2, PerfScore 60)
+- **Reason:** `executeQuery` in `parallel.zig` is a complete stub (returns error code 2). Implementing actual DNS transport inside the parallel task context requires significant architecture changes.
+
+### PF-13 / PF-16 / PF-10 / PF-NEW-28: Performance won't-do items [WON'T DO]
+- **Category:** Performance (various)
+- **Reason:** PF-13 requires PF-14 thread safety. PF-16 already uses OS CSPRNG. PF-10 remaining sites return heap-owned strings. PF-NEW-28 is <1ns.
 
 ---
 

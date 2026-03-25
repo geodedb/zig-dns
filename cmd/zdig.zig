@@ -639,7 +639,7 @@ fn sendTcp(allocator: Allocator, address: std.net.Address, query_data: []const u
     var total_read: usize = 0;
     while (total_read < response_len) {
         const n = try std.posix.recv(sock, response_buf[total_read..], 0);
-        if (n == 0) break;
+        if (n == 0) return error.ConnectionClosed;
         total_read += n;
     }
 
@@ -1048,4 +1048,108 @@ pub fn main() !void {
 
     const exit_code = try cli.run(&root_cmd, args, allocator);
     std.process.exit(exit_code);
+}
+
+// ============================================================================
+// Tests for security-sensitive pure functions (CI-04)
+// ============================================================================
+
+const testing = std.testing;
+
+test "escapeJsonString: normal ASCII string passes through unchanged" {
+    const result = try escapeJsonString(testing.allocator, "hello world");
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings("hello world", result);
+}
+
+test "escapeJsonString: empty string" {
+    const result = try escapeJsonString(testing.allocator, "");
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings("", result);
+}
+
+test "escapeJsonString: escapes double quotes" {
+    const result = try escapeJsonString(testing.allocator, "say \"hello\"");
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings("say \\\"hello\\\"", result);
+}
+
+test "escapeJsonString: escapes backslashes" {
+    const result = try escapeJsonString(testing.allocator, "path\\to\\file");
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings("path\\\\to\\\\file", result);
+}
+
+test "escapeJsonString: escapes newline" {
+    const result = try escapeJsonString(testing.allocator, "line1\nline2");
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings("line1\\nline2", result);
+}
+
+test "escapeJsonString: escapes carriage return" {
+    const result = try escapeJsonString(testing.allocator, "line1\rline2");
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings("line1\\rline2", result);
+}
+
+test "escapeJsonString: escapes tab" {
+    const result = try escapeJsonString(testing.allocator, "col1\tcol2");
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings("col1\\tcol2", result);
+}
+
+test "escapeJsonString: escapes control characters as unicode" {
+    // NUL byte (0x00) should become \u0000
+    const result = try escapeJsonString(testing.allocator, "\x00");
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings("\\u0000", result);
+}
+
+test "escapeJsonString: escapes BEL control character" {
+    // BEL (0x07) should become \u0007
+    const result = try escapeJsonString(testing.allocator, "\x07");
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings("\\u0007", result);
+}
+
+test "escapeJsonString: mixed escapes" {
+    const result = try escapeJsonString(testing.allocator, "a\"b\\c\nd\x01e");
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings("a\\\"b\\\\c\\nd\\u0001e", result);
+}
+
+test "addressMatches: IPv4 same address and port matches" {
+    const addr1 = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
+    const addr2 = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
+    try testing.expect(addressMatches(&addr1.any, &addr2.any));
+}
+
+test "addressMatches: IPv4 different address does not match" {
+    const addr1 = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
+    const addr2 = std.net.Address.initIp4(.{ 192, 168, 1, 2 }, 53);
+    try testing.expect(!addressMatches(&addr1.any, &addr2.any));
+}
+
+test "addressMatches: IPv4 different port does not match" {
+    const addr1 = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
+    const addr2 = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 5353);
+    try testing.expect(!addressMatches(&addr1.any, &addr2.any));
+}
+
+test "addressMatches: IPv6 same address and port matches" {
+    const addr1 = std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01 }, 53, 0, 0);
+    const addr2 = std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01 }, 53, 0, 0);
+    try testing.expect(addressMatches(&addr1.any, &addr2.any));
+}
+
+test "addressMatches: IPv6 different address does not match" {
+    const addr1 = std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01 }, 53, 0, 0);
+    const addr2 = std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02 }, 53, 0, 0);
+    try testing.expect(!addressMatches(&addr1.any, &addr2.any));
+}
+
+test "addressMatches: IPv4 vs IPv6 family mismatch does not match" {
+    const addr_v4 = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
+    const addr_v6 = std.net.Address.initIp6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 1, 1 }, 53, 0, 0);
+    try testing.expect(!addressMatches(&addr_v4.any, &addr_v6.any));
 }

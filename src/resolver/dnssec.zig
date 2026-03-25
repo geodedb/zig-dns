@@ -194,11 +194,14 @@ pub const Validator = struct {
             ds.digest_type,
         ) orelse return error.UnsupportedAlgorithm;
 
-        // Compare digests
-        if (digest.len != ds.digest.len) {
+        // Compare digests using constant-time comparison to prevent timing
+        // side-channel attacks. Use the expected digest length for the algorithm
+        // rather than comparing the full 64-byte buffer.
+        const expected_len = dsDigestLength(ds.digest_type) orelse return error.UnsupportedAlgorithm;
+        if (ds.digest.len != expected_len) {
             return false;
         }
-        return std.mem.eql(u8, &digest, ds.digest[0..digest.len]);
+        return constantTimeEql(digest[0..expected_len], ds.digest[0..expected_len]);
     }
 
     // =========================================================================
@@ -404,11 +407,23 @@ pub const Validator = struct {
     ) !void {
         const allocator = self.allocator;
 
-        // Sort RRs by RDATA for canonical ordering
-        // For simplicity, we assume the RRset is already sorted
-        // A full implementation would sort here
+        // Sort RRs by RDATA in canonical wire-format order (RFC 4034 S6.3).
+        // Build a sorted index array to avoid mutating the input slice.
+        const sorted_indices = try allocator.alloc(usize, rrset.len);
+        defer allocator.free(sorted_indices);
+        for (sorted_indices, 0..) |*slot, i| {
+            slot.* = i;
+        }
 
-        for (rrset) |rr| {
+        std.mem.sort(usize, sorted_indices, rrset, struct {
+            fn lessThan(ctx: []const ResourceRecord, a: usize, b: usize) bool {
+                return std.mem.order(u8, ctx[a].rdata, ctx[b].rdata) == .lt;
+            }
+        }.lessThan);
+
+        for (sorted_indices) |idx| {
+            const rr = rrset[idx];
+
             // Owner name (canonical, lowercase)
             try appendCanonicalName(allocator, data, rr.name);
 
@@ -547,13 +562,19 @@ pub const Validator = struct {
                     if (key_data.algorithm != anchor.algorithm) continue;
 
                     const digest_type = anchor.digest_type orelse continue;
+                    const expected_len = dsDigestLength(digest_type) orelse continue;
+
+                    // Require exact digest length match to prevent truncation bypass
+                    if (anchor.data.len != expected_len) continue;
+
                     const digest = computeDsDigest(
-                        key_rr.name,
+                        key_rr.name.labels,
                         key_rr.rdata,
                         digest_type,
-                    ) catch continue orelse continue;
+                    ) orelse continue;
 
-                    if (std.mem.eql(u8, &digest, anchor.data[0..@min(digest.len, anchor.data.len)])) {
+                    // Use constant-time comparison to prevent timing side-channels
+                    if (constantTimeEql(digest[0..expected_len], anchor.data[0..expected_len])) {
                         return true;
                     }
                 }
@@ -573,6 +594,15 @@ pub const Validator = struct {
         _ = self;
 
         if (hash_algorithm != .sha1) {
+            return error.UnsupportedAlgorithm;
+        }
+
+        // RFC 9276 Section 3.1 recommends 0 iterations; cap at 150 per
+        // RFC 5155 guidance and common resolver practice (Unbound uses 150).
+        // Without a cap, an attacker-crafted NSEC3 record with 65535
+        // iterations could cause a CPU denial-of-service.
+        const max_nsec3_iterations: u16 = 150;
+        if (iterations > max_nsec3_iterations) {
             return error.UnsupportedAlgorithm;
         }
 
@@ -642,6 +672,30 @@ fn computeDsDigest(
         },
         else => return null,
     }
+}
+
+/// Return the expected digest length for a DS digest algorithm.
+/// Returns null for unsupported digest types.
+fn dsDigestLength(digest_type: DigestType) ?usize {
+    return switch (digest_type) {
+        .sha1 => 20,
+        .sha256 => 32,
+        .sha384 => 48,
+        else => null,
+    };
+}
+
+/// Constant-time comparison of two byte slices.
+/// Returns false immediately if lengths differ (length is not secret).
+/// When lengths match, compares all bytes to avoid timing side-channels
+/// that could leak digest content.
+fn constantTimeEql(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    var diff: u8 = 0;
+    for (a, b) |x, y| {
+        diff |= x ^ y;
+    }
+    return diff == 0;
 }
 
 /// Verify Ed25519 signature
@@ -886,4 +940,134 @@ test "hasTypeInBitmap via ResourceRecord" {
 
     try std.testing.expect(ResourceRecord.hasTypeInBitmap(&type_bitmaps, .a));
     try std.testing.expect(!ResourceRecord.hasTypeInBitmap(&type_bitmaps, .cname));
+}
+
+// =========================================================================
+// Security fix tests
+// =========================================================================
+
+test "constantTimeEql: matching slices return true" {
+    const a = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05 };
+    const b = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05 };
+    try std.testing.expect(constantTimeEql(&a, &b));
+}
+
+test "constantTimeEql: differing slices return false" {
+    const a = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05 };
+    const b = [_]u8{ 0x01, 0x02, 0xFF, 0x04, 0x05 };
+    try std.testing.expect(!constantTimeEql(&a, &b));
+}
+
+test "constantTimeEql: different lengths return false" {
+    const a = [_]u8{ 0x01, 0x02, 0x03 };
+    const b = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    try std.testing.expect(!constantTimeEql(&a, &b));
+}
+
+test "constantTimeEql: empty slices return true" {
+    const a = [_]u8{};
+    const b = [_]u8{};
+    try std.testing.expect(constantTimeEql(&a, &b));
+}
+
+test "dsDigestLength: returns correct lengths for known algorithms" {
+    try std.testing.expectEqual(@as(?usize, 20), dsDigestLength(.sha1));
+    try std.testing.expectEqual(@as(?usize, 32), dsDigestLength(.sha256));
+    try std.testing.expectEqual(@as(?usize, 48), dsDigestLength(.sha384));
+}
+
+test "computeNsec3Hash: rejects iterations above cap of 150" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    const salt = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
+
+    // 150 iterations should succeed
+    const hash_150 = validator.computeNsec3Hash("example.com", .sha1, 150, &salt);
+    try std.testing.expect(hash_150 != error.UnsupportedAlgorithm);
+
+    // 151 iterations should be rejected
+    const hash_151 = validator.computeNsec3Hash("example.com", .sha1, 151, &salt);
+    try std.testing.expectError(error.UnsupportedAlgorithm, hash_151);
+
+    // Maximum u16 iterations should be rejected
+    const hash_max = validator.computeNsec3Hash("example.com", .sha1, 65535, &salt);
+    try std.testing.expectError(error.UnsupportedAlgorithm, hash_max);
+}
+
+test "verifyTrustAnchor: rejects truncated digest (SEC-SCAN-09)" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    // Compute the real SHA-256 digest for the test DNSKEY
+    const owner_name: []const u8 = "\x07example\x03com\x00";
+    const dnskey_rdata = [_]u8{ 0x01, 0x01, 0x03, 0x08 } ++ [_]u8{0xAA} ** 32;
+    const full_digest = computeDsDigest(owner_name, &dnskey_rdata, .sha256).?;
+
+    // Add a trust anchor with a truncated digest (only 16 of 32 bytes).
+    // Before the fix, @min would cause this to match; after the fix it must not.
+    try validator.addTrustAnchor(.{
+        .zone = ".",
+        .key_tag = ResourceRecord.calculateKeyTag(&dnskey_rdata),
+        .algorithm = .rsasha256,
+        .digest_type = .sha256,
+        .data = full_digest[0..16], // truncated -- wrong length for SHA-256
+        .is_dnskey = false,
+    });
+
+    // Build a fake DNSKEY ResourceRecord
+    const key_rr = ResourceRecord{
+        .name = .{
+            .labels = owner_name,
+            .wire_length = owner_name.len,
+        },
+        .rtype = .dnskey,
+        .class = .in,
+        .ttl = 3600,
+        .rdlength = @intCast(dnskey_rdata.len),
+        .rdata = @constCast(&dnskey_rdata),
+        .wire_length = owner_name.len + 10 + dnskey_rdata.len,
+    };
+
+    const dnskeys = [_]ResourceRecord{key_rr};
+    const result = try validator.verifyTrustAnchor(&dnskeys);
+    // Must NOT match because anchor.data.len (16) != expected SHA-256 length (32)
+    try std.testing.expect(!result);
+}
+
+test "verifyTrustAnchor: accepts correct full-length digest" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    const owner_name: []const u8 = "\x07example\x03com\x00";
+    const dnskey_rdata = [_]u8{ 0x01, 0x01, 0x03, 0x08 } ++ [_]u8{0xAA} ** 32;
+    const full_digest = computeDsDigest(owner_name, &dnskey_rdata, .sha256).?;
+
+    // Add a trust anchor with the correct full-length digest (32 bytes for SHA-256)
+    try validator.addTrustAnchor(.{
+        .zone = ".",
+        .key_tag = ResourceRecord.calculateKeyTag(&dnskey_rdata),
+        .algorithm = .rsasha256,
+        .digest_type = .sha256,
+        .data = full_digest[0..32], // correct length for SHA-256
+        .is_dnskey = false,
+    });
+
+    const key_rr = ResourceRecord{
+        .name = .{
+            .labels = owner_name,
+            .wire_length = owner_name.len,
+        },
+        .rtype = .dnskey,
+        .class = .in,
+        .ttl = 3600,
+        .rdlength = @intCast(dnskey_rdata.len),
+        .rdata = @constCast(&dnskey_rdata),
+        .wire_length = owner_name.len + 10 + dnskey_rdata.len,
+    };
+
+    const dnskeys = [_]ResourceRecord{key_rr};
+    const result = try validator.verifyTrustAnchor(&dnskeys);
+    // Must match because digest is correct and full-length
+    try std.testing.expect(result);
 }

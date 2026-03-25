@@ -311,6 +311,14 @@ pub const Config = struct {
     }
 };
 
+/// Clamp an i64 value to fit within the target unsigned integer type.
+/// Negative values are clamped to 0; values exceeding max are clamped to max.
+fn clampToUnsigned(comptime T: type, val: i64) T {
+    if (val < 0) return 0;
+    if (val > std.math.maxInt(T)) return std.math.maxInt(T);
+    return @intCast(val);
+}
+
 /// DNS-specific configuration
 pub const DnsConfig = struct {
     /// Upstream servers
@@ -342,16 +350,16 @@ pub const DnsConfig = struct {
 
     pub fn fromConfig(config: *Config) DnsConfig {
         return DnsConfig{
-            .port = @intCast(config.getInt("dns", "port", 53)),
-            .timeout_ms = @intCast(config.getInt("dns", "timeout_ms", 5000)),
-            .retries = @intCast(config.getInt("dns", "retries", 3)),
+            .port = clampToUnsigned(u16, config.getInt("dns", "port", 53)),
+            .timeout_ms = clampToUnsigned(u32, config.getInt("dns", "timeout_ms", 5000)),
+            .retries = clampToUnsigned(u8, config.getInt("dns", "retries", 3)),
             .use_tcp = config.getBool("dns", "use_tcp", false),
             .use_tls = config.getBool("dns", "use_tls", false),
             .dnssec = config.getBool("dns", "dnssec", false),
             .cache_enabled = config.getBool("cache", "enabled", true),
-            .cache_size = @intCast(config.getInt("cache", "size", 10000)),
-            .min_ttl = @intCast(config.getInt("cache", "min_ttl", 60)),
-            .max_ttl = @intCast(config.getInt("cache", "max_ttl", 86400)),
+            .cache_size = clampToUnsigned(u32, config.getInt("cache", "size", 10000)),
+            .min_ttl = clampToUnsigned(u32, config.getInt("cache", "min_ttl", 60)),
+            .max_ttl = clampToUnsigned(u32, config.getInt("cache", "max_ttl", 86400)),
             .logging_enabled = config.getBool("logging", "enabled", true),
             .log_level = config.getString("logging", "level", "info"),
         };
@@ -489,4 +497,45 @@ test "Section helper methods" {
     // Test defaults
     try std.testing.expectEqualStrings("default", section.getString("missing", "default"));
     try std.testing.expectEqual(@as(i64, -1), section.getInt("missing", -1));
+}
+
+test "DnsConfig fromConfig clamps negative values" {
+    const allocator = std.testing.allocator;
+    var config = Config.init(allocator);
+    defer config.deinit();
+    try config.set("dns", "port", .{ .integer = -1 });
+    try config.set("dns", "timeout_ms", .{ .integer = -100 });
+    const dns_config = DnsConfig.fromConfig(&config);
+    try std.testing.expectEqual(@as(u16, 0), dns_config.port);
+    try std.testing.expectEqual(@as(u32, 0), dns_config.timeout_ms);
+}
+
+test "DnsConfig fromConfig clamps overflow values" {
+    const allocator = std.testing.allocator;
+    var config = Config.init(allocator);
+    defer config.deinit();
+    try config.set("dns", "port", .{ .integer = 100000 });
+    try config.set("dns", "retries", .{ .integer = 300 });
+    const dns_config = DnsConfig.fromConfig(&config);
+    try std.testing.expectEqual(@as(u16, 65535), dns_config.port);
+    try std.testing.expectEqual(@as(u8, 255), dns_config.retries);
+}
+
+test "clampToUnsigned boundary values" {
+    // u8 boundaries
+    try std.testing.expectEqual(@as(u8, 0), clampToUnsigned(u8, -1));
+    try std.testing.expectEqual(@as(u8, 0), clampToUnsigned(u8, 0));
+    try std.testing.expectEqual(@as(u8, 255), clampToUnsigned(u8, 255));
+    try std.testing.expectEqual(@as(u8, 255), clampToUnsigned(u8, 256));
+    try std.testing.expectEqual(@as(u8, 127), clampToUnsigned(u8, 127));
+
+    // u16 boundaries
+    try std.testing.expectEqual(@as(u16, 0), clampToUnsigned(u16, -9999));
+    try std.testing.expectEqual(@as(u16, 65535), clampToUnsigned(u16, 65536));
+    try std.testing.expectEqual(@as(u16, 53), clampToUnsigned(u16, 53));
+
+    // u32 boundaries
+    try std.testing.expectEqual(@as(u32, 0), clampToUnsigned(u32, -1));
+    try std.testing.expectEqual(@as(u32, 4294967295), clampToUnsigned(u32, 4294967296));
+    try std.testing.expectEqual(@as(u32, 86400), clampToUnsigned(u32, 86400));
 }

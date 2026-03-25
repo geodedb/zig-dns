@@ -385,6 +385,23 @@ test "matchPattern wildcard" {
     try std.testing.expect(matchPattern("anything", "*"));
 }
 
+test "matchPattern wildcard boundary prevents bypass (GAP-0048)" {
+    // Wildcard *.example.com must NOT match fakeexample.com
+    // This is a critical security property: without boundary validation,
+    // an attacker could register fakeexample.com to bypass *.example.com blocks
+    try std.testing.expect(!matchPattern("fakeexample.com", "*.example.com"));
+    try std.testing.expect(!matchPattern("notexample.com", "*.example.com"));
+
+    // But legitimate subdomains MUST match
+    try std.testing.expect(matchPattern("sub.example.com", "*.example.com"));
+    try std.testing.expect(matchPattern("deep.sub.example.com", "*.example.com"));
+
+    // Pattern without dot after wildcard: *example.com
+    // Should still enforce boundary
+    try std.testing.expect(!matchPattern("fakeexample.com", "*example.com"));
+    try std.testing.expect(matchPattern("sub.example.com", "*example.com"));
+}
+
 test "ResponsePolicyZone init/deinit" {
     const allocator = std.testing.allocator;
 

@@ -388,7 +388,7 @@ pub const DnsLogger = struct {
         }
 
         // Check if flush interval has elapsed
-        const time_since_flush: u32 = @intCast(now - self.last_flush_ms);
+        const time_since_flush: u32 = @intCast(@max(0, now - self.last_flush_ms));
         if (time_since_flush >= self.config.flush_interval_ms) {
             self.clearBuffer();
             self.last_flush_ms = now;

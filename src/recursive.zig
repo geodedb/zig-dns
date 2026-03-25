@@ -17,7 +17,8 @@ const types_mod = @import("types");
 const header_mod = @import("header");
 const question_mod = @import("question");
 const record_mod = @import("record");
-const cache_mod = @import("cache");
+const dns_cache_mod = @import("dns_cache");
+const clock_mod = @import("clock");
 const stub_mod = @import("stub");
 
 pub const Message = message_mod.Message;
@@ -26,9 +27,14 @@ pub const Type = types_mod.Type;
 pub const Class = types_mod.Class;
 pub const Header = header_mod.Header;
 pub const ResourceRecord = record_mod.ResourceRecord;
-pub const Cache = cache_mod.Cache;
+pub const DnsCache = dns_cache_mod.DnsCache;
 pub const StubResolver = stub_mod.StubResolver;
 pub const ServerAddress = stub_mod.ServerAddress;
+
+/// DUP-02: Reuse the canonical implementation from StubResolver instead of
+/// maintaining a duplicate copy. Both resolvers need identical validation
+/// logic, so a single source of truth prevents divergence.
+const responseMatchesQuery = StubResolver.responseMatchesQuery;
 
 /// Root DNS Servers (as of 2024)
 /// These are the starting points for recursive resolution
@@ -124,7 +130,8 @@ const Referral = struct {
 pub const RecursiveResolver = struct {
     allocator: std.mem.Allocator,
     config: RecursiveConfig,
-    cache: Cache,
+    cache: DnsCache,
+    system_clock: clock_mod.SystemClock,
     root_servers: []ServerAddress,
 
     const Self = @This();
@@ -155,10 +162,14 @@ pub const RecursiveResolver = struct {
                 return error.OutOfMemory;
         }
 
+        var sys_clock = clock_mod.systemClock();
         return Self{
             .allocator = allocator,
             .config = config,
-            .cache = Cache.init(allocator, config.cache_size),
+            .cache = DnsCache.init(allocator, .{
+                .max_entries = config.cache_size,
+            }, sys_clock.clock()),
+            .system_clock = sys_clock,
             .root_servers = root_servers,
         };
     }
@@ -343,6 +354,9 @@ pub const RecursiveResolver = struct {
                             // Collect addresses for referred NS servers
                             var new_servers: std.ArrayList(ServerAddress) = .{};
                             errdefer new_servers.deinit(self.allocator);
+                            // PF-NEW-23: Pre-allocate to match referral size
+                            // (avoids reallocations when resolving NS addresses).
+                            try new_servers.ensureTotalCapacity(self.allocator, ref.servers.len);
 
                             for (ref.servers) |ns| {
                                 if (ns.address) |addr| {
@@ -494,6 +508,13 @@ pub const RecursiveResolver = struct {
         // Store for 0x20 verification (PF-NEW-12: skip the dupe when case
         // randomization is disabled -- last_query_name is only checked under
         // the case_randomization branch, so the extra copy is wasted).
+        //
+        // PF-NEW-20/PF-NEW-27: Two allocations here are intentional for correctness:
+        // 1. query_name: freed after this query attempt completes (defer above)
+        // 2. last_query_name: persists across retry iterations for 0x20 verification
+        // Combining them would require careful lifetime tracking across the retry
+        // loop boundary; the micro-optimization (~1 alloc per delegation) is not
+        // worth the correctness risk.
         if (self.config.case_randomization) {
             if (state.last_query_name) |old| {
                 self.allocator.free(old);
@@ -501,8 +522,9 @@ pub const RecursiveResolver = struct {
             state.last_query_name = try self.allocator.dupe(u8, query_name);
         }
 
-        const query = try message_mod.buildQuery(self.allocator, id, query_name, qtype, .in, self.config.dnssec);
-        defer self.allocator.free(query);
+        // Build query on the stack (max 271 bytes, no heap allocation)
+        var query_buf: [message_mod.max_query_size]u8 = undefined;
+        const query = try message_mod.buildQueryBuf(&query_buf, id, query_name, qtype, .in, self.config.dnssec);
 
         // Try servers in order
         const max_tries = @min(servers.len, self.config.parallel_queries);
@@ -588,6 +610,9 @@ pub const RecursiveResolver = struct {
     fn extractReferral(self: *Self, response: []const u8, msg: Message) !?Referral {
         var ns_names: std.ArrayList([]const u8) = .{};
         defer ns_names.deinit(self.allocator);
+        // PF-NEW-23: Pre-allocate for typical NS delegation (2-6 records)
+        // to avoid 1-2 reallocations per referral.
+        try ns_names.ensureTotalCapacity(self.allocator, 6);
         // On error, free each ns_name string (on success they are transferred
         // into the Referral.servers slice and freed by Referral.deinit).
         errdefer for (ns_names.items) |ns_str| self.allocator.free(ns_str);
@@ -753,7 +778,7 @@ pub const RecursiveResolver = struct {
         var rr_name_buf: [256]u8 = undefined;
         while (try ans_iter.next()) |rr| {
             const name_str = try rr.name.toStringBuf(&rr_name_buf, response);
-            try self.cache.putWithBailiwick(name_str, rr, qname);
+            try self.cache.putRecordWithBailiwick(name_str, rr.rtype, rr.class, rr.rdata, rr.ttl, qname);
         }
     }
 
@@ -762,29 +787,6 @@ pub const RecursiveResolver = struct {
         self.cache.clear();
     }
 };
-
-/// Validate that a pre-parsed DNS response matches the original query parameters.
-/// Accepts an already-parsed Message to avoid redundant parsing (PF-19).
-fn responseMatchesQuery(
-    msg: Message,
-    expected_name: []const u8,
-    expected_type: Type,
-    expected_class: Class,
-) bool {
-    if (!msg.header.qr) return false;
-    if (msg.header.opcode != .query) return false;
-    if (msg.header.qdcount == 0) return false;
-
-    var q_iter = msg.questions();
-    const q = (q_iter.next() catch null) orelse return false;
-    if (q.qtype != expected_type or q.qclass != expected_class) return false;
-
-    // Zero-allocation name comparison: encode expected name to wire format
-    // on the stack and use Name.eql for case-insensitive comparison.
-    var buf: [name_mod.max_name_length + 1]u8 = undefined;
-    const expected_wire = Name.encodeBuf(expected_name, &buf) catch return false;
-    return q.qname.eql(expected_wire, msg.data, null);
-}
 
 /// Check if `name` is a subdomain of (or equal to) `zone`.
 /// Both names are in dotted string form (e.g., "ns1.example.com" / "example.com").

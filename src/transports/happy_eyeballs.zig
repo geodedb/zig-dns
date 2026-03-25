@@ -196,7 +196,7 @@ pub const HappyEyeballs = struct {
                             // Connection successful!
                             attempt.state = .connected;
                             const now = std.time.milliTimestamp();
-                            const conn_time: u32 = @intCast(now - attempt.start_time);
+                            const conn_time: u32 = @intCast(@max(0, now - attempt.start_time));
 
                             winner = AttemptResult{
                                 .fd = attempt.fd,
@@ -236,7 +236,7 @@ pub const HappyEyeballs = struct {
             }
 
             // Check for timeout
-            const elapsed: u32 = @intCast(std.time.milliTimestamp() - start_time);
+            const elapsed: u32 = @intCast(@max(0, std.time.milliTimestamp() - start_time));
             if (elapsed > self.config.connection_timeout_ms) {
                 break;
             }
