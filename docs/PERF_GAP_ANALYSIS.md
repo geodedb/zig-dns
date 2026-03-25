@@ -1,6 +1,6 @@
 # Performance Gap Analysis
 
-Last updated: 2026-03-25 (PF-NEW-14 resolved -- toStringBuf+dupe applied. Zero perf regressions from recent commits. 47 Resolved, 21 Won't Do, 0 Open, 1 Blocked.)
+Last updated: 2026-03-25 (Audit deep review complete -- DNSSEC-path scan found 4 micro-findings, all negligible vs crypto cost; no new items added. Zero perf regressions from recent commits. 47 Resolved, 21 Won't Do, 0 Open, 1 Blocked.)
 
 ## Summary
 
@@ -11,6 +11,19 @@ Last updated: 2026-03-25 (PF-NEW-14 resolved -- toStringBuf+dupe applied. Zero p
 | **Won't Do** | 21 | PF-02, PF-02b-evict, PF-02c, PF-03, PF-03b, PF-03c, PF-05, PF-10, PF-13, PF-14, PF-16, PF-18, PF-NEW-16, PF-NEW-17, PF-NEW-18, PF-NEW-19, PF-NEW-20, PF-NEW-22, PF-NEW-27, PF-NEW-28, PF-21-pool |
 | **Blocked** | 1 | PF-23-spice |
 | **Total** | **69** |
+
+### Audit Deep Review (2026-03-25) -- No New Findings
+
+A full scan of remaining code paths surfaced 4 micro-findings, all in the DNSSEC-only
+verification path. Each was evaluated and determined not worth tracking:
+
+1. **nameInNsecRange 3x compareDnsNames** -- ~4KiB stack (sequential, not cumulative), negligible overhead, DNSSEC only.
+2. **appendCanonicalName byte-by-byte append** -- Max 255 bytes, amortized O(1) ArrayList, negligible vs crypto cost.
+3. **verifyRrsig no signed_data preallocation** -- ~7 reallocs totaling ~1.4KiB; crypto dominates by 100x.
+4. **appendCanonicalRrset heap sort index** -- 8-80 bytes, dwarfed by crypto.
+
+All four are dominated by cryptographic verification (RSA/ECDSA signature checks) by 2-3 orders
+of magnitude. Optimizing these would yield unmeasurable improvement. No new PF items created.
 
 ### Top 10 Risks (by PerfScore) -- post deep audit
 

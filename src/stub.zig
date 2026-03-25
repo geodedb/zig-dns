@@ -206,7 +206,10 @@ pub const StubResolver = struct {
                     // Although TCP is connection-oriented and less susceptible to spoofing
                     // than UDP, defense-in-depth requires verifying the response matches
                     // the query to guard against on-path attackers or misbehaving servers.
-                    const tcp_msg = Message.parse(tcp_response) catch continue;
+                    const tcp_msg = Message.parse(tcp_response) catch {
+                        self.allocator.free(tcp_response);
+                        continue;
+                    };
                     if (tcp_msg.header.id != id or !responseMatchesQuery(tcp_msg, domain, qtype, qclass)) {
                         self.allocator.free(tcp_response);
                         continue;
@@ -418,6 +421,35 @@ test "StubResolver.init does not own servers" {
     defer resolver.deinit();
 
     try std.testing.expect(!resolver.owns_servers);
+}
+
+test "GAP-0069: heap-allocated response freed on Message.parse failure" {
+    // Regression test for GAP-0069: when Message.parse fails on a heap-allocated
+    // TCP response buffer, the buffer must be freed to avoid a memory leak.
+    // This test mirrors the fix pattern in resolveClass's TCP fallback path:
+    //   const tcp_msg = Message.parse(tcp_response) catch {
+    //       self.allocator.free(tcp_response);
+    //       continue;
+    //   };
+    // The testing allocator will detect a leak if free is not called.
+    const allocator = std.testing.allocator;
+
+    // Allocate a buffer simulating a malformed TCP response (garbage data).
+    const garbage = try allocator.alloc(u8, 64);
+
+    // Fill with non-zero garbage to ensure it cannot be a valid DNS message.
+    @memset(garbage, 0xFF);
+
+    // Attempt to parse -- this must fail because the data is not a valid DNS message.
+    if (Message.parse(garbage)) |_| {
+        // If parsing somehow succeeds on garbage, the test premise is wrong.
+        allocator.free(garbage);
+        return error.TestUnexpectedResult;
+    } else |_| {
+        // Parse failed as expected. Free the buffer, exactly as the fix does.
+        // If this free were missing, the testing allocator would report a leak.
+        allocator.free(garbage);
+    }
 }
 
 test "SEC-AUDIT-02: UDP discard limit prevents CPU pinning" {

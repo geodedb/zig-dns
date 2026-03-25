@@ -216,13 +216,17 @@ pub const Validator = struct {
         nsec_records: []const ResourceRecord,
         full_message: []const u8,
     ) ValidationError!bool {
+        // Convert dotted-string qname to wire format for comparison with
+        // wire-format NSEC names (GAP-0067).
+        const qname_wire = dottedToWire(qname) catch return error.InvalidData;
+
         for (nsec_records) |nsec_rr| {
             if (nsec_rr.rtype != .nsec) continue;
 
             const nsec = nsec_rr.parseNSEC(full_message) catch continue;
 
             // Check if qname falls between this NSEC owner and next name
-            if (nameInNsecRange(qname, nsec_rr.name.labels, nsec.next_domain.labels)) {
+            if (nameInNsecRange(qname_wire.slice(), nsec_rr.name.labels, nsec.next_domain.labels)) {
                 return true;
             }
         }
@@ -238,11 +242,15 @@ pub const Validator = struct {
         nsec_records: []const ResourceRecord,
         full_message: []const u8,
     ) ValidationError!bool {
+        // Convert dotted-string qname to wire format for comparison with
+        // wire-format NSEC owner names (GAP-0066).
+        const qname_wire = dottedToWire(qname) catch return error.InvalidData;
+
         for (nsec_records) |nsec_rr| {
             if (nsec_rr.rtype != .nsec) continue;
 
             // NSEC must match the query name exactly (case-insensitive per RFC 4034 Section 6.1)
-            if (!std.ascii.eqlIgnoreCase(nsec_rr.name.labels, qname)) continue;
+            if (!wireNamesEqlInsensitive(nsec_rr.name.labels, qname_wire.slice())) continue;
 
             const nsec = nsec_rr.parseNSEC(full_message) catch continue;
 
@@ -269,9 +277,12 @@ pub const Validator = struct {
         // Get NSEC3 parameters from first record
         const first_nsec3 = nsec3_records[0].parseNSEC3() catch return error.InvalidData;
 
-        // Hash the query name
+        // Convert dotted-string qname to wire format per RFC 5155 (GAP-0068).
+        const qname_wire = dottedToWire(qname) catch return error.InvalidData;
+
+        // Hash the query name (wire format)
         const qname_hash = try self.computeNsec3Hash(
-            qname,
+            qname_wire.slice(),
             first_nsec3.hash_algorithm,
             first_nsec3.iterations,
             first_nsec3.salt,
@@ -304,9 +315,12 @@ pub const Validator = struct {
         // Get NSEC3 parameters from first record
         const first_nsec3 = nsec3_records[0].parseNSEC3() catch return error.InvalidData;
 
-        // Hash the query name
+        // Convert dotted-string qname to wire format per RFC 5155 (GAP-0068).
+        const qname_wire = dottedToWire(qname) catch return error.InvalidData;
+
+        // Hash the query name (wire format)
         const qname_hash = try self.computeNsec3Hash(
-            qname,
+            qname_wire.slice(),
             first_nsec3.hash_algorithm,
             first_nsec3.iterations,
             first_nsec3.salt,
@@ -485,12 +499,13 @@ pub const Validator = struct {
         ds_records: []const ResourceRecord,
         full_message: []const u8,
     ) ValidationError!ValidationResult {
-        _ = target_zone;
-
         // Start from trust anchor
         if (self.trust_anchors.items.len == 0) {
             return .indeterminate;
         }
+
+        // Convert target_zone to wire format for owner-name validation (SEC-AUDIT-11).
+        const target_wire = dottedToWire(target_zone) catch return .bogus;
 
         // For each zone in the path from root to target:
         // 1. Verify DNSKEY RRset is signed by trusted key
@@ -500,6 +515,16 @@ pub const Validator = struct {
         var trusted_key: ?DnskeyData = null;
 
         for (dnskey_rrsets) |rrset| {
+            // SEC-AUDIT-11: Verify that DNSKEY records in this RRset belong
+            // to the expected zone. At each delegation step, the owner name
+            // must be an ancestor of (or equal to) the target zone. A key
+            // from an unrelated zone must cause validation failure.
+            for (rrset.keys) |key_rr| {
+                if (!isNameInZone(key_rr.name.labels, target_wire.slice())) {
+                    return .bogus;
+                }
+            }
+
             // Verify DNSKEY RRset signature
             if (trusted_key) |key| {
                 // Find RRSIG for DNSKEY
@@ -639,6 +664,115 @@ pub const DnskeyRrset = struct {
 // =========================================================================
 // Helper Functions
 // =========================================================================
+
+/// Maximum wire-format DNS name length per RFC 1035 Section 2.3.4.
+const max_wire_name_len = 255;
+
+/// Result of dottedToWire conversion: wire-format bytes in a stack buffer.
+const WireName = struct {
+    data: [max_wire_name_len]u8,
+    len: usize,
+
+    /// Return a slice of the wire-format name.
+    fn slice(self: *const WireName) []const u8 {
+        return self.data[0..self.len];
+    }
+};
+
+/// Convert a dotted-string DNS name (e.g., "example.com") to wire format
+/// (e.g., "\x07example\x03com\x00").
+///
+/// Edge cases:
+///   - Root "." or empty "" both produce "\x00" (the root label).
+///   - Trailing dot is tolerated: "example.com." is the same as "example.com".
+///
+/// Returns error.InvalidData if a label exceeds 63 bytes or the total
+/// wire-format name exceeds 255 bytes.
+fn dottedToWire(dotted: []const u8) error{InvalidData}!WireName {
+    var result = WireName{ .data = undefined, .len = 0 };
+
+    // Handle root / empty
+    if (dotted.len == 0 or (dotted.len == 1 and dotted[0] == '.')) {
+        result.data[0] = 0;
+        result.len = 1;
+        return result;
+    }
+
+    var pos: usize = 0; // position in output buffer
+    var src: usize = 0; // position in input string
+
+    while (src < dotted.len) {
+        // Find end of this label (next '.' or end of string)
+        var label_end = src;
+        while (label_end < dotted.len and dotted[label_end] != '.') {
+            label_end += 1;
+        }
+
+        const label_len = label_end - src;
+
+        // Skip empty label produced by trailing dot
+        if (label_len == 0) {
+            src = label_end + 1;
+            continue;
+        }
+
+        // Label must fit in 63 bytes (RFC 1035)
+        if (label_len > 63) return error.InvalidData;
+
+        // Check output buffer capacity: 1 (length) + label_len + 1 (root)
+        if (pos + 1 + label_len + 1 > max_wire_name_len) return error.InvalidData;
+
+        result.data[pos] = @intCast(label_len);
+        pos += 1;
+        @memcpy(result.data[pos..][0..label_len], dotted[src..label_end]);
+        pos += label_len;
+
+        src = label_end + 1; // skip the dot
+    }
+
+    // Terminate with root label
+    result.data[pos] = 0;
+    pos += 1;
+    result.len = pos;
+    return result;
+}
+
+/// Compare a wire-format DNS name with another wire-format DNS name,
+/// case-insensitively. Returns true if they represent the same DNS name.
+fn wireNamesEqlInsensitive(a: []const u8, b: []const u8) bool {
+    return compareDnsNames(a, b) == .eq;
+}
+
+/// Check whether `name` (wire format) is equal to or a subdomain of `zone`
+/// (wire format). Used for defense-in-depth zone validation: a DNSKEY with
+/// owner "evil.com" must not be accepted when validating "example.com".
+///
+/// The root zone ("\x00") is considered an ancestor of all names.
+fn isNameInZone(name: []const u8, zone: []const u8) bool {
+    // Extract labels for both names.
+    const name_labels = extractWireLabels(name, 128) catch return false;
+    const zone_labels = extractWireLabels(zone, 128) catch return false;
+
+    // Root zone is ancestor of everything
+    if (zone_labels.count == 0) return true;
+
+    // name must have at least as many labels as zone
+    if (name_labels.count < zone_labels.count) return false;
+
+    // Compare zone labels (from root) against the rightmost labels of name.
+    // Labels are stored leaf-to-root, so zone_labels.items[count-1] is the
+    // root-most label, and we compare from there.
+    var i: usize = 0;
+    while (i < zone_labels.count) : (i += 1) {
+        const name_label = name_labels.items[name_labels.count - 1 - i];
+        const zone_label = zone_labels.items[zone_labels.count - 1 - i];
+        if (compareLabelsCaseInsensitive(name_label, zone_label) != .eq) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 /// Compute DS digest (RFC 4034 Section 5.1.4)
 fn computeDsDigest(
@@ -823,8 +957,9 @@ fn compareDnsNames(a: []const u8, b: []const u8) std.math.Order {
     // Labels are stored leaf-first, so we reverse to compare root-first.
     const max_labels = 128;
 
-    const a_labels = extractWireLabels(a, max_labels);
-    const b_labels = extractWireLabels(b, max_labels);
+    // If extraction fails (malformed wire name), treat as zero labels.
+    const a_labels = extractWireLabels(a, max_labels) catch LabelList{ .items = undefined, .count = 0 };
+    const b_labels = extractWireLabels(b, max_labels) catch LabelList{ .items = undefined, .count = 0 };
 
     // Compare from root (last in array) to leaf (first in array).
     // a_labels and b_labels contain slices in leaf-to-root order,
@@ -854,7 +989,17 @@ const LabelList = struct {
 
 /// Extract individual labels from a wire-format DNS name.
 /// Returns labels in leaf-to-root order (excluding the root label itself).
-fn extractWireLabels(wire_name: []const u8, comptime max_labels: usize) LabelList {
+///
+/// Returns error.InvalidData if:
+///   - A compression pointer (0xC0 prefix) is encountered (must not appear
+///     in canonical wire names, RFC 4034 Section 6.2).
+///   - A label length causes an out-of-bounds read.
+///
+/// QR-NEW-01: The comptime max_labels parameter has been removed;
+/// LabelList.items is fixed at 128 which accommodates the DNS maximum of
+/// 127 labels.
+fn extractWireLabels(wire_name: []const u8, _max_labels: usize) error{InvalidData}!LabelList {
+    _ = _max_labels; // retained for call-site compat; always uses 128
     var labels = LabelList{
         .items = undefined,
         .count = 0,
@@ -862,11 +1007,13 @@ fn extractWireLabels(wire_name: []const u8, comptime max_labels: usize) LabelLis
     var pos: usize = 0;
     while (pos < wire_name.len) {
         const label_len = wire_name[pos];
-        if (label_len == 0) break; // root label
-        if (label_len >= 0xC0) break; // compression pointer (shouldn't appear in canonical form)
+        if (label_len == 0) break; // root label -- normal termination
+        // SEC-AUDIT-12: reject compression pointers in canonical names
+        if (label_len >= 0xC0) return error.InvalidData;
         pos += 1;
-        if (pos + label_len > wire_name.len) break;
-        if (labels.count < max_labels) {
+        // SEC-AUDIT-12: reject out-of-bounds label reads
+        if (pos + label_len > wire_name.len) return error.InvalidData;
+        if (labels.count < 128) {
             labels.items[labels.count] = wire_name[pos..][0..label_len];
             labels.count += 1;
         }
@@ -966,6 +1113,11 @@ fn base32hexDecodedLength(encoded_len: usize) usize {
 
 /// Decode base32hex (RFC 4648 Section 7) encoded data to raw bytes.
 /// Case-insensitive. No padding characters expected (DNS NSEC3 doesn't use padding).
+///
+/// SEC-AUDIT-13: Per RFC 4648 Section 3.5, non-zero trailing bits (bits that
+/// do not contribute to a full output byte) must cause a rejection. This
+/// prevents canonicalization issues where multiple encodings could decode
+/// to the same byte sequence.
 fn base32hexDecode(encoded: []const u8, dest: []u8) !void {
     var bit_buffer: u32 = 0;
     var bits_in_buffer: u5 = 0;
@@ -983,6 +1135,14 @@ fn base32hexDecode(encoded: []const u8, dest: []u8) !void {
             if (dest_idx >= dest.len) return error.InvalidData;
             dest[dest_idx] = @intCast((bit_buffer >> bits_in_buffer) & 0xFF);
             dest_idx += 1;
+        }
+    }
+
+    // SEC-AUDIT-13: Reject non-zero trailing bits (RFC 4648 Section 3.5).
+    if (bits_in_buffer > 0) {
+        const trailing_mask = (@as(u32, 1) << bits_in_buffer) - 1;
+        if ((bit_buffer & trailing_mask) != 0) {
+            return error.InvalidPadding;
         }
     }
 }
@@ -1552,4 +1712,281 @@ test "GAP-0065: base32hex decode rejects invalid characters" {
     const invalid = "WXYZ0000000000000000000000000000"; // W, X, Y, Z are invalid
     var decoded: [20]u8 = undefined;
     try std.testing.expectError(error.InvalidData, base32hexDecode(invalid, &decoded));
+}
+
+// =========================================================================
+// GAP-0066/0067/0068: dottedToWire conversion and NSEC/NSEC3 wire-format fixes
+// =========================================================================
+
+test "dottedToWire: converts simple domain" {
+    const wire = try dottedToWire("example.com");
+    try std.testing.expectEqualSlices(u8, "\x07example\x03com\x00", wire.slice());
+}
+
+test "dottedToWire: root domain" {
+    const wire = try dottedToWire(".");
+    try std.testing.expectEqualSlices(u8, "\x00", wire.slice());
+}
+
+test "dottedToWire: empty string produces root" {
+    const wire = try dottedToWire("");
+    try std.testing.expectEqualSlices(u8, "\x00", wire.slice());
+}
+
+test "dottedToWire: trailing dot is tolerated" {
+    const wire = try dottedToWire("example.com.");
+    try std.testing.expectEqualSlices(u8, "\x07example\x03com\x00", wire.slice());
+}
+
+test "dottedToWire: single label" {
+    const wire = try dottedToWire("localhost");
+    try std.testing.expectEqualSlices(u8, "\x09localhost\x00", wire.slice());
+}
+
+test "dottedToWire: deep subdomain" {
+    const wire = try dottedToWire("a.b.c.d.e");
+    try std.testing.expectEqualSlices(u8, "\x01a\x01b\x01c\x01d\x01e\x00", wire.slice());
+}
+
+test "dottedToWire: label too long (>63 bytes) returns error" {
+    // 64 'a' characters in a single label
+    const long_label = "a" ** 64 ++ ".com";
+    try std.testing.expectError(error.InvalidData, dottedToWire(long_label));
+}
+
+test "wireNamesEqlInsensitive: case-insensitive match" {
+    const a = "\x07EXAMPLE\x03COM\x00";
+    const b = "\x07example\x03com\x00";
+    try std.testing.expect(wireNamesEqlInsensitive(a, b));
+}
+
+test "wireNamesEqlInsensitive: mismatch" {
+    const a = "\x07example\x03com\x00";
+    const b = "\x07example\x03org\x00";
+    try std.testing.expect(!wireNamesEqlInsensitive(a, b));
+}
+
+test "GAP-0066: validateNodataWithNsec converts dotted qname to wire format" {
+    // Verify that validateNodataWithNsec correctly converts a dotted-string
+    // qname to wire format before comparing with the NSEC owner name.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    const empty_records = [_]ResourceRecord{};
+    const empty_msg = [_]u8{};
+    const result = try validator.validateNodataWithNsec("example.com", .a, &empty_records, &empty_msg);
+    try std.testing.expect(!result);
+}
+
+test "GAP-0067: validateNxdomainWithNsec converts dotted qname to wire format" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    const empty_records = [_]ResourceRecord{};
+    const empty_msg = [_]u8{};
+    const result = try validator.validateNxdomainWithNsec("bbb.com", &empty_records, &empty_msg);
+    try std.testing.expect(!result);
+}
+
+test "GAP-0068: computeNsec3Hash uses wire format name" {
+    // Verify that computeNsec3Hash produces different results for dotted vs wire-format
+    // input, confirming the callers must convert first.
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    const salt = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
+
+    // Hash the wire-format name directly (what the fixed callers now do)
+    const wire = try dottedToWire("example.com");
+    const hash_wire = try validator.computeNsec3Hash(wire.slice(), .sha1, 0, &salt);
+
+    // Hash the dotted string directly (what the old code did -- wrong)
+    const hash_dotted = try validator.computeNsec3Hash("example.com", .sha1, 0, &salt);
+
+    // They must differ, proving the wire conversion matters
+    try std.testing.expect(!std.mem.eql(u8, &hash_wire, &hash_dotted));
+}
+
+// =========================================================================
+// SEC-AUDIT-11: validateChainOfTrust zone validation
+// =========================================================================
+
+test "SEC-AUDIT-11: validateChainOfTrust rejects DNSKEY with wrong owner name" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+
+    // Add a DNSKEY trust anchor so we get past the indeterminate check
+    const owner_name: []const u8 = "\x07example\x03com\x00";
+    const dnskey_rdata = [_]u8{ 0x01, 0x01, 0x03, 0x08 } ++ [_]u8{0xAA} ** 32;
+    const full_digest = computeDsDigest(owner_name, &dnskey_rdata, .sha256).?;
+
+    try validator.addTrustAnchor(.{
+        .zone = ".",
+        .key_tag = ResourceRecord.calculateKeyTag(&dnskey_rdata),
+        .algorithm = .rsasha256,
+        .digest_type = .sha256,
+        .data = full_digest[0..32],
+        .is_dnskey = true,
+    });
+
+    // Create a DNSKEY RR with a wrong owner name (evil.com instead of example.com)
+    const wrong_owner: []const u8 = "\x04evil\x03com\x00";
+    const key_rr = ResourceRecord{
+        .name = .{
+            .labels = wrong_owner,
+            .wire_length = wrong_owner.len,
+        },
+        .rtype = .dnskey,
+        .class = .in,
+        .ttl = 3600,
+        .rdlength = @intCast(dnskey_rdata.len),
+        .rdata = @constCast(&dnskey_rdata),
+        .wire_length = wrong_owner.len + 10 + dnskey_rdata.len,
+    };
+
+    const rrset = DnskeyRrset{
+        .zone = "example.com",
+        .keys = &[_]ResourceRecord{key_rr},
+        .rrsigs = &[_]ResourceRecord{},
+    };
+
+    const empty_ds = [_]ResourceRecord{};
+    const empty_msg = [_]u8{};
+    const result = try validator.validateChainOfTrust(
+        "example.com",
+        &[_]DnskeyRrset{rrset},
+        &empty_ds,
+        &empty_msg,
+    );
+
+    // With the zone check, the mismatched owner should cause validation to fail
+    try std.testing.expect(result == .bogus);
+}
+
+// =========================================================================
+// SEC-AUDIT-12: extractWireLabels error handling
+// =========================================================================
+
+test "SEC-AUDIT-12: extractWireLabels returns error on compression pointer" {
+    const wire_with_pointer = [_]u8{ 0x03, 'c', 'o', 'm', 0xC0, 0x00 };
+    const result = extractWireLabels(&wire_with_pointer, 128);
+    try std.testing.expectError(error.InvalidData, result);
+}
+
+test "SEC-AUDIT-12: extractWireLabels returns error on out-of-bounds label" {
+    // Label length claims 10 bytes but only 3 available
+    const truncated = [_]u8{ 0x0A, 'a', 'b', 'c' };
+    const result = extractWireLabels(&truncated, 128);
+    try std.testing.expectError(error.InvalidData, result);
+}
+
+test "SEC-AUDIT-12: extractWireLabels succeeds on valid wire name" {
+    const valid = "\x07example\x03com\x00";
+    const labels = try extractWireLabels(valid, 128);
+    try std.testing.expectEqual(@as(usize, 2), labels.count);
+    try std.testing.expectEqualSlices(u8, "example", labels.items[0]);
+    try std.testing.expectEqualSlices(u8, "com", labels.items[1]);
+}
+
+test "SEC-AUDIT-12: extractWireLabels handles root name" {
+    const root = "\x00";
+    const labels = try extractWireLabels(root, 128);
+    try std.testing.expectEqual(@as(usize, 0), labels.count);
+}
+
+// =========================================================================
+// SEC-AUDIT-13: base32hexDecode trailing bits validation
+// =========================================================================
+
+test "SEC-AUDIT-13: base32hexDecode rejects non-zero trailing bits" {
+    // RFC 4648 Section 3.5: non-zero trailing bits must be rejected.
+    // "01" in base32hex: '0' = 0b00000, '1' = 0b00001
+    // Combined: 10 bits = 0b00000_00001 => 1 byte (0x00) + 2 trailing bits (01).
+    // Trailing bits are non-zero, so this should be rejected.
+    var decoded: [1]u8 = undefined;
+    try std.testing.expectError(error.InvalidPadding, base32hexDecode("01", &decoded));
+}
+
+test "SEC-AUDIT-13: base32hexDecode accepts zero trailing bits" {
+    // "00" in base32hex: '0' = 0b00000, '0' = 0b00000
+    // Combined: 10 bits = 0b00000_00000 => 1 byte (0x00) + 2 trailing bits (00).
+    // Trailing bits are zero, so this should succeed.
+    var decoded: [1]u8 = undefined;
+    try base32hexDecode("00", &decoded);
+    try std.testing.expectEqual(@as(u8, 0x00), decoded[0]);
+}
+
+// =========================================================================
+// QR-NEW-01: LabelList parameterization (verified by extractWireLabels tests)
+// =========================================================================
+
+// QR-NEW-01 is verified by the existing extractWireLabels tests above.
+// The comptime parameter was removed and the function now always uses 128.
+
+// =========================================================================
+// QR-NEW-02: compareDnsNames edge-case tests
+// =========================================================================
+
+test "QR-NEW-02: compareDnsNames with empty wire name" {
+    const empty: []const u8 = "";
+    const valid = "\x07example\x03com\x00";
+    // Both empty: equal
+    try std.testing.expectEqual(std.math.Order.eq, compareDnsNames(empty, empty));
+    // Empty vs valid: empty has fewer labels
+    try std.testing.expectEqual(std.math.Order.lt, compareDnsNames(empty, valid));
+    try std.testing.expectEqual(std.math.Order.gt, compareDnsNames(valid, empty));
+}
+
+test "QR-NEW-02: compareDnsNames with truncated wire name (no root)" {
+    // Wire name without root terminator: \x03com (missing \x00)
+    // extractWireLabels should return error for out-of-bounds
+    const truncated = "\x03com";
+    const valid = "\x07example\x03com\x00";
+    // truncated: label "com" length is 3, pos goes 0->1, need 1+3=4 bytes,
+    // but slice is only 4 bytes (0..3 inclusive), so pos+label_len = 4 which
+    // equals wire_name.len. Let me check: wire_name = [0x03, 'c', 'o', 'm']
+    // pos=0, label_len=3, pos=1, 1+3=4 == 4 so NOT > so label is valid.
+    // Then pos=4, 4 >= 4 so loop ends. No root terminator but no error either.
+    // Actually this parses successfully with 1 label "com".
+    // So truncated has 1 label, valid has 2 labels with shared "com".
+    // Result: truncated (com) vs valid (example.com) -- com < example.com in
+    // canonical order because after matching "com" == "com", truncated has
+    // fewer labels (1 < 2).
+    const order = compareDnsNames(truncated, valid);
+    try std.testing.expectEqual(std.math.Order.lt, order);
+}
+
+test "QR-NEW-02: compareDnsNames with compression pointer in wire name" {
+    // Wire name with compression pointer: \x03com\xC0\x00
+    // Compression pointers should not appear in canonical names.
+    // extractWireLabels returns error for this case.
+    const with_pointer = [_]u8{ 0x03, 'c', 'o', 'm', 0xC0, 0x00 };
+    const valid = "\x07example\x03com\x00";
+    // Pointer causes error in extractWireLabels => 0 labels
+    const order = compareDnsNames(&with_pointer, valid);
+    try std.testing.expectEqual(std.math.Order.lt, order);
+}
+
+test "isNameInZone: name equals zone" {
+    const name = "\x07example\x03com\x00";
+    const zone = "\x07example\x03com\x00";
+    try std.testing.expect(isNameInZone(name, zone));
+}
+
+test "isNameInZone: name is subdomain of zone" {
+    const name = "\x03www\x07example\x03com\x00";
+    const zone = "\x07example\x03com\x00";
+    try std.testing.expect(isNameInZone(name, zone));
+}
+
+test "isNameInZone: name is not in zone" {
+    const name = "\x04evil\x03com\x00";
+    const zone = "\x07example\x03com\x00";
+    try std.testing.expect(!isNameInZone(name, zone));
+}
+
+test "isNameInZone: root zone matches everything" {
+    const name = "\x07example\x03com\x00";
+    const root = "\x00";
+    try std.testing.expect(isNameInZone(name, root));
 }

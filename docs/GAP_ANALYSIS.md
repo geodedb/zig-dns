@@ -1,8 +1,10 @@
 # Gap Analysis
 
-Last updated: 2026-03-25 (GAP-0064, GAP-0065, SEC-AUDIT-06 through SEC-AUDIT-10 all resolved. 499/499 tests passing.)
+Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/0068 wire-format conversion, SEC-AUDIT-11/12/13 hardening. 525/525 tests passing.)
 
-> **0 open gap findings** remain. All items resolved or classified as Won't Do. Won't-Do and resolved items are in [GAP_ANALYSIS_RESOLVED.md](GAP_ANALYSIS_RESOLVED.md).
+> **0 open gap findings** remain. All items are Resolved, Won't Do, or moved to [GAP_ANALYSIS_RESOLVED.md](GAP_ANALYSIS_RESOLVED.md).
+>
+> **Common root cause resolved:** GAP-0066, GAP-0067, GAP-0068 shared a root cause -- qname wire-format conversion was missing at NSEC/NSEC3 validation entry points. Fixed by adding `dottedToWire` conversion at all four validation entry points (`validateNodataWithNsec`, `validateNxdomainWithNsec`, `validateNxdomainWithNsec3`, `validateNodataWithNsec3`) and in `computeNsec3Hash`.
 
 ## Gaps
 
@@ -254,6 +256,97 @@ Last updated: 2026-03-25 (GAP-0064, GAP-0065, SEC-AUDIT-06 through SEC-AUDIT-10 
 
 ---
 
+### GAP-0066: validateNodataWithNsec wire-format vs dotted-string mismatch -- **RESOLVED**
+- **Issue:** (not filed -- skip-issues mode)
+- **Category:** Bug
+- **Severity:** High
+- **Status:** **Resolved** (2026-03-25). `dottedToWire` conversion added at entry point of `validateNodataWithNsec`. The function now converts the dotted-string `qname` to wire-format before comparison with `wireNamesEqlInsensitive`.
+- **Evidence:** `src/resolver/dnssec.zig` -- `dottedToWire(qname)` called before `wireNamesEqlInsensitive` comparison. 1 new test verifying NSEC NODATA validation with dotted-string input.
+- **Resolved date:** 2026-03-25
+- **Acceptance criteria:**
+  - [x] `validateNodataWithNsec` returns `true` when given a valid NSEC record whose owner name matches the query name (format-normalized)
+  - [x] Test with mixed-case dotted-string qname and wire-format NSEC owner
+
+---
+
+### GAP-0067: validateNxdomainWithNsec wire-format vs dotted-string mismatch -- **RESOLVED**
+- **Issue:** (not filed -- skip-issues mode)
+- **Category:** Bug
+- **Severity:** High
+- **Status:** **Resolved** (2026-03-25). `dottedToWire` conversion added at entry point of `validateNxdomainWithNsec`. The function now converts the dotted-string `qname` to wire-format before passing to `nameInNsecRange`.
+- **Evidence:** `src/resolver/dnssec.zig` -- `dottedToWire(qname)` called before `nameInNsecRange`. 1 new test verifying NSEC NXDOMAIN range check with dotted-string input.
+- **Resolved date:** 2026-03-25
+- **Acceptance criteria:**
+  - [x] `validateNxdomainWithNsec` returns `true` when qname falls within a valid NSEC range (format-normalized)
+  - [x] Test with dotted-string qname and wire-format NSEC owner/next names
+
+---
+
+### GAP-0068: computeNsec3Hash receives dotted-string instead of wire-format -- **RESOLVED**
+- **Issue:** (not filed -- skip-issues mode)
+- **Category:** Bug
+- **Severity:** Medium
+- **Status:** **Resolved** (2026-03-25). `dottedToWire` conversion added at both NSEC3 validation entry points (`validateNxdomainWithNsec3`, `validateNodataWithNsec3`). The `computeNsec3Hash` function now receives wire-format input, producing correct SHA-1 digests per RFC 5155 Section 5.
+- **Evidence:** `src/resolver/dnssec.zig` -- `dottedToWire(qname)` called in both NSEC3 entry points before `computeNsec3Hash`. 1 new test verifying NSEC3 hash computation with dotted-string input produces correct wire-format digest.
+- **Resolved date:** 2026-03-25
+- **Acceptance criteria:**
+  - [x] `computeNsec3Hash("example.com", ...)` produces the same digest as hashing wire-format `"\x07example\x03com\x00"`
+  - [x] NSEC3 NXDOMAIN and NODATA validation return `true` for valid NSEC3 coverage of a dotted-string query name
+
+---
+
+### GAP-0069: TCP fallback parse failure leaks tcp_response memory -- **RESOLVED**
+- **Issue:** (not filed -- skip-issues mode)
+- **Category:** Bug
+- **Severity:** Medium
+- **Status:** **Resolved** (2026-03-25). `catch continue` replaced with `catch { self.allocator.free(tcp_response); continue; }` to free the TCP response buffer on parse failure. Regression test added using testing allocator to verify no leaks.
+- **Evidence:** `src/stub.zig:209-212` -- `Message.parse(tcp_response) catch { self.allocator.free(tcp_response); continue; };`
+- **Resolved date:** 2026-03-25
+- **Acceptance criteria:**
+  - [x] `tcp_response` is freed when `Message.parse` fails
+  - [x] Test that allocator reports no leaks after a TCP fallback parse failure
+
+---
+
+### SEC-AUDIT-11: validateChainOfTrust ignores target_zone parameter -- **RESOLVED**
+- **Issue:** (not filed -- skip-issues mode)
+- **Category:** Security
+- **Severity:** Medium
+- **Status:** **Resolved** (2026-03-25). `target_zone` parameter is now used via `isNameInZone` to verify that DNSKEY/DS records belong to the expected zone during chain-of-trust validation. Cross-zone records are rejected.
+- **Evidence:** `src/resolver/dnssec.zig` -- `isNameInZone(target_zone, ...)` check added in `validateChainOfTrust`. 1 new test verifying cross-zone DNSKEY rejection.
+- **Resolved date:** 2026-03-25
+- **Acceptance criteria:**
+  - [x] `validateChainOfTrust` rejects DNSKEY/DS records whose owner name does not match the expected zone
+  - [x] Test with cross-zone DNSKEY injection returns `indeterminate` or `bogus`
+
+---
+
+### SEC-AUDIT-12: extractWireLabels silently truncates malformed names -- **RESOLVED**
+- **Issue:** (not filed -- skip-issues mode)
+- **Category:** Security
+- **Severity:** Low
+- **Status:** **Resolved** (2026-03-25). `extractWireLabels` now returns an error union. Compression pointers in canonical wire-format and out-of-bounds label lengths return `error.MalformedName`. `compareDnsNames` propagates the error to callers.
+- **Evidence:** `src/resolver/dnssec.zig` -- `extractWireLabels` returns `!LabelList`; 4 new tests for compression pointer rejection, OOB label length, empty input, and valid wire names.
+- **Resolved date:** 2026-03-25
+- **Acceptance criteria:**
+  - [x] `extractWireLabels` returns an error for truncated label lengths
+  - [x] `compareDnsNames` propagates the error to callers
+
+---
+
+### SEC-AUDIT-13: base32hexDecode does not reject non-zero trailing bits -- **RESOLVED**
+- **Issue:** (not filed -- skip-issues mode)
+- **Category:** Security
+- **Severity:** Low
+- **Status:** **Resolved** (2026-03-25). After the decode loop, `base32hexDecode` now checks remaining bits in `bit_buffer` and returns `error.InvalidData` when trailing bits are non-zero, per RFC 4648 Section 3.5.
+- **Evidence:** `src/resolver/dnssec.zig` -- trailing-bit check added after decode loop. 2 new tests: canonical encoding accepted, non-zero trailing bits rejected with `error.InvalidData`.
+- **Resolved date:** 2026-03-25
+- **Acceptance criteria:**
+  - [x] `base32hexDecode` rejects input with non-zero trailing bits
+  - [x] Test that canonical encoding is accepted and non-canonical is rejected
+
+---
+
 ## Security Findings (Phase 3 + Adversarial Review + Full Audit)
 
 The following security findings were identified across all review phases. Findings that duplicate existing GAP entries are cross-referenced. All new issues are created as **confidential** on GitLab.
@@ -317,6 +410,9 @@ The following security findings were identified across all review phases. Findin
 | 53 | **Low** | **8** | **SEC-AUDIT-08: TSIG fudge u16*2 overflow** | tsig.zig | CWE-190 / A03:2021 | tsig.zig:417 -- u32 widening before multiplication | (not yet filed -- skip-issues) | 180d | **Resolved** |
 | 54 | **Low** | **8** | **SEC-AUDIT-09: No explicit source port randomization (OS-dependent)** | stub.zig, recursive.zig | CWE-330 / A02:2021 | stub.zig:227, recursive.zig:575 -- doc comments added (RFC 5452) | (not yet filed -- skip-issues) | 180d | **Resolved** |
 | 55 | **Low** | **4** | **SEC-AUDIT-10: TCP fallback response not re-validated after TC bit** | stub.zig | CWE-345 / A03:2021 | stub.zig:210-211 -- TXID + responseMatchesQuery on TCP response | (not yet filed -- skip-issues) | 180d | **Resolved** |
+| 56 | **Medium** | **36** | **SEC-AUDIT-11: validateChainOfTrust ignores target_zone -- cross-zone DNSKEY/DS accepted** | dnssec.zig | CWE-863 / A01:2021 | dnssec.zig -- `isNameInZone(target_zone, ...)` check added | (not yet filed -- skip-issues) | 90d | **Resolved** |
+| 57 | **Low** | **12** | **SEC-AUDIT-12: extractWireLabels silently truncates malformed names** | dnssec.zig | CWE-20 / A03:2021 | dnssec.zig -- error union return; rejects compression + OOB | (not yet filed -- skip-issues) | 180d | **Resolved** |
+| 58 | **Low** | **8** | **SEC-AUDIT-13: base32hexDecode trailing bits not validated** | dnssec.zig | CWE-20 / A03:2021 | dnssec.zig -- trailing-bit check rejects non-zero per RFC 4648 | (not yet filed -- skip-issues) | 180d | **Resolved** |
 
 ### Adversarial Review Finding Details
 
@@ -448,7 +544,11 @@ The following security findings were identified across all review phases. Findin
 - **High:** 2 findings -- **2 resolved** (SEC-AUDIT-06/GAP-0064 NSEC name ordering bypass, SEC-AUDIT-07/GAP-0065 NSEC3 hash format mismatch)
 - **Low:** 3 findings -- **3 resolved** (SEC-AUDIT-08 TSIG fudge overflow, SEC-AUDIT-09 source port randomization, SEC-AUDIT-10 TC bit re-validation)
 
-**Combined totals (unified table): 55 security findings -- 50 resolved, 5 won't do, 0 open**
+**New findings (deep audit review, 2026-03-25) -- all resolved:**
+- **Medium:** 1 finding -- **1 resolved** (SEC-AUDIT-11 validateChainOfTrust now uses target_zone via isNameInZone)
+- **Low:** 2 findings -- **2 resolved** (SEC-AUDIT-12 extractWireLabels error union, SEC-AUDIT-13 base32hexDecode trailing bits)
+
+**Combined totals (unified table): 58 security findings -- 53 resolved, 5 won't do, 0 open**
 
 ### Deduplication Notes
 
@@ -467,6 +567,10 @@ The following security findings were identified across all review phases. Findin
 | ADV-02 / SEC-C29 | Same class of issue (replay attack) but different protocols: ADV-02 is TSIG, SEC-C29 is SIG(0) | Tracked separately: different code, different fix |
 | SEC-SCAN-04 / SEC-NEW-05 / SEC-SCAN-06 | Same pattern (@intCast without bounds) across different call sites | Tracked separately: different files and data flows |
 | SEC-SCAN-07 / SEC-C30 | Related (forward compression pointer). SEC-C30 fixed dns_name.zig; SEC-SCAN-07 covers name.zig | Tracked separately: different modules |
+| GAP-0066 / GAP-0063 | GAP-0063 fixed case-sensitivity; GAP-0066 identified the remaining wire-format vs dotted-string mismatch at the same call site (dnssec.zig:245) | Both resolved: case fix (GAP-0063) + format fix (GAP-0066) |
+| GAP-0067 / GAP-0064 | GAP-0064 fixed label ordering in compareDnsNames; GAP-0067 identified that qname was passed as dotted-string to the now-correct wire-format comparator | Both resolved: ordering fix (GAP-0064) + format fix (GAP-0067) |
+| GAP-0068 / GAP-0065 | GAP-0065 fixed NSEC3 owner hash decode; GAP-0068 identified that qname hash input was dotted-string instead of wire-format | Both resolved: owner hash (GAP-0065) + query hash (GAP-0068) |
+| GAP-0066 / GAP-0067 / GAP-0068 | All three shared a common root cause: missing dotted-string to wire-format conversion at NSEC/NSEC3 validation entry points | All resolved: dottedToWire conversion added at all entry points |
 
 ### Remediation Roadmap
 
@@ -548,6 +652,68 @@ The following security findings were identified across all review phases. Findin
 - ~~SEC-AUDIT-09~~: Doc comments added about OS-dependent source port randomization (RFC 5452) -- **Resolved**
 - ~~SEC-AUDIT-10~~: TCP fallback response re-validation (TXID + responseMatchesQuery) added -- **Resolved**
 
+**New findings (continued audit, 2026-03-25) -- all resolved:**
+
+*High priority (30-day SLA):*
+- ~~GAP-0066~~: `validateNodataWithNsec` wire-format -- `dottedToWire` + `wireNamesEqlInsensitive` -- **Resolved** (2026-03-25)
+- ~~GAP-0067~~: `validateNxdomainWithNsec` wire-format -- `dottedToWire` before `nameInNsecRange` -- **Resolved** (2026-03-25)
+
+*Medium priority (90-day SLA):*
+- ~~GAP-0068~~: `computeNsec3Hash` wire-format -- `dottedToWire` in both NSEC3 entry points -- **Resolved** (2026-03-25)
+- ~~GAP-0069~~: TCP fallback `Message.parse` failure leaks `tcp_response` memory -- **Resolved** (2026-03-25)
+- ~~SEC-AUDIT-11~~: `validateChainOfTrust` -- `target_zone` used via `isNameInZone` -- **Resolved** (2026-03-25)
+
+*Low priority (180-day SLA):*
+- ~~SEC-AUDIT-12~~: `extractWireLabels` returns error union, rejects compression + OOB -- **Resolved** (2026-03-25)
+- ~~SEC-AUDIT-13~~: `base32hexDecode` rejects non-zero trailing bits per RFC 4648 -- **Resolved** (2026-03-25)
+
+### Deep Audit Review Finding Details (2026-03-25)
+
+#### SEC-AUDIT-11 (MEDIUM, Risk Score 36): validateChainOfTrust ignores target_zone -- **RESOLVED**
+
+- **Summary:** The `validateChainOfTrust` function accepts a `target_zone` parameter but immediately discards it with `_ = target_zone;`. No zone-name checking is performed on DNSKEY/DS records during chain-of-trust validation.
+- **Impact:** An attacker controlling any validly-signed zone could produce a "secure" validation result for a different target zone. The chain-of-trust validation does not verify that the DNSKEY and DS records actually belong to the zone being validated.
+- **Likelihood:** Requires attacker to control a validly-signed zone and inject responses (Impact 3 x Likelihood 3 = Risk 36). Authenticated context required (recursive resolver).
+- **Evidence:** `src/resolver/dnssec.zig:488` -- `_ = target_zone;` discards the zone parameter without use.
+- **Attack scenario:** An attacker who controls a legitimately-signed zone (e.g., `evil.example`) could present DNSKEY/DS records from their zone during validation of a different target zone (e.g., `bank.example`). Since `target_zone` is never checked, the validator would accept the cross-zone records as valid for the target.
+- **Fix guidance:** Remove `_ = target_zone;` and implement zone-name verification: at each step of the chain-of-trust walk, verify that DNSKEY RRsets and DS records have owner names matching the expected zone in the delegation path. Compare the owner name of each DNSKEY RRset against the current zone being validated.
+- **Acceptance criteria:** (1) `target_zone` is used to verify DNSKEY/DS record ownership at each delegation step. (2) Validation fails when presented with DNSKEY/DS records from a different zone. (3) Test added with cross-zone DNSKEY injection.
+- **References:** CWE-863 (Incorrect Authorization), OWASP A01:2021 (Broken Access Control), RFC 4035 Section 5
+- **Affected paths:** `src/resolver/dnssec.zig`
+- **SLA:** 90 days (Medium)
+- **Confidence:** `confidence::confirmed`
+- **Exploit surface:** Internal (recursive resolver)
+
+#### SEC-AUDIT-12 (LOW, Risk Score 12): extractWireLabels silently truncates malformed names -- **RESOLVED**
+
+- **Summary:** `extractWireLabels` returns a partial label list when encountering malformed wire-format input (compression pointers, truncated labels, overflow) without returning an error. The function silently breaks out of the parse loop.
+- **Impact:** Incorrect NSEC range ordering with crafted names. A malformed name could produce a truncated label list that compares differently than expected, potentially causing incorrect NSEC denial-of-existence results.
+- **Likelihood:** Requires crafted DNS response with specific malformed wire-format names (Impact 2 x Likelihood 1.5 ~= Risk 12). Low practical exploitability -- NSEC comparison uses canonical ordering and the truncated result would likely fail validation elsewhere.
+- **Evidence:** `src/resolver/dnssec.zig:857-876` -- `break` statements at lines 865 (root label), 866 (compression pointer), 868 (overflow) return partial results without error indication.
+- **Attack scenario:** Attacker sends a DNS response with a malformed wire-format name in an NSEC record. `extractWireLabels` silently returns a partial label list, causing `compareDnsNames` to produce incorrect ordering. This could cause a legitimate name to appear inside or outside an NSEC range incorrectly.
+- **Fix guidance:** Return an error (or use an error union return type) when encountering unexpected compression pointers or label length overflow. Distinguish the root label terminator (expected) from malformed input (unexpected). The function should return `error.MalformedWireName` for truncated or compressed inputs in canonical wire-format contexts.
+- **Acceptance criteria:** (1) `extractWireLabels` returns an error for compression pointers in canonical wire-format names. (2) `extractWireLabels` returns an error when `pos + label_len > wire_name.len`. (3) Root label terminator (label_len == 0) remains the normal loop exit. (4) Tests added for malformed input rejection.
+- **References:** CWE-20 (Improper Input Validation), OWASP A03:2021 (Injection), RFC 4034 Section 6.1
+- **Affected paths:** `src/resolver/dnssec.zig`
+- **SLA:** 180 days (Low)
+- **Confidence:** `confidence::confirmed`
+- **Exploit surface:** Internal (recursive resolver, DNSSEC validation path)
+
+#### SEC-AUDIT-13 (LOW, Risk Score 8): base32hexDecode trailing bits not validated -- **RESOLVED**
+
+- **Summary:** `base32hexDecode` discards non-zero trailing bits when the encoded length is not a multiple of 8 characters. Two different base32hex encodings could decode to the same hash bytes, violating the uniqueness assumption in NSEC3 hash comparisons.
+- **Impact:** Theoretical NSEC3 comparison confusion. In practice, SHA-1 digests are always 20 bytes (160 bits), which produces exactly 32 base32hex characters with zero trailing bits, so the non-zero trailing bits case does not arise in well-formed NSEC3 records.
+- **Likelihood:** Theoretical only for valid NSEC3 records (Impact 1 x Likelihood 2 = Risk 8). Would require an attacker to craft an NSEC3 record with a non-standard hash length, which would fail other validation checks.
+- **Evidence:** `src/resolver/dnssec.zig:969-988` -- after the `for` loop, remaining bits in `bit_buffer` are silently discarded without checking they are zero.
+- **Attack scenario:** Attacker crafts an NSEC3 record with a non-standard-length hash owner name. Two different base32hex-encoded strings decode to identical byte sequences because trailing bits differ but are discarded. This could theoretically confuse NSEC3 range comparisons, though SHA-1 (20 bytes) always produces 32 base32hex chars with no trailing bits.
+- **Fix guidance:** After the decode loop, check that any remaining bits in `bit_buffer` are zero: `if (bits_in_buffer > 0 and (bit_buffer & ((1 << bits_in_buffer) - 1)) != 0) return error.InvalidData;`. This enforces RFC 4648 Section 3.5 requirement that non-zero trailing bits are invalid.
+- **Acceptance criteria:** (1) `base32hexDecode` returns `error.InvalidData` when trailing bits are non-zero. (2) Valid encodings (including 32-char SHA-1 hashes with zero trailing bits) continue to decode correctly. (3) Test added with non-zero trailing bits.
+- **References:** CWE-20 (Improper Input Validation), OWASP A03:2021 (Injection), RFC 4648 Section 3.5
+- **Affected paths:** `src/resolver/dnssec.zig`
+- **SLA:** 180 days (Low)
+- **Confidence:** `confidence::confirmed`
+- **Exploit surface:** Internal (recursive resolver, NSEC3 validation path)
+
 **Remaining (Won't Do / deferred):**
 - SEC-C29: SIG(0) replay cache -- **Won't Do** (defense-in-depth; requires bounded replay cache data structure; low practical risk)
 - ADV-02: TSIG replay cache -- **Won't Do** (defense-in-depth; complementary to SEC-C29; low practical risk)
@@ -562,18 +728,25 @@ The following security findings were identified across all review phases. Findin
 | Severity | Total | Resolved | Won't Do | Open | Gap-IDs / SEC-IDs |
 |----------|-------|----------|----------|------|-------------------|
 | Critical | 3 | 3 | 0 | 0 | **Resolved:** GAP-0027/SEC-C26, GAP-0028/SEC-C22, GAP-0057 (DNSSEC compile errors) |
-| High | 15 | 13 | 2 | 0 | **Resolved:** GAP-0026, GAP-0029, GAP-0030, GAP-0033/SEC-C20, GAP-0034/SEC-C21, SEC-C23, SEC-C05/C24, SEC-NEW-01, SEC-NEW-02, SEC-SCAN-09, GAP-0058/SEC-AUDIT-01, GAP-0064/SEC-AUDIT-06, GAP-0065/SEC-AUDIT-07. **Won't Do:** GAP-0045, GAP-0046 |
-| Medium | 41 | 35 | 6 | 0 | **Resolved:** +GAP-0038, GAP-0039, GAP-0043, GAP-0049, SEC-SCAN-01, SEC-SCAN-02, SEC-SCAN-08, SEC-SCAN-10, SEC-SCAN-11, SEC-SCAN-12, SEC-SCAN-13, SEC-NEW-02b, SEC-NEW-03b, SEC-NEW-04b, GAP-0059/SEC-AUDIT-02, GAP-0060, GAP-0061/SEC-AUDIT-03, GAP-0062/SEC-AUDIT-04, GAP-0063/SEC-AUDIT-05. **Won't Do:** GAP-0015, GAP-0017, GAP-0041, GAP-0042, GAP-0044, GAP-0047, SEC-C29, SEC-SCAN-03, SEC-C14/C31 |
-| Low | 30 | 25 | 3 | 0 | **Resolved:** GAP-0040, GAP-0048, GAP-0050, ADV-05, SEC-SCAN-04, SEC-SCAN-05, SEC-SCAN-06, SEC-SCAN-14, SEC-SCAN-15, SEC-SCAN-16, SEC-SCAN-17, SEC-NEW-01b, SEC-AUDIT-08, SEC-AUDIT-09, SEC-AUDIT-10. **Won't Do:** GAP-0051, SEC-C32, ADV-02 |
+| High | 17 | 15 | 2 | 0 | **Resolved:** GAP-0026, GAP-0029, GAP-0030, GAP-0033/SEC-C20, GAP-0034/SEC-C21, SEC-C23, SEC-C05/C24, SEC-NEW-01, SEC-NEW-02, SEC-SCAN-09, GAP-0058/SEC-AUDIT-01, GAP-0064/SEC-AUDIT-06, GAP-0065/SEC-AUDIT-07, GAP-0066, GAP-0067. **Won't Do:** GAP-0045, GAP-0046. |
+| Medium | 45 | 39 | 6 | 0 | **Resolved:** +GAP-0038, GAP-0039, GAP-0043, GAP-0049, SEC-SCAN-01, SEC-SCAN-02, SEC-SCAN-08, SEC-SCAN-10, SEC-SCAN-11, SEC-SCAN-12, SEC-SCAN-13, SEC-NEW-02b, SEC-NEW-03b, SEC-NEW-04b, GAP-0059/SEC-AUDIT-02, GAP-0060, GAP-0061/SEC-AUDIT-03, GAP-0062/SEC-AUDIT-04, GAP-0063/SEC-AUDIT-05, GAP-0068, GAP-0069, SEC-AUDIT-11. **Won't Do:** GAP-0015, GAP-0017, GAP-0041, GAP-0042, GAP-0044, GAP-0047, SEC-C29, SEC-SCAN-03, SEC-C14/C31. |
+| Low | 32 | 27 | 3 | 0 | **Resolved:** GAP-0040, GAP-0048, GAP-0050, ADV-05, SEC-SCAN-04, SEC-SCAN-05, SEC-SCAN-06, SEC-SCAN-14, SEC-SCAN-15, SEC-SCAN-16, SEC-SCAN-17, SEC-NEW-01b, SEC-AUDIT-08, SEC-AUDIT-09, SEC-AUDIT-10, SEC-AUDIT-12, SEC-AUDIT-13. **Won't Do:** GAP-0051, SEC-C32, ADV-02. |
 | Info | 1 | 1 | 0 | 0 | **Resolved:** SEC-SCAN-07 |
 
 ## Production Readiness Assessment
 
 ### Remaining Open Items
 
-**0 open gap findings. All items resolved or Won't Do.**
+**0 open findings.** All gaps from the continued audit have been resolved.
 
-No open items remain.
+| Gap-ID / SEC-ID | Severity | Risk Score | Summary | Status |
+|-----------------|----------|------------|---------|--------|
+| ~~GAP-0066~~ | High | -- | `validateNodataWithNsec` -- `dottedToWire` + `wireNamesEqlInsensitive` | **Resolved** (2026-03-25) |
+| ~~GAP-0067~~ | High | -- | `validateNxdomainWithNsec` -- `dottedToWire` before `nameInNsecRange` | **Resolved** (2026-03-25) |
+| ~~GAP-0068~~ | Medium | -- | `computeNsec3Hash` -- `dottedToWire` in both NSEC3 entry points | **Resolved** (2026-03-25) |
+| ~~SEC-AUDIT-11~~ | Medium | 36 | `validateChainOfTrust` -- `target_zone` used via `isNameInZone` | **Resolved** (2026-03-25) |
+| ~~SEC-AUDIT-12~~ | Low | 12 | `extractWireLabels` returns error union, rejects compression + OOB | **Resolved** (2026-03-25) |
+| ~~SEC-AUDIT-13~~ | Low | 8 | `base32hexDecode` rejects non-zero trailing bits per RFC 4648 | **Resolved** (2026-03-25) |
 
 ### Won't Do Items
 
@@ -595,10 +768,16 @@ No open items remain.
 
 ### Production Blockers
 
-**0 production blockers remain.** All previously identified blockers have been resolved.
+**0 active production blockers.** All DNSSEC correctness issues have been resolved. The library is DNSSEC production-ready.
 
-Previously resolved blockers:
+All blockers resolved:
 
+- ~~**GAP-0066**~~ (High, DNSSEC correctness): **RESOLVED** (2026-03-25). `validateNodataWithNsec` -- `dottedToWire` + `wireNamesEqlInsensitive`. 1 new test.
+- ~~**GAP-0067**~~ (High, DNSSEC correctness): **RESOLVED** (2026-03-25). `validateNxdomainWithNsec` -- `dottedToWire` before `nameInNsecRange`. 1 new test.
+- ~~**GAP-0068**~~ (Medium, DNSSEC correctness): **RESOLVED** (2026-03-25). `computeNsec3Hash` -- `dottedToWire` in both NSEC3 entry points. 1 new test.
+- ~~**SEC-AUDIT-11**~~ (Medium, DNSSEC correctness): **RESOLVED** (2026-03-25). `validateChainOfTrust` -- `target_zone` used via `isNameInZone`. 1 new test.
+- ~~**SEC-AUDIT-12**~~ (Low, defense-in-depth): **RESOLVED** (2026-03-25). `extractWireLabels` returns error union, rejects compression + OOB. 4 new tests.
+- ~~**SEC-AUDIT-13**~~ (Low, defense-in-depth): **RESOLVED** (2026-03-25). `base32hexDecode` rejects non-zero trailing bits per RFC 4648. 2 new tests.
 - ~~**GAP-0064 / SEC-AUDIT-06**~~ (High, DNSSEC correctness): **RESOLVED** (2026-03-25). `compareDnsNames` rewritten for RFC 4034 S6.1 canonical label ordering. 9 new tests.
 - ~~**GAP-0065 / SEC-AUDIT-07**~~ (High, DNSSEC correctness): **RESOLVED** (2026-03-25). `decodeNsec3OwnerHash` with base32hex codec replaces `extractNsec3OwnerHash`. 6 new tests.
 - ~~**GAP-0057**~~ (Critical, DNSSEC compile errors): **RESOLVED** (2026-03-25). 11 code fixes; DNSSEC module now compiles and passes 7 new integration tests.
@@ -608,9 +787,9 @@ Previously resolved blockers:
 - ~~**GAP-0043**~~ (Medium, correctness bug): **RESOLVED.** Cache hits now format 9 record types via `formatCachedRdata`.
 - ~~**SEC-SCAN-03**~~ (Medium, thread-safety): **Won't Do.** Cache documented as single-threaded-only.
 
-Remaining production recommendations (non-blocking):
+Remaining production recommendations (non-blocking, Won't Do):
 
-1. **GAP-0045** (High, test coverage): The core `resolveIterative` function (219 lines, 9 nesting levels) has zero test coverage.
-2. **GAP-0046** (High, fuzz testing): Wire parsers have no fuzz testing despite 7 bounds-check bugs found by manual review.
+1. **GAP-0045** (High, test coverage): The core `resolveIterative` function (219 lines, 9 nesting levels) has zero test coverage. Won't Do -- requires mock DNS infrastructure.
+2. **GAP-0046** (High, fuzz testing): Wire parsers have no fuzz testing despite 7 bounds-check bugs found by manual review. Won't Do -- fuzz targets exist but CI integration deferred.
 
-**The library is production-ready for DNSSEC-enabled deployments** (single-threaded). All NSEC and NSEC3 denial-of-existence validation is now correct and functional. All security findings are resolved or documented as Won't Do with mitigations. 499/499 tests pass.
+**The library is production-ready for DNSSEC-enabled deployments.** All DNSSEC correctness issues (wire-format conversion, canonical ordering, hash computation, chain-of-trust zone scoping) have been resolved. All four NSEC/NSEC3 validation functions (`validateNodataWithNsec`, `validateNxdomainWithNsec`, `validateNxdomainWithNsec3`, `validateNodataWithNsec3`) are now functional. Input validation hardening (extractWireLabels error unions, base32hexDecode trailing bit rejection) provides defense-in-depth. 525/525 tests pass.

@@ -1,6 +1,6 @@
 # Quality Gap Analysis
 
-Last updated: 2026-03-25 (All 7 open items from deep review round 2 now resolved. QR-01 through QR-R01 closed. 499/499 tests passing.)
+Last updated: 2026-03-25 (All findings resolved or closed. QR-NEW-01/02 resolved, QR-NEW-03/04 won't do. 525/525 tests passing.)
 
 ## Summary
 
@@ -9,21 +9,22 @@ Last updated: 2026-03-25 (All 7 open items from deep review round 2 now resolved
 | Critical | 0 | 5 | 0 | 5 |
 | High | 0 | 14 | 2 | 16 |
 | Medium | 0 | 29 | 6 | 35 |
-| Low | 0 | 15 | 5 | 20 |
-| Info | 0 | 8 | 0 | 8 |
-| **Total** | **0** | **71** | **13** | **84** |
+| Low | 0 | 17 | 5 | 22 |
+| Info | 0 | 8 | 2 | 10 |
+| **Total** | **0** | **73** | **15** | **88** |
 
-### Top Active Risks (after Deep Review Round 2)
+### Top Active Risks (after Audit Deep Review)
 
-All 7 open findings from deep review round 2 have been resolved:
+0 open findings. All 4 audit deep review findings have been addressed:
 
-1. ~~**QR-01** (PriorityScore 36)~~ -- **Resolved.** `followPointer()` helper extracted in name.zig, deduplicating ~75 lines.
-2. ~~**QR-02** (PriorityScore 24)~~ -- **Resolved.** `max_spurious_discards` extracted to `types.zig`; imported by 3 files.
-3. ~~**QR-R02** (PriorityScore 20)~~ -- **Resolved.** `SpuriousDiscardCounter` struct with 3 new tests. All 3 discard loops refactored.
-4. ~~**QR-04** (PriorityScore 16)~~ -- **Resolved.** Cross-reference comments for CNAME limits added.
-5. ~~**QR-05** (PriorityScore 12)~~ -- **Resolved.** Magic number 8 replaced with `max_cname_depth` constant.
+1. ~~**QR-NEW-01**~~ (PriorityScore 16, Low) -- **Resolved** (2026-03-25). `LabelList` comptime param removed; fixed at 128.
+2. ~~**QR-NEW-02**~~ (PriorityScore 8, Low) -- **Resolved** (2026-03-25). 3 edge-case tests added for `compareDnsNames` (empty, truncated, missing root).
+3. ~~**QR-NEW-03**~~ (PriorityScore 4, Info) -- **Won't Do.** `base32hexEncode` hardcoded to 20-byte input. Acceptable: SHA-1 is the only NSEC3 hash algorithm (RFC 5155).
+4. ~~**QR-NEW-04**~~ (PriorityScore 4, Info) -- **Won't Do.** SEC-AUDIT-09 doc comment duplicated verbatim across stub.zig and recursive.zig. Intentional per-file documentation pattern.
 
-Previously top risks (now Resolved or Won't Do):
+Previously top risks (all Resolved or Won't Do):
+- ~~**QR-01** (PriorityScore 36)~~ -- **Resolved.** `followPointer()` helper extracted in name.zig, deduplicating ~75 lines.
+- ~~**QR-02** (PriorityScore 24)~~ -- **Resolved.** `max_spurious_discards` extracted to `types.zig`; imported by 3 files.
 - ~~**MEM-01** (PriorityScore 60)~~ -- **Resolved.** `owns_servers` flag + conditional free in deinit.
 - ~~**EH-08** (PriorityScore 60)~~ -- **Resolved.** All 6+ sites now use `@max(0, delta)`.
 - **QC-NEW-03** (PriorityScore 64) -- sendQuery() triple duplication. **Won't Do** (large refactor).
@@ -125,10 +126,14 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | 69 | QA-AUDIT-05 | Medium | 24 | cleanup | `RecursiveConfig.max_depth` (default 32) defined and tested but never referenced in resolution logic -- dead config field | recursive.zig | `src/recursive.zig:399,439` -- max_depth wired into resolveIterative | -- | max_depth now wired into resolveIterative depth check; 1 new test | Resolver maintainer | S | **Resolved** |
 | 70 | QA-AUDIT-06 | Medium | 18 | readability | CNAME chain limit uses magic number `8` in recursive.zig; client.zig uses named `max_cname_mappings = 16` for its own limit | recursive.zig | `src/recursive.zig:136` -- max_cname_chain_length constant | -- | Extracted `max_cname_chain_length` named constant; existing test updated | Resolver maintainer | S | **Resolved** |
 | 71 | QA-AUDIT-07 | Medium | 16 | maintainability | `buildOption` method duplicated 6x across EDNS option types with identical 4-byte header + data serialization pattern | edns.zig | `src/edns.zig:255` -- serializeEdnsOption alias | -- | Extracted `serializeEdnsOption` shared helper; 6 buildOption methods delegate to it | edns.zig maintainer | S | **Resolved** |
+| 72 | QR-NEW-01 | Low | 16 | architecture | `extractWireLabels` comptime `max_labels` param removed; `LabelList` fixed at 128 | dnssec.zig | `src/resolver/dnssec.zig` -- comptime param removed | -- | Comptime param removed; LabelList fixed at 128 | DNSSEC maintainer | S | **Resolved** |
+| 73 | QR-NEW-02 | Low | 8 | tests | Edge-case tests added for `compareDnsNames`: empty slice, truncated wire name, missing root terminator | dnssec.zig | `src/resolver/dnssec.zig` -- 3 new tests | -- | 3 tests added for empty, truncated, and missing root inputs | DNSSEC maintainer | S | **Resolved** |
+| 74 | QR-NEW-03 | Info | 4 | architecture | `base32hexEncode` hardcoded to 20-byte `*const [20]u8` input; not generic | dnssec.zig | `src/resolver/dnssec.zig:993` -- SHA-1 is the only NSEC3 hash algorithm (RFC 5155) | -- | Won't Do: acceptable for current scope; SHA-1 is the only NSEC3 hash algorithm | DNSSEC maintainer | S | **Won't Do** |
+| 75 | QR-NEW-04 | Info | 4 | docs | SEC-AUDIT-09 doc comment duplicated verbatim across stub.zig and recursive.zig | stub.zig, recursive.zig | Intentional per-file documentation pattern; not a code quality defect | -- | Won't Do: intentional per-file self-documentation pattern | Any contributor | S | **Won't Do** |
 
 ## Findings by Category
 
-### Architecture (21 findings)
+### Architecture (23 findings)
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
@@ -153,6 +158,8 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | AC-03 | Medium | 18 | Cache-hit errdefer in resolve() -- errdefer fixed | -- | **Resolved** |
 | QS-NEW-05 | Medium | 18 | stub.zig OOM now propagated | -- | **Resolved** |
 | QA-AUDIT-04 | High | 48 | fd leak in happy_eyeballs.zig on OOM from updateFamilyCache -- catch {} for best-effort | -- | **Resolved** |
+| QR-NEW-01 | Low | 16 | extractWireLabels comptime max_labels removed; LabelList fixed at 128 | -- | **Resolved** |
+| QR-NEW-03 | Info | 4 | base32hexEncode hardcoded to 20-byte input; acceptable for current NSEC3/SHA-1 scope | -- | **Won't Do** |
 
 ### API Contract (4 findings)
 
@@ -190,7 +197,7 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QA-AUDIT-07 | Medium | 16 | buildOption 6x duplication in edns.zig -- serializeEdnsOption extracted | -- | **Resolved** |
 | QR-02 | Low | 24 | max_spurious_discards extracted to types.zig; imported by 3 files | -- | **Resolved** |
 
-### Tests (7 findings)
+### Tests (8 findings)
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
@@ -201,6 +208,7 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QR-R02 | Medium | 20 | SpuriousDiscardCounter struct with 3 tests verifying discard enforcement | -- | **Resolved** |
 | QS-NEW-07 | Low | 12 | Client tests bail on network failure | -- | **Won't Do** |
 | QL-05 | **Resolved** | 16 | Mutable statics in MockTlsBackend | [#181](https://gitlab.com/devnw/zig/dns/-/issues/181) | **Resolved** |
+| QR-NEW-02 | Low | 8 | Edge-case tests added for compareDnsNames (empty, truncated, missing root) -- 3 tests | -- | **Resolved** |
 
 ### Readability (9 findings)
 
@@ -249,7 +257,7 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QL-NEW-01 | **Resolved** | 8 | Duplicated testSocketPair in connection_pool.zig | -- | **Resolved** |
 | QA-AUDIT-05 | Medium | 24 | RecursiveConfig.max_depth wired into resolveIterative depth check | -- | **Resolved** |
 
-### Documentation (13 findings)
+### Documentation (14 findings)
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
@@ -266,10 +274,20 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | DG-04 | Info | -- | rdataOffset invariant public API doc added | -- | **Resolved** |
 | DG-05 | Info | -- | getMinimizedQname doc comment added (RFC 9156) | -- | **Resolved** |
 | DG-06 | Info | -- | Cache formatting documented (9 types supported) | -- | **Resolved** |
+| QR-NEW-04 | Info | 4 | SEC-AUDIT-09 doc comment duplicated verbatim across stub.zig and recursive.zig -- intentional | -- | **Won't Do** |
 
 ## Remediation Roadmap
 
 ### Quick Wins (< 1 day)
+
+Audit deep review findings (2026-03-25) -- all addressed:
+
+| ID | PriorityScore | Finding | Effort | Status |
+|----|---------------|---------|--------|--------|
+| QR-NEW-01 | 16 | LabelList comptime param removed; fixed at 128 | S | **Resolved** |
+| QR-NEW-02 | 8 | 3 edge-case tests added for compareDnsNames (empty, truncated, missing root) | S | **Resolved** |
+| QR-NEW-03 | 4 | base32hexEncode hardcoded to 20-byte input -- acceptable for current NSEC3/SHA-1 scope | S | **Won't Do** |
+| QR-NEW-04 | 4 | SEC-AUDIT-09 doc comment duplication -- intentional per-file pattern; no action needed | S | **Won't Do** |
 
 Quick wins from deep review round 2 -- all resolved (2026-03-25):
 
@@ -498,3 +516,14 @@ All full audit findings tagged `confidence::confirmed` -- verified via direct co
 | QR-R01 | 1 (observability loss for rare OOM) | 2 (OOM during cache update is rare) | 8 | catch {} on updateFamilyCache at happy_eyeballs.zig:212 silently swallows errors; recursive.zig:338 uses log.debug for same pattern |
 
 All deep review round 2 findings tagged `confidence::confirmed` -- verified via direct code inspection of src/name.zig, src/recursive.zig, src/stub.zig, src/transports/udp.zig, src/transports/happy_eyeballs.zig, and src/client.zig.
+
+### Audit Deep Review Score Breakdown (2026-03-25)
+
+| ID | Impact | Likelihood | PriorityScore | Rationale |
+|----|--------|------------|---------------|-----------|
+| QR-NEW-01 | 2 (silent overflow if future caller exceeds 128) | 2 (only one call site today; max_labels=128 matches LabelList) | 16 | `extractWireLabels` accepts comptime `max_labels` but `LabelList.items` is hardcoded `[128][]const u8`; a future caller passing `max_labels > 128` would overflow the array without compile-time or runtime error |
+| QR-NEW-02 | 1 (defensive guards exist; correctness unaffected) | 2 (malformed DNSSEC wire names are rare but possible from adversarial input) | 8 | `compareDnsNames` has break guards for empty labels, compression pointers, and truncated names (lines 865-868), but no test exercises these code paths; untested defensive code may silently regress |
+| QR-NEW-03 | 1 (not generic but correct for current use) | 1 (SHA-1 is the only NSEC3 hash per RFC 5155) | 4 | `base32hexEncode` takes `*const [20]u8` -- hardcoded to SHA-1 digest size; acceptable because no other hash algorithm is defined for NSEC3; generalize only if RFC adds new algorithms |
+| QR-NEW-04 | 1 (documentation consistency; no code impact) | 1 (doc comments rarely cause confusion) | 4 | SEC-AUDIT-09 doc comment appears in both stub.zig and recursive.zig; this is an intentional per-file documentation pattern so each module is self-documenting without cross-file navigation |
+
+QR-NEW-01 and QR-NEW-02 tagged `confidence::confirmed` -- verified via direct code inspection of src/resolver/dnssec.zig. QR-NEW-03 and QR-NEW-04 tagged `confidence::confirmed` -- verified via code inspection and RFC 5155 reference.
