@@ -247,6 +247,28 @@ pub const dot_port = 853;
 /// DNS over HTTPS port (RFC 8484)
 pub const doh_port = 443;
 
+/// Maximum number of spurious (non-matching source) packets to discard before
+/// returning an error. Prevents CPU pinning from flood attacks (SEC-AUDIT-02).
+/// Used by stub resolver, recursive resolver, and UDP transport receive loops.
+pub const max_spurious_discards: u32 = 1000;
+
+/// Tracks spurious packet discards and enforces the discard limit (SEC-AUDIT-02).
+/// Each UDP receive loop should create one of these and call `increment()` for
+/// every packet received from a non-matching source address.
+pub const SpuriousDiscardCounter = struct {
+    count: u32 = 0,
+
+    /// Record a spurious packet. Returns `error.TooManySpuriousPackets` if the
+    /// discard limit has been reached, signalling that the receive loop should
+    /// abort to prevent CPU pinning from flood attacks.
+    pub fn increment(self: *SpuriousDiscardCounter) error{TooManySpuriousPackets}!void {
+        self.count += 1;
+        if (self.count >= max_spurious_discards) {
+            return error.TooManySpuriousPackets;
+        }
+    }
+};
+
 test "Type enum values" {
     try std.testing.expectEqual(@as(u16, 1), Type.a.toInt());
     try std.testing.expectEqual(@as(u16, 28), Type.aaaa.toInt());
@@ -262,4 +284,31 @@ test "Class enum values" {
 
 test "ResponseCode aliases" {
     try std.testing.expectEqual(ResponseCode.name_error, ResponseCode.nxdomain);
+}
+
+test "QR-R02: SpuriousDiscardCounter allows discards below limit" {
+    var counter = SpuriousDiscardCounter{};
+    // Incrementing below the limit should succeed without error
+    var i: u32 = 0;
+    while (i < max_spurious_discards - 1) : (i += 1) {
+        try counter.increment();
+    }
+    try std.testing.expectEqual(max_spurious_discards - 1, counter.count);
+}
+
+test "QR-R02: SpuriousDiscardCounter returns TooManySpuriousPackets at limit" {
+    var counter = SpuriousDiscardCounter{};
+    // Drive the counter to exactly the limit
+    var i: u32 = 0;
+    while (i < max_spurious_discards - 1) : (i += 1) {
+        try counter.increment();
+    }
+    // The next increment (reaching max_spurious_discards) must return the error
+    try std.testing.expectError(error.TooManySpuriousPackets, counter.increment());
+    try std.testing.expectEqual(max_spurious_discards, counter.count);
+}
+
+test "QR-R02: SpuriousDiscardCounter starts at zero" {
+    const counter = SpuriousDiscardCounter{};
+    try std.testing.expectEqual(@as(u32, 0), counter.count);
 }

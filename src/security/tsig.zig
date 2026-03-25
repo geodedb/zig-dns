@@ -412,7 +412,9 @@ pub const TsigContext = struct {
         // SECURITY (SEC-C100): Reject excessively large fudge values.
         // An attacker-controlled fudge could bypass time validation entirely.
         // Limit to twice the verifier's configured fudge as a reasonable upper bound.
-        if (tsig.fudge > self.fudge * 2) {
+        // SEC-AUDIT-08: Widen to u32 before multiplication to prevent u16 overflow
+        // when self.fudge > 32767 (e.g. 65535 * 2 = 131070 exceeds u16 max).
+        if (@as(u32, tsig.fudge) > @as(u32, self.fudge) * 2) {
             return VerifyResult{ .valid = false, .error_code = .bad_time };
         }
 
@@ -1131,4 +1133,84 @@ test "SEC-AUDIT-03: buildTsigVariables uses actual error and other_data" {
     // Verify the last bytes of the non-zero variant contain the other_data
     const tail = vars_nonzero[vars_nonzero.len - other_data.len ..];
     try std.testing.expectEqualSlices(u8, &other_data, tail);
+}
+
+test "SEC-AUDIT-08: fudge u16*2 overflow with large fudge values" {
+    const allocator = std.testing.allocator;
+
+    const key = TsigKey.init("test-key.example.com", .hmac_sha256, &[_]u8{0} ** 32);
+
+    // Set fudge to max u16 (65535) on both signer and verifier so MAC matches.
+    // The old code would compute self.fudge * 2 which overflows u16
+    // (65535 * 2 = 131070 > 65535).
+    var ctx = TsigContext.initNoWarn(allocator, key);
+    ctx.fudge = std.math.maxInt(u16); // 65535
+
+    const message = [_]u8{
+        0x12, 0x34, // ID
+        0x01, 0x00, // Flags: standard query
+        0x00, 0x01, // QDCOUNT: 1
+        0x00, 0x00, // ANCOUNT: 0
+        0x00, 0x00, // NSCOUNT: 0
+        0x00, 0x00, // ARCOUNT: 0
+        // Question: example.com A IN
+        0x07, 'e',
+        'x',  'a',
+        'm',  'p',
+        'l',  'e',
+        0x03, 'c',
+        'o',  'm',
+        0x00,
+        0x00, 0x01, // A
+        0x00, 0x01, // IN
+    };
+
+    // Sign and verify with the same large-fudge context
+    const signed = try ctx.sign(&message);
+    defer allocator.free(signed);
+
+    // Verify must not overflow/panic on self.fudge * 2 at the fudge check
+    const result = try ctx.verify(signed);
+    // The message should verify successfully (tsig.fudge=65535 <= 2*65535=131070)
+    try std.testing.expect(result.valid);
+    try std.testing.expectEqual(TsigError.no_error, result.error_code);
+}
+
+test "SEC-AUDIT-08: fudge comparison works for boundary values" {
+    // Verify the arithmetic is correct for boundary values without overflow.
+    // self.fudge=32768 would cause 32768*2=65536 which overflows u16.
+    // After fix, this should use widened arithmetic and work correctly.
+
+    const allocator = std.testing.allocator;
+
+    const key = TsigKey.init("test-key.example.com", .hmac_sha256, &[_]u8{0} ** 32);
+
+    var ctx = TsigContext.initNoWarn(allocator, key);
+    ctx.fudge = 32768; // 0x8000 -- smallest value that causes overflow in u16*2
+
+    const message = [_]u8{
+        0x12, 0x34, // ID
+        0x01, 0x00, // Flags: standard query
+        0x00, 0x01, // QDCOUNT: 1
+        0x00, 0x00, // ANCOUNT: 0
+        0x00, 0x00, // NSCOUNT: 0
+        0x00, 0x00, // ARCOUNT: 0
+        0x07, 'e',
+        'x',  'a',
+        'm',  'p',
+        'l',  'e',
+        0x03, 'c',
+        'o',  'm',
+        0x00,
+        0x00, 0x01, // A
+        0x00, 0x01, // IN
+    };
+
+    // Sign and verify with the same context so MAC matches
+    const signed = try ctx.sign(&message);
+    defer allocator.free(signed);
+
+    // Must not panic from overflow
+    const result = try ctx.verify(signed);
+    try std.testing.expect(result.valid);
 }

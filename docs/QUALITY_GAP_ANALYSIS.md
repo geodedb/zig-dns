@@ -1,6 +1,6 @@
 # Quality Gap Analysis
 
-Last updated: 2026-03-25 (All 7 quality findings from full audit now resolved. QA-AUDIT-01 through QA-AUDIT-07 closed.)
+Last updated: 2026-03-25 (All 7 open items from deep review round 2 now resolved. QR-01 through QR-R01 closed. 499/499 tests passing.)
 
 ## Summary
 
@@ -8,21 +8,29 @@ Last updated: 2026-03-25 (All 7 quality findings from full audit now resolved. Q
 |----------|----------------------|-----------------|----------|-------|
 | Critical | 0 | 5 | 0 | 5 |
 | High | 0 | 14 | 2 | 16 |
-| Medium | 0 | 27 | 6 | 33 |
-| Low | 0 | 12 | 5 | 17 |
-| Info | 0 | 6 | 0 | 6 |
-| **Total** | **0** | **64** | **13** | **77** |
+| Medium | 0 | 29 | 6 | 35 |
+| Low | 0 | 15 | 5 | 20 |
+| Info | 0 | 8 | 0 | 8 |
+| **Total** | **0** | **71** | **13** | **84** |
 
-### Top Active Risks (after Round 3 closure)
+### Top Active Risks (after Deep Review Round 2)
 
-1. ~~**MEM-01** (PriorityScore 60)~~ -- **Resolved.** `owns_servers` flag + conditional free in deinit.
-2. ~~**EH-08** (PriorityScore 60)~~ -- **Resolved.** All 6+ sites now use `@max(0, delta)`.
-3. **QC-NEW-03** (PriorityScore 64) -- sendQuery() triple duplication across stub.zig, recursive.zig, udp.zig (~150 lines). **Won't Do** (large refactor).
-4. **QH-05** (PriorityScore 64) -- ~~Zero fuzz testing for wire parsers~~ **Resolved.** 7 fuzz targets added in `tests/fuzz_parsers.zig`.
-5. **TC-01** (PriorityScore 48) -- resolveIterative zero integration test coverage. **Won't Do** (requires mock DNS transport infrastructure).
-6. **QM-03** (PriorityScore 36) -- resolveIterative 219 lines / 9 nesting levels. **Won't Do** (large refactor risks critical path).
-7. ~~**RD-01** (PriorityScore 30)~~ -- **Resolved.** LabelIterator extracted, used by 5 functions.
-8. ~~**CI-04** (PriorityScore 30)~~ -- **Resolved.** 16 tests added for escapeJsonString and addressMatches.
+All 7 open findings from deep review round 2 have been resolved:
+
+1. ~~**QR-01** (PriorityScore 36)~~ -- **Resolved.** `followPointer()` helper extracted in name.zig, deduplicating ~75 lines.
+2. ~~**QR-02** (PriorityScore 24)~~ -- **Resolved.** `max_spurious_discards` extracted to `types.zig`; imported by 3 files.
+3. ~~**QR-R02** (PriorityScore 20)~~ -- **Resolved.** `SpuriousDiscardCounter` struct with 3 new tests. All 3 discard loops refactored.
+4. ~~**QR-04** (PriorityScore 16)~~ -- **Resolved.** Cross-reference comments for CNAME limits added.
+5. ~~**QR-05** (PriorityScore 12)~~ -- **Resolved.** Magic number 8 replaced with `max_cname_depth` constant.
+
+Previously top risks (now Resolved or Won't Do):
+- ~~**MEM-01** (PriorityScore 60)~~ -- **Resolved.** `owns_servers` flag + conditional free in deinit.
+- ~~**EH-08** (PriorityScore 60)~~ -- **Resolved.** All 6+ sites now use `@max(0, delta)`.
+- **QC-NEW-03** (PriorityScore 64) -- sendQuery() triple duplication. **Won't Do** (large refactor).
+- ~~**QH-05** (PriorityScore 64)~~ -- **Resolved.** 7 fuzz targets added.
+- **TC-01** (PriorityScore 48) -- resolveIterative zero test coverage. **Won't Do**.
+- ~~**RD-01** (PriorityScore 30)~~ -- **Resolved.** LabelIterator extracted, used by 5 functions.
+- ~~**CI-04** (PriorityScore 30)~~ -- **Resolved.** 16 tests added.
 
 Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS-NEW-02, QM-NEW-01, RM-04, QS-NEW-03, and DG-01 through DG-06 all **resolved** in prior gap closure cycle.
 
@@ -56,7 +64,8 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | 24 | RE-05 | Medium | 40 | architecture | rdataOffset pointer arithmetic has no runtime safety check; relies on aliasing invariant that `self.rdata.ptr` points into `full_message` | record.zig | `src/record.zig:77-79` -- bounds check added; returns error on invariant violation | -- | Added bounds check and error return on violation | record.zig maintainer | S | **Resolved** |
 | 25 | QM-NEW-02 | Medium | 36 | architecture | ResolveResult defined twice with incompatible shapes: client.zig has `addresses: []const []const u8` + `from_cache: bool`; recursive.zig has `status: ResolveStatus` + `answer: ?[]u8` + `from_cache: bool` | client.zig, recursive.zig | `src/client.zig:318-332`, `src/recursive.zig:835-844` | -- | Unify into single type or rename to avoid confusion; client could wrap recursive result | Resolver maintainer | S | **Won't Do** (large refactor; different shapes serve different layers) |
 | 26 | QM-NEW-03 | Medium | 36 | api-contract | Cache hit path in Client.resolve only formats A and AAAA records; MX, SRV, TXT, NS, PTR cache hits silently return empty results | client.zig | `src/client.zig` -- `formatCachedRdata` added covering 9 record types | -- | Added `formatCachedRdata` for A, AAAA, MX, SRV, TXT, PTR, NS, SOA, CNAME | Client maintainer | M | **Resolved** |
-| 27 | AC-02 | Medium | 36 | architecture | client.lookupMX leaks exchange strings on error -- errdefer only calls `results.deinit()` | client.zig | `src/client.zig` -- errdefer now frees exchange strings before deinit | -- | Added `errdefer { for (results.items) |mx| self.allocator.free(mx.exchange); results.deinit(self.allocator); }` | Client maintainer | S | **Resolved** |
+| 27 | QR-01 | Medium | 36 | maintainability | Forward-pointer security logic triplicated in LabelIterator methods next(), nextOrStop(), nextForEql() -- 3 copies of ~25 identical lines; future security fix risks partial application | name.zig | `src/name.zig:98` -- `followPointer()` helper extracted; used by all three methods | -- | Extracted `followPointer()` helper; ~75 lines deduplicated | name.zig maintainer | S | **Resolved** |
+| 28 | AC-02 | Medium | 36 | architecture | client.lookupMX leaks exchange strings on error -- errdefer only calls `results.deinit()` | client.zig | `src/client.zig` -- errdefer now frees exchange strings before deinit | -- | Added `errdefer { for (results.items) |mx| self.allocator.free(mx.exchange); results.deinit(self.allocator); }` | Client maintainer | S | **Resolved** |
 | 28 | QM-03 | Medium | 36 | readability | `resolveIterative` is 219 lines with 9 levels of nesting (was 171 at QM-03 filing, 208 at Phase 2, now 219) | recursive.zig | `src/recursive.zig:188-406` | [#109](https://gitlab.com/devnw/zig/dns/-/issues/109) | **Won't Do** -- large refactor of critical resolution path; risks introducing regressions in well-tested code | Resolver maintainer | M | **Won't Do** |
 | 26 | RD-01 | Medium | 30 | maintainability | name.zig compression pointer security checks repeated 7+ times across toString/toStringBuf/labelCount/eql/parent; no shared LabelIterator | name.zig | `src/name.zig` -- LabelIterator extracted and used by 5 functions | [#188](https://gitlab.com/devnw/zig/dns/-/issues/188) | Extracted `LabelIterator` struct; used by toString, toStringBuf, labelCount, eql, parent | name.zig maintainer | M | **Resolved** |
 | 27 | CI-04 | Medium | 30 | tests | cmd/zdig.zig: 1051 lines, zero tests; security-sensitive escapeJsonString and addressMatches untested | zdig.zig | `cmd/zdig.zig` -- 16 tests added for escapeJsonString and addressMatches | [#196](https://gitlab.com/devnw/zig/dns/-/issues/196) | 16 unit tests added covering escapeJsonString and addressMatches | CLI maintainer | M | **Resolved** |
@@ -67,21 +76,27 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | 32 | RM-07 | Medium | 24 | maintainability | IPv4 formatting pattern `"{d}.{d}.{d}.{d}"` repeated inline in 4+ places | record.zig, recursive.zig, client.zig, convenience.zig | Multiple sites | -- | **Won't Do** (low-risk repetition; format string is idiomatic and unlikely to diverge) | Any contributor | S | **Won't Do** |
 | 33 | QM-NEW-01 | Medium | 24 | maintainability | Duplicate QueryType enum in convenience.zig mirrors types.Type | convenience.zig, types.zig | `src/resolver/convenience.zig` -- QueryType removed; replaced with `types.Type` | -- | Removed duplicate QueryType; now imports and uses types.Type directly | Convenience module maintainer | S | **Resolved** |
 | 34 | QM-NEW-05 | Medium | 24 | architecture | resolveNsAddress catches all errors (including OOM) as null via `catch return null` | recursive.zig | `src/recursive.zig` -- OOM now propagated; other errors return null | -- | `catch |err| switch (err) { error.OutOfMemory => return err, else => return null }` | Resolver maintainer | S | **Resolved** |
-| 35 | QS-NEW-08 | Medium | 20 | deps | Spice dependency pinned to main branch tarball; no semver tag | build.zig.zon | `build.zig.zon:29` | -- | **Won't Do** (upstream concern; hash pinning provides integrity; cross-ref GAP-0047, SEC-C14/C31) | Project maintainer | S | **Won't Do** |
-| 36 | QS-NEW-05 | Medium | 18 | architecture | stub.zig:170 swallows OOM errors via bare `catch` | stub.zig | `src/stub.zig` -- OOM now propagated via `catch |err| switch (err) { error.OutOfMemory => return err, else => continue }` | -- | Propagate OOM from bare catch in stub.zig | Resolver maintainer | S | **Resolved** |
+| 35 | QR-02 | Low | 24 | maintainability | max_spurious_discards constant and entire UDP receive loop (~35 lines) triplicated across recursive.zig, stub.zig, udp.zig | stub.zig, recursive.zig, udp.zig | `src/types.zig:253` -- `max_spurious_discards` extracted to shared module; imported by 3 files | -- | `max_spurious_discards` and `SpuriousDiscardCounter` extracted to `types.zig` | Transport maintainer | S | **Resolved** |
+| 36 | QS-NEW-08 | Medium | 20 | deps | Spice dependency pinned to main branch tarball; no semver tag | build.zig.zon | `build.zig.zon:29` | -- | **Won't Do** (upstream concern; hash pinning provides integrity; cross-ref GAP-0047, SEC-C14/C31) | Project maintainer | S | **Won't Do** |
+| 37 | QR-R02 | Medium | 20 | tests | SEC-AUDIT-02 tests only verify constant bounds (>0, <=10000), not actual discard enforcement behavior; no test sends spurious packets | recursive.zig, stub.zig, udp.zig | `src/types.zig:289` -- `SpuriousDiscardCounter` struct with 3 new tests verifying increment, limit enforcement, and reset | -- | `SpuriousDiscardCounter` struct in `types.zig` with 3 tests; all 3 discard loops refactored to use it | Transport maintainer | M | **Resolved** |
+| 38 | QS-NEW-05 | Medium | 18 | architecture | stub.zig:170 swallows OOM errors via bare `catch` | stub.zig | `src/stub.zig` -- OOM now propagated via `catch |err| switch (err) { error.OutOfMemory => return err, else => continue }` | -- | Propagate OOM from bare catch in stub.zig | Resolver maintainer | S | **Resolved** |
 | 37 | AC-03 | Medium | 18 | architecture | Cache-hit errdefer in resolve() does not free duped strings on error | client.zig | `src/client.zig` -- errdefer now frees duped strings and ArrayList backing | -- | Added `errdefer { for (results.items) |s| self.allocator.free(s); results.deinit(self.allocator); }` | Client maintainer | S | **Resolved** |
 | 38 | DOC-01 | Medium | 18 | docs | No ownership documentation for Message.data (aliases caller's buffer); use-after-free risk | message.zig | `src/message.zig` -- ownership doc comment added to `data` field | [#198](https://gitlab.com/devnw/zig/dns/-/issues/198) | Added `///` doc comment explaining aliasing/lifetime requirements | message.zig maintainer | S | **Resolved** |
 | 39 | EH-11 | Medium | 18 | architecture | zdig TCP response read loop breaks on recv==0 without validating total_read==response_len; silent truncation | zdig.zig | `cmd/zdig.zig` -- TCP truncation now returns `error.ConnectionClosed` | [#194](https://gitlab.com/devnw/zig/dns/-/issues/194) | TCP truncation now returns `error.ConnectionClosed` instead of silent truncation | CLI maintainer | S | **Resolved** |
 | 40 | QL-03 | Low | 16 | readability | 12 source files exceed 800-line threshold (was 9). New: `connection_pool.zig` (1070), `parallel.zig` (881), `enhanced_metrics.zig` (879). Largest: `record.zig` (1927) | Multiple files | `record.zig:1927`, `recursive.zig:1426`, `name.zig:1345`, `connection_pool.zig:1070`, `edns.zig:973`, `tsig.zig:916`, `zone_transfer.zig:894`, `dnssec.zig:889`, `parallel.zig:881`, `enhanced_metrics.zig:879`, `zone_file.zig:863`, `sig0.zig:814` | [#126](https://gitlab.com/devnw/zig/dns/-/issues/126) | **Won't Do** -- large-scale file splits across 12 files; mechanical but high churn risk for low readability gain | Project maintainer | L | **Won't Do** |
 | 41 | QL-09 | Low | 16 | readability | 41 functions exceed 50-line threshold (was 30); resolveIterative at 219 lines | Multiple files | `recursive.zig:188+` (219 lines), record.zig, edns.zig, zone_transfer.zig parsers | [#185](https://gitlab.com/devnw/zig/dns/-/issues/185) | **Won't Do** -- mechanical decomposition of 41 functions across codebase; high churn, low value without lint gate | Project maintainer | L | **Won't Do** |
-| 42 | QS-NEW-03 | Low | 12 | cleanup | 4 lib.zig module exports never imported by any consumer: `convenience`, `rpz`, `config`, `cache_prefetch` | lib.zig | `src/lib.zig` -- exports documented as intentional public API with comments | -- | Documented as intentional public API (modules available for downstream consumers) | Any contributor | S | **Resolved** |
+| 42 | QR-04 | Low | 16 | readability | CNAME limits differ 2x: max_cname_chain_length=8 (recursive.zig) vs max_cname_mappings=16 (client.zig); unidirectional documentation | recursive.zig, client.zig | `src/recursive.zig:135-138` -- cross-reference comment to client.zig constants added | -- | Cross-reference comments added documenting relationship between CNAME limits | Resolver maintainer | S | **Resolved** |
+| 43 | QS-NEW-03 | Low | 12 | cleanup | 4 lib.zig module exports never imported by any consumer: `convenience`, `rpz`, `config`, `cache_prefetch` | lib.zig | `src/lib.zig` -- exports documented as intentional public API with comments | -- | Documented as intentional public API (modules available for downstream consumers) | Any contributor | S | **Resolved** |
 | 43 | QS-NEW-07 | Low | 12 | tests | Client tests bail on network failure; test passes vacuously in CI | client.zig | `src/client.zig:458-469` | -- | **Won't Do** (requires mock transport infrastructure; cross-ref GAP-0045) | Client maintainer | M | **Won't Do** |
-| 44 | QS-NEW-02 | Low | 10 | cleanup | question.buildQuery at question.zig:102 is dead code | question.zig | `src/question.zig` -- dead code removed | -- | Deleted dead `question.buildQuery` function | Any contributor | S | **Resolved** |
+| 44 | QR-05 | Low | 12 | readability | client.zig:510 uses magic number 8 for CNAME depth despite named constants existing (max_cname_chain_length=8 in recursive.zig, max_cname_mappings=16 in client.zig) | client.zig | `src/client.zig` -- magic number 8 replaced with `max_cname_depth` named constant | -- | Magic number 8 replaced with `max_cname_depth` constant | Client maintainer | S | **Resolved** |
+| 45 | QR-03 | Info | 12 | readability | nextForEql() pointer traversal style differs from next()/nextOrStop() without explanation; different variable names and control flow for identical logic | name.zig | `src/name.zig:98` -- style difference resolved by QR-01 `followPointer()` extraction; all three methods now share identical pointer traversal logic | -- | Resolved by QR-01: `followPointer()` extraction unified pointer traversal style | name.zig maintainer | S | **Resolved** |
+| 46 | QS-NEW-02 | Low | 10 | cleanup | question.buildQuery at question.zig:102 is dead code | question.zig | `src/question.zig` -- dead code removed | -- | Deleted dead `question.buildQuery` function | Any contributor | S | **Resolved** |
 | 45 | RM-08 | Low | 10 | cleanup | getMinimizedQname ignores `current_zone` parameter (dead parameter) | recursive.zig | `src/recursive.zig` -- `current_zone` parameter removed; all call sites updated | -- | Removed dead `current_zone` parameter from `getMinimizedQname` | Resolver maintainer | S | **Resolved** |
 | 46 | QM-NEW-04 | Low | 16 | docs | lib.zig claimed "Zero external dependencies" but build.zig.zon declares `spice` dependency | lib.zig | `src/lib.zig:16` -- updated to `//! - Minimal dependencies (optional spice for parallelism)` | Commit 6d42d51 | Updated doc comment to accurately reflect spice dependency | Documentation maintainer | S | **Resolved** |
 | 47 | QL-NEW-01 | **Resolved** | 8 | cleanup | Duplicated testSocketPair helper identical to io.zig:118-126 | connection_pool.zig | `connection_pool.zig:665-673` | -- | Make io.zig testSocketPair public; replace duplicate with const alias | Any contributor | S | **Resolved** |
 | 48 | DOC-02 | Low | 8 | docs | connection_pool.zig createConnection accepts and discards server/timeout_ms params; misleading API (intentional lazy-connection design) | connection_pool.zig | `src/transports/connection_pool.zig` -- doc comment added explaining lazy-connection design | [#200](https://gitlab.com/devnw/zig/dns/-/issues/200) | Added doc comment explaining lazy-connection design | Transport maintainer | S | **Resolved** |
-| 49 | DOC-03 | Low | 8 | docs | No module-level library user guide for downstream consumers; onboarding friction | docs/ | No usage guide exists | [#201](https://gitlab.com/devnw/zig/dns/-/issues/201) | **Won't Do** -- Usage guide out of scope for gap closure | Documentation maintainer | M | **Won't Do** |
+| 49 | QR-R01 | Info | 8 | reliability | `catch {}` on updateFamilyCache loses OOM observability; differs from recursive.zig:338 pattern which logs errors | happy_eyeballs.zig | `src/transports/happy_eyeballs.zig:212` -- `catch \|cache_err\| std.log.debug("updateFamilyCache failed: {}", .{cache_err})` | -- | `catch {}` replaced with `catch \|cache_err\| log.debug(...)` matching codebase pattern | Transport maintainer | S | **Resolved** |
+| 50 | DOC-03 | Low | 8 | docs | No module-level library user guide for downstream consumers; onboarding friction | docs/ | No usage guide exists | [#201](https://gitlab.com/devnw/zig/dns/-/issues/201) | **Won't Do** -- Usage guide out of scope for gap closure | Documentation maintainer | M | **Won't Do** |
 | 50 | QM-05 | **Resolved** | 36 | maintainability | ~~Silent error swallowing with `catch {}` in 5+ locations~~ | Multiple files | All catch {} sites documented or upgraded | [#117](https://gitlab.com/devnw/zig/dns/-/issues/117) | Resolved | Any contributor | S | **Resolved** |
 | 51 | QM-01 | **Resolved** | 36 | maintainability | ~~`parseName()` copy-pasted ~52 identical lines in tsig.zig and sig0.zig~~ | tsig.zig, sig0.zig | Extracted shared `src/security/dns_name.zig` | [#102](https://gitlab.com/devnw/zig/dns/-/issues/102) | Resolved | Security module maintainer | S | **Resolved** |
 | 52 | QM-09 | **Resolved** | 36 | architecture | ~~parallel.zig: 4 placeholder implementations return fabricated results~~ | parallel.zig | Real wire-format parsing; honest error status | [#177](https://gitlab.com/devnw/zig/dns/-/issues/177) | Resolved | Parallel module maintainer | M | **Resolved** |
@@ -155,12 +170,13 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QH-04 | High | 64 | Name.eql() mmap syscalls | [#95](https://gitlab.com/devnw/zig/dns/-/issues/95) | **Resolved** |
 | QM-11 | Medium | 48 | PooledTcpTransport.query unnecessary connect per query | [#180](https://gitlab.com/devnw/zig/dns/-/issues/180) | **Resolved** |
 
-### Maintainability (13 findings)
+### Maintainability (15 findings)
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
 | QC-NEW-03 | High | 64 | sendQuery() triple duplication (~150 lines) | -- | **Won't Do** |
 | QH-06 | High | 48 | Missing error.InProgress in stub.zig | [#160](https://gitlab.com/devnw/zig/dns/-/issues/160) | **Resolved** |
+| QR-01 | Medium | 36 | Forward-pointer security logic triplicated in LabelIterator next/nextOrStop/nextForEql (~25 lines x3) -- `followPointer()` extracted | -- | **Resolved** |
 | QS-NEW-01 | Medium | 45 | responseMatchesQuery duplicated (~20 lines) | -- | **Won't Do** |
 | RD-01 | Medium | 30 | name.zig compression pointer checks -- LabelIterator extracted; used by 5 functions | [#188](https://gitlab.com/devnw/zig/dns/-/issues/188) | **Resolved** |
 | DUP-02 | **Resolved** | 24 | ~~responseMatchesQuery duplicated in stub.zig and recursive.zig~~ Made stub.zig canonical; recursive.zig imports it | [#187](https://gitlab.com/devnw/zig/dns/-/issues/187) | **Resolved** |
@@ -172,8 +188,9 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QM-NEW-01 | Medium | 24 | Duplicate QueryType removed; uses types.Type | -- | **Resolved** |
 | QM-02 | **Resolved** | 24 | ~~Duplicated root server definitions~~ | [#106](https://gitlab.com/devnw/zig/dns/-/issues/106) | **Resolved** |
 | QA-AUDIT-07 | Medium | 16 | buildOption 6x duplication in edns.zig -- serializeEdnsOption extracted | -- | **Resolved** |
+| QR-02 | Low | 24 | max_spurious_discards extracted to types.zig; imported by 3 files | -- | **Resolved** |
 
-### Tests (6 findings)
+### Tests (7 findings)
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
@@ -181,10 +198,11 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QH-NEW-02 | High | 48 | resolveIterative (219 lines) has zero direct test coverage | -- | **Won't Do** |
 | TC-01 | Medium | 48 | resolveIterative zero integration test coverage (deep review confirmation of QH-NEW-02) | [#190](https://gitlab.com/devnw/zig/dns/-/issues/190) | **Won't Do** |
 | CI-04 | Medium | 30 | cmd/zdig.zig: 16 tests added for escapeJsonString and addressMatches | [#196](https://gitlab.com/devnw/zig/dns/-/issues/196) | **Resolved** |
+| QR-R02 | Medium | 20 | SpuriousDiscardCounter struct with 3 tests verifying discard enforcement | -- | **Resolved** |
 | QS-NEW-07 | Low | 12 | Client tests bail on network failure | -- | **Won't Do** |
 | QL-05 | **Resolved** | 16 | Mutable statics in MockTlsBackend | [#181](https://gitlab.com/devnw/zig/dns/-/issues/181) | **Resolved** |
 
-### Readability (6 findings)
+### Readability (9 findings)
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
@@ -194,6 +212,9 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QL-09 | Low | 16 | 41 functions exceed 50 lines (was 30) | [#185](https://gitlab.com/devnw/zig/dns/-/issues/185) | **Won't Do** |
 | QL-06 | **Resolved** | 12 | ~~Magic number 6 for SOA~~ | [#182](https://gitlab.com/devnw/zig/dns/-/issues/182) | **Resolved** |
 | QA-AUDIT-06 | Medium | 18 | CNAME chain limit magic number `8` -- max_cname_chain_length extracted | -- | **Resolved** |
+| QR-04 | Low | 16 | CNAME limits cross-reference comments added | -- | **Resolved** |
+| QR-05 | Low | 12 | Magic number 8 replaced with `max_cname_depth` constant | -- | **Resolved** |
+| QR-03 | Info | 12 | Style difference resolved by QR-01 `followPointer()` extraction | -- | **Resolved** |
 
 ### CI/CD (2 findings)
 
@@ -207,6 +228,12 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
 | QS-NEW-08 | Medium | 20 | Spice dependency pinned to main branch tarball | -- | **Won't Do** |
+
+### Reliability (1 finding)
+
+| ID | Severity | PriorityScore | Finding | Issue | Status |
+|----|----------|---------------|---------|-------|--------|
+| QR-R01 | Info | 8 | `catch {}` replaced with `catch |err| log.debug(...)` in happy_eyeballs.zig | -- | **Resolved** |
 
 ### Cleanup (9 findings)
 
@@ -244,7 +271,19 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 
 ### Quick Wins (< 1 day)
 
-New quick wins identified in deep audit (2026-03-24):
+Quick wins from deep review round 2 -- all resolved (2026-03-25):
+
+| ID | PriorityScore | Finding | Effort | Status |
+|----|---------------|---------|--------|--------|
+| QR-01 | 36 | Extract private followPointer() helper in LabelIterator (3 copies of ~25 lines) | S | **Resolved** |
+| QR-02 | 24 | Extract max_spurious_discards + SpuriousDiscardCounter to types.zig | S | **Resolved** |
+| QR-R02 | 20 | SpuriousDiscardCounter struct with 3 new tests; discard loops refactored | M | **Resolved** |
+| QR-04 | 16 | Add cross-reference comment in client.zig for CNAME limit relationship | S | **Resolved** |
+| QR-05 | 12 | Replace magic number 8 with max_cname_depth constant in client.zig | S | **Resolved** |
+| QR-03 | 12 | Style difference resolved by QR-01 followPointer() extraction | S | **Resolved** |
+| QR-R01 | 8 | catch {} replaced with debug log in happy_eyeballs.zig | S | **Resolved** |
+
+Previously resolved quick wins from deep audit (2026-03-24):
 
 | ID | PriorityScore | Finding | Effort | Status |
 |----|---------------|---------|--------|--------|
@@ -308,7 +347,13 @@ Previously resolved or Won't Do quick wins:
 
 ### Medium Term (1-5 days)
 
-New medium-term items from deep audit (2026-03-24):
+New medium-term items from deep review round 2 (2026-03-25):
+
+| ID | PriorityScore | Finding | Effort | Status |
+|----|---------------|---------|--------|--------|
+| QR-R02 | 20 | SpuriousDiscardCounter struct with 3 tests; all discard loops refactored | M | **Resolved** |
+
+Previously identified medium-term items from deep audit (2026-03-24):
 
 | ID | PriorityScore | Finding | Effort | Status |
 |----|---------------|---------|--------|--------|
@@ -368,6 +413,8 @@ These existing issues overlap with or are related to quality findings:
 | [#40](https://gitlab.com/devnw/zig/dns/-/issues/40) (SEC-018: Code duplication) | DUP-02, RD-01 | DUP-02 is responseMatchesQuery duplication (same as QS-NEW-01); RD-01 is compression pointer check duplication in name.zig |
 | [#109](https://gitlab.com/devnw/zig/dns/-/issues/109) (QM-03: resolveIterative) | TC-01 | TC-01 confirms QH-NEW-02 (zero test coverage) via deep review; related to resolveIterative complexity |
 | [#46](https://gitlab.com/devnw/zig/dns/-/issues/46) (TCP length prefix short reads) | EH-11 | EH-11 is a related TCP read completeness issue in zdig |
+| [#40](https://gitlab.com/devnw/zig/dns/-/issues/40) (SEC-018: Code duplication) | QR-01, QR-02 | QR-01 is forward-pointer logic triplication within LabelIterator (same file); QR-02 is UDP receive loop triplication across 3 files (same pattern as QC-NEW-03) |
+| [#188](https://gitlab.com/devnw/zig/dns/-/issues/188) (RD-01: LabelIterator extraction) | QR-01, QR-03 | RD-01 extracted LabelIterator but the three methods within it still contain triplicated pointer-following logic (QR-01); QR-03 notes style divergence in nextForEql |
 
 ## Scoring Methodology
 
@@ -437,3 +484,17 @@ All deep audit findings tagged `confidence::confirmed` -- verified via direct co
 | QA-AUDIT-07 | 2 (code duplication) | 2 (EDNS options rarely change) | 16 | Six copies of identical 4-byte header + data serialization; any format change must be applied 6 times |
 
 All full audit findings tagged `confidence::confirmed` -- verified via direct code inspection.
+
+### Deep Review Round 2 Score Breakdown (2026-03-25)
+
+| ID | Impact | Likelihood | PriorityScore | Rationale |
+|----|--------|------------|---------------|-----------|
+| QR-01 | 3 (security fix risks partial application across 3 copies) | 3 (pointer-following code is security-critical and may need updates) | 36 | Three copies of ~25-line forward-pointer security logic in LabelIterator next/nextOrStop/nextForEql; a security fix applied to one method but not the others creates a vulnerability window |
+| QR-02 | 2 (minor divergence risk) | 3 (UDP receive loop is exercised on every query) | 24 | max_spurious_discards constant (10000) and ~35-line receive loop copied identically in 3 files; values already show minor naming divergence |
+| QR-R02 | 2 (tests provide false confidence) | 2.5 (discard enforcement only matters under attack) | 20 | Existing tests verify the constant value is >0 and <=10000 but never exercise the actual TooManySpuriousPackets error path with a mock socket |
+| QR-04 | 2 (inconsistent limits confuse maintainers) | 2 (CNAME limit logic reviewed rarely) | 16 | max_cname_chain_length=8 in recursive.zig and max_cname_mappings=16 in client.zig serve different layers but no cross-reference explains the relationship |
+| QR-05 | 2 (magic number despite named constant existing) | 1.5 (CNAME depth logic stable) | 12 | client.zig:510 hard-codes 8 for CNAME depth; recursive.zig already defines max_cname_chain_length=8 as a named constant |
+| QR-03 | 1 (readability/consistency polish) | 3 (LabelIterator methods read together during review) | 12 | nextForEql() uses different variable names and control flow structure for identical pointer-following logic; no comment explains why |
+| QR-R01 | 1 (observability loss for rare OOM) | 2 (OOM during cache update is rare) | 8 | catch {} on updateFamilyCache at happy_eyeballs.zig:212 silently swallows errors; recursive.zig:338 uses log.debug for same pattern |
+
+All deep review round 2 findings tagged `confidence::confirmed` -- verified via direct code inspection of src/name.zig, src/recursive.zig, src/stub.zig, src/transports/udp.zig, src/transports/happy_eyeballs.zig, and src/client.zig.

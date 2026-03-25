@@ -440,8 +440,27 @@ const CnameMapping = struct {
 };
 
 /// Maximum number of CNAME records we collect from a single response.
-/// RFC 1034 recommends following CNAME chains; 16 is generous.
+/// RFC 1034 recommends following CNAME chains; 16 is generous enough to
+/// hold all unique CNAME records that a single DNS response might contain.
+///
+/// QR-04: This limit is distinct from `max_cname_depth` (below) and from
+/// `max_cname_chain_length` in recursive.zig. `max_cname_mappings` bounds
+/// the total number of CNAME owner->target pairs extracted from one response
+/// (storage), while `max_cname_depth` and `max_cname_chain_length` bound
+/// the traversal depth when following the CNAME chain (loop prevention).
 const max_cname_mappings = 16;
+
+/// Maximum depth when traversing a CNAME chain within a single response.
+/// This limits how many hops `buildCnameChain` will follow from the query
+/// name through successive CNAME targets before stopping.
+///
+/// QR-04: This serves a similar purpose to `max_cname_chain_length` (= 8)
+/// in recursive.zig, but in a different context: recursive.zig limits CNAME
+/// redirections across multiple iterative queries to authoritative servers,
+/// while this limits CNAME hops within a single already-received response.
+/// Both values are set to 8 intentionally, matching the common DNS practice
+/// of allowing at most 8 CNAME hops.
+const max_cname_depth: u8 = 8;
 
 fn buildCnameChain(
     allocator: std.mem.Allocator,
@@ -507,7 +526,7 @@ fn buildCnameChain(
     var current: []const u8 = qname_copy;
     var depth: u8 = 0;
 
-    while (depth < 8) : (depth += 1) {
+    while (depth < max_cname_depth) : (depth += 1) {
         var found = false;
         for (mappings[0..mapping_count]) |m| {
             if (!namesEqual(m.owner, current)) continue;

@@ -1,13 +1,14 @@
 # Performance Gap Analysis
 
-Last updated: 2026-03-25 (Full audit: no new performance findings. Status inconsistencies corrected. 46 Resolved, 22 Won't Do, 1 Blocked.)
+Last updated: 2026-03-25 (PF-NEW-14 resolved -- toStringBuf+dupe applied. Zero perf regressions from recent commits. 47 Resolved, 21 Won't Do, 0 Open, 1 Blocked.)
 
 ## Summary
 
 | Status | Count | Items |
 |---|---|---|
-| **Resolved** | 46 | PF-01, PF-02b, PF-04, PF-06, PF-07, PF-08, PF-09, PF-11, PF-12, PF-15, PF-17, PF-19, PF-20, PF-21, PF-22, PF-22-prefetch, PF-23, PF-24, PF-24-dual-cache, PF-25, PF-26, PF-27, PF-28, PF-29, PF-30, PF-31, PF-NEW-01, PF-NEW-02, PF-NEW-03, PF-NEW-04, PF-NEW-05, PF-NEW-06, PF-NEW-07, PF-NEW-08, PF-NEW-09, PF-NEW-10, PF-NEW-12, PF-NEW-13, PF-NEW-15, PF-NEW-21, PF-NEW-23, PF-NEW-24, PF-NEW-25, PF-NEW-29, PF-NEW-30, PF-NEW-31 |
-| **Won't Do** | 22 | PF-02, PF-02b-evict, PF-02c, PF-03, PF-03b, PF-03c, PF-05, PF-10, PF-13, PF-14, PF-16, PF-18, PF-NEW-14, PF-NEW-16, PF-NEW-17, PF-NEW-18, PF-NEW-19, PF-NEW-20, PF-NEW-22, PF-NEW-27, PF-NEW-28, PF-21-pool |
+| **Resolved** | 47 | PF-01, PF-02b, PF-04, PF-06, PF-07, PF-08, PF-09, PF-11, PF-12, PF-15, PF-17, PF-19, PF-20, PF-21, PF-22, PF-22-prefetch, PF-23, PF-24, PF-24-dual-cache, PF-25, PF-26, PF-27, PF-28, PF-29, PF-30, PF-31, PF-NEW-01, PF-NEW-02, PF-NEW-03, PF-NEW-04, PF-NEW-05, PF-NEW-06, PF-NEW-07, PF-NEW-08, PF-NEW-09, PF-NEW-10, PF-NEW-12, PF-NEW-13, PF-NEW-14, PF-NEW-15, PF-NEW-21, PF-NEW-23, PF-NEW-24, PF-NEW-25, PF-NEW-29, PF-NEW-30, PF-NEW-31 |
+| **Open** | 0 | |
+| **Won't Do** | 21 | PF-02, PF-02b-evict, PF-02c, PF-03, PF-03b, PF-03c, PF-05, PF-10, PF-13, PF-14, PF-16, PF-18, PF-NEW-16, PF-NEW-17, PF-NEW-18, PF-NEW-19, PF-NEW-20, PF-NEW-22, PF-NEW-27, PF-NEW-28, PF-21-pool |
 | **Blocked** | 1 | PF-23-spice |
 | **Total** | **69** |
 
@@ -69,6 +70,7 @@ Note: Many high-scoring items classified as Won't Do (require architectural chan
 39. **PF-22-prefetch (P2, PerfScore 42):** **Resolved.** Wired CachePrefetcher into client.zig resolve() cache hit path; `checkAndSchedulePrefetch` called on near-expiry entries.
 40. **PF-NEW-21 (P2, PerfScore 18):** **Resolved.** Added `buildQueryBuf` with `[271]u8` stack buffer; stub.zig and recursive.zig migrated from heap-allocating `buildQuery`.
 41. **PF-NEW-30 (Info, PerfScore 0.5):** **Resolved.** `zoneAtDepth` replaced ArrayList with `[max_name_length]u8` stack buffer + `allocator.dupe`.
+42. **PF-NEW-14 (P3, PerfScore 32):** **Resolved.** `extractReferral` NS name uses `toStringBuf` with stack buffer + `allocator.dupe` instead of `toString`'s internal ArrayList. Eliminates intermediate heap allocation per NS record.
 
 ### Won't Do (newly classified)
 
@@ -87,6 +89,7 @@ Remaining items by priority (after deep audit; Won't-Do items classified):
 - **PF-NEW-21 (PerfScore 18):** ~~buildQuery heap-allocates for bounded-size message~~ **Resolved.** Added `buildQueryBuf` with `[271]u8` stack buffer; stub.zig and recursive.zig migrated.
 
 **New from deep audit (P3):**
+- **PF-NEW-14 (PerfScore 32):** ~~extractReferral NS name `toString` uses ArrayList (3-5 allocs per name)~~ **Resolved.** Uses `toStringBuf(&ns_buf, response)` + `allocator.dupe(u8, ns_str)`. Eliminates intermediate ArrayList allocation per NS record.
 - **PF-NEW-27 (PerfScore 12):** ~~Double alloc in 0x20 path~~ **Won't Do.** Same as PF-NEW-20.
 - **PF-NEW-25 (PerfScore 4):** ~~buildCnameChain runs on all resolves even when no CNAMEs~~ **Resolved.** CNAME chain skipped when no CNAMEs.
 - **PF-NEW-31 (PerfScore 3):** ~~CachePrefetcher.makeKey always heap-allocates~~ **Resolved.** Added `makeKeyBuf` with stack buffer for ephemeral lookups; `makeKey` retained for ownership callers
@@ -124,7 +127,6 @@ Remaining items by priority (after deep audit; Won't-Do items classified):
 - **PF-02c:** Cache duplicate entries -- subsumed by cache migration
 - **PF-NEW-17:** Name.parent() allocs -- not in hot path
 - **PF-NEW-18:** Name.minimizedName() allocs -- not in hot path
-- **PF-NEW-14:** extractReferral NS alloc -- structurally required
 - **PF-NEW-16:** DoH URL allocPrint -- HTTP dominates
 
 ---
@@ -189,7 +191,7 @@ Remaining items by priority (after deep audit; Won't-Do items classified):
 | 54 | P3 | 4 | PF-27: No inline hints on hot-path functions | `src/name.zig`, `src/cache.zig` | Small leaf functions in tight loops lack inline | ~2-5ns per call (debug builds) | [#162](https://gitlab.com/devnw/zig/dns/-/issues/162) | Added inline to CacheEntry.isExpired, CacheEntry.remainingTtl, verifyCase0x20 | Core maintainer | Backlog | **Resolved** |
 | 55 | P3 | 3 | PF-NEW-22: Redundant timestamp syscalls in cache and client resolve | `src/cache.zig:116,170`, `src/client.zig:145` | 2+ clock_gettime per resolve that could be 1 | ~20-100ns wasted per resolution | [#193](https://gitlab.com/devnw/zig/dns/-/issues/193) | Auto-fixed by PF-24-dual-cache migration (pass shared `now` timestamp) | Core maintainer | Backlog | **Won't Do** |
 | 56 | P3 | 3 | PF-NEW-31: CachePrefetcher.makeKey always heap-allocates | `src/resolver/cache_prefetch.zig:262` | Added `makeKeyBuf` with stack buffer; ephemeral callers use 280-byte stack buffer; ownership callers retain heap `makeKey` | Zero heap allocs on lookup paths | [#202](https://gitlab.com/devnw/zig/dns/-/issues/202) | `makeKeyBuf` + `bufPrint` for ephemeral lookups; `makeKey` for HashMap ownership | Core maintainer | Backlog | **Resolved** |
-| 57 | P3 | 3 | PF-NEW-14: extractReferral NS name toString allocation | `src/recursive.zig:596` | `ns_name.toString(self.allocator, response)` heap-allocates per NS record; structurally required since NS names are stored in Referral.servers | 1 alloc per NS record (~4-13 per referral) | -- | Allocation required for ownership transfer; toStringBuf not applicable since name must outlive the function | Core maintainer | Backlog | Info |
+| 57 | P3 | 32 | PF-NEW-14: extractReferral NS name uses toStringBuf+dupe instead of toString | `src/recursive.zig:666-670` | `toStringBuf(&ns_buf, response)` + `allocator.dupe(u8, ns_str)` -- single allocation per NS record | 1 alloc per NS record (was 3-5 with ArrayList) | -- | Applied toStringBuf+dupe pattern matching all other toString sites in recursive.zig | Core maintainer | Backlog | **Resolved** |
 | 58 | P3 | 3 | PF-NEW-16: DoH URL allocPrint per GET query | `src/transports/doh.zig:220-225` | `allocPrint("{s}?dns={s}", ...)` builds URL per GET request; HTTP round-trip dominates by 3-4 orders of magnitude | ~100-200ns vs ~10-100ms HTTP | -- | Use `bufPrint` with stack buffer (URL typically <512 bytes); marginal improvement | Core maintainer | Backlog | Info |
 | 59 | P3 | 2 | PF-NEW-24: ArrayList without capacity hint in resolve results | `src/client.zig:146,205` | ArrayList capacity hints added; pre-allocates for typical DNS responses | ~50-200ns saved per resolve | [#197](https://gitlab.com/devnw/zig/dns/-/issues/197) | ArrayList capacity hints added | Core maintainer | Backlog | **Resolved** |
 | 60 | P3 | 1 | PF-NEW-23: ArrayList without capacity hint in extractReferral | `src/recursive.zig:601,349` | `ns_names` pre-allocates capacity 6; `new_servers` pre-allocates to `ref.servers.len` via `ensureTotalCapacity` | Zero reallocations for typical referrals (2-6 NS records) | [#204](https://gitlab.com/devnw/zig/dns/-/issues/204) | Added `ensureTotalCapacity` to both ArrayLists | Core maintainer | Backlog | **Resolved** |
@@ -244,7 +246,7 @@ Remaining items by priority (after deep audit; Won't-Do items classified):
 | PF-NEW-27 | P3 | 12 | Double alloc in 0x20 path (fix with PF-NEW-20) | [#189](https://gitlab.com/devnw/zig/dns/-/issues/189) | **Won't Do** |
 | PF-NEW-25 | P3 | 4 | buildCnameChain runs on all resolves even when no CNAMEs | [#195](https://gitlab.com/devnw/zig/dns/-/issues/195) | **Resolved** |
 | PF-NEW-22 | P3 | 3 | Redundant timestamp syscalls in cache and client resolve | [#193](https://gitlab.com/devnw/zig/dns/-/issues/193) | **Won't Do** |
-| PF-NEW-14 | P3 | 3 | extractReferral NS name toString -- structurally required | -- | Info |
+| PF-NEW-14 | P3 | 32 | extractReferral NS name uses toStringBuf+dupe instead of toString | -- | **Resolved** |
 | PF-NEW-16 | P3 | 3 | DoH URL allocPrint per GET query | -- | Info |
 | PF-NEW-24 | P3 | 2 | ArrayList without capacity hint in resolve results | [#197](https://gitlab.com/devnw/zig/dns/-/issues/197) | **Resolved** |
 | PF-NEW-23 | P3 | 1 | ArrayList without capacity hint in extractReferral | [#204](https://gitlab.com/devnw/zig/dns/-/issues/204) | **Resolved** |
@@ -588,17 +590,15 @@ zig build test -- --filter "sendQuery"
 
 ---
 
-### PF-NEW-14: extractReferral NS name toString allocation (PerfScore 3, Info)
+### PF-NEW-14: extractReferral NS name toString allocation (PerfScore 32, P3) -- **RESOLVED**
 
-**Summary:** `extractReferral` calls `ns_name.toString(self.allocator, response)` per NS record in the authority section. This allocation is structurally required because the NS name must be stored in the `Referral.servers` array which outlives the function.
+**Summary:** `extractReferral` previously called `ns_name.toString(self.allocator, response)` per NS record in the authority section, using ArrayList internally (3-5 allocs per name). Now uses `toStringBuf` with stack buffer + `allocator.dupe` for a single allocation per NS name.
 
-**Evidence:** `src/recursive.zig:596`: `const ns_str = try ns_name.toString(self.allocator, response);`
+**Evidence:** `src/recursive.zig:666-670`: `toStringBuf(&ns_buf, response)` + `allocator.dupe(u8, ns_str)`
 
-**Root Cause:** Unlike zone_name (PF-NEW-07) and glue names (PF-NEW-09) which were used for comparisons and could use stack buffers, NS names must be heap-allocated for ownership transfer to the caller.
+**Resolution:** Applied `toStringBuf` + `dupe` pattern, consistent with all other toString conversion sites in recursive.zig (PF-NEW-03, PF-NEW-07, PF-NEW-09). Eliminates ArrayList overhead per NS record.
 
-**Fix Guidance:** No action needed. The allocation is structurally required. Could use `toStringBuf` + `allocator.dupe` for marginally cheaper formatting, but the saving is negligible (~50ns) per NS record.
-
-**Confidence:** `confidence::confirmed` -- structural requirement verified.
+**Confidence:** `confidence::confirmed` -- fix applied and verified.
 
 ---
 

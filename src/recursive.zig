@@ -125,14 +125,17 @@ const Referral = struct {
     }
 };
 
-/// Maximum number of spurious (non-matching source) packets to discard before
-/// returning an error. Prevents CPU pinning from flood attacks (SEC-AUDIT-02).
-const max_spurious_discards: u32 = 1000;
+/// QR-02: Shared constant from types module; see types.max_spurious_discards.
+const max_spurious_discards = types_mod.max_spurious_discards;
 
 /// Maximum number of CNAME redirections the recursive resolver will follow
 /// before treating the chain as a loop. This limits the iterative resolution
-/// path; the client-side CNAME mapping limit (`max_cname_mappings` in
-/// client.zig) serves a separate purpose and may differ (QA-AUDIT-06).
+/// path across multiple queries to authoritative servers.
+///
+/// QR-04: Related constants in client.zig:
+///   - `max_cname_depth` (= 8): limits CNAME hops within a single response
+///   - `max_cname_mappings` (= 16): limits total unique CNAME records collected
+///     from one response (storage bound, not traversal depth)
 const max_cname_chain_length: usize = 8;
 
 /// Recursive Resolver
@@ -567,7 +570,15 @@ pub const RecursiveResolver = struct {
         return error.NoResponse;
     }
 
-    /// Send a single query to a server
+    /// Send a single query to a server.
+    ///
+    /// SEC-AUDIT-09: Source port randomization relies on the operating system's
+    /// ephemeral port assignment. The socket is not explicitly bound, so the OS
+    /// selects the source port via its default algorithm. Modern OSes (Linux 3.x+,
+    /// macOS, Windows Vista+) randomize ephemeral ports, but this library does
+    /// not perform explicit port randomization itself. Deployments on legacy or
+    /// embedded systems should verify that the OS provides adequate port entropy
+    /// to mitigate DNS cache poisoning attacks (RFC 5452 Section 3).
     fn sendQuery(self: *Self, query: []const u8, server: ServerAddress) ![]u8 {
         const sock = try std.posix.socket(
             server.address.any.family,
@@ -590,7 +601,7 @@ pub const RecursiveResolver = struct {
 
         const start_ms = std.time.milliTimestamp();
         // SEC-AUDIT-02: Limit discarded packets to prevent CPU pinning from flood attacks.
-        var discards: u32 = 0;
+        var discards = types_mod.SpuriousDiscardCounter{};
         while (true) {
             if (std.time.milliTimestamp() - start_ms >= self.config.timeout_ms) {
                 return error.Timeout;
@@ -608,10 +619,7 @@ pub const RecursiveResolver = struct {
             };
 
             if (!std.net.Address.eql(src_addr, server.address)) {
-                discards += 1;
-                if (discards >= max_spurious_discards) {
-                    return error.TooManySpuriousPackets;
-                }
+                discards.increment() catch return error.TooManySpuriousPackets;
                 continue;
             }
 
@@ -655,8 +663,11 @@ pub const RecursiveResolver = struct {
                 }
 
                 const ns_name = try rr.parseName(response);
-                const ns_str = try ns_name.toString(self.allocator, response);
-                try ns_names.append(self.allocator, ns_str);
+                // PF-NEW-14: Use stack buffer + dupe instead of toString's
+                // internal ArrayList to avoid an intermediate heap allocation.
+                var ns_buf: [name_mod.max_name_length]u8 = undefined;
+                const ns_str = try ns_name.toStringBuf(&ns_buf, response);
+                try ns_names.append(self.allocator, try self.allocator.dupe(u8, ns_str));
             }
         }
 

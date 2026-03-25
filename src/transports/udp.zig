@@ -7,13 +7,13 @@
 
 const std = @import("std");
 const channel = @import("channel");
+const types_mod = @import("types");
 
 pub const Channel = channel.Channel;
 pub const ChannelKind = channel.ChannelKind;
 
-/// Maximum number of spurious (non-matching source) packets to discard before
-/// returning an error. Prevents CPU pinning from flood attacks (SEC-AUDIT-02).
-const max_spurious_discards: u32 = 1000;
+/// QR-02: Shared constant from types module; see types.max_spurious_discards.
+const max_spurious_discards = types_mod.max_spurious_discards;
 
 /// UDP Transport
 pub const UdpTransport = struct {
@@ -61,7 +61,7 @@ pub const UdpTransport = struct {
 
         const start_ms = std.time.milliTimestamp();
         // SEC-AUDIT-02: Limit discarded packets to prevent CPU pinning from flood attacks.
-        var discards: u32 = 0;
+        var discards = types_mod.SpuriousDiscardCounter{};
         while (true) {
             if (std.time.milliTimestamp() - start_ms >= timeout_ms) {
                 return error.Timeout;
@@ -79,10 +79,7 @@ pub const UdpTransport = struct {
             };
 
             if (!std.net.Address.eql(src_addr, self.address)) {
-                discards += 1;
-                if (discards >= max_spurious_discards) {
-                    return error.TooManySpuriousPackets;
-                }
+                discards.increment() catch return error.TooManySpuriousPackets;
                 continue;
             }
 

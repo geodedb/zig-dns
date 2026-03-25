@@ -318,8 +318,9 @@ pub const Validator = struct {
 
             const nsec3 = nsec3_rr.parseNSEC3() catch continue;
 
-            // Extract hash from owner name and compare
-            const owner_hash = extractNsec3OwnerHash(nsec3_rr.name.labels) catch continue;
+            // Extract and decode hash from owner name (base32hex -> raw bytes)
+            const decoded = decodeNsec3OwnerHash(nsec3_rr.name.labels) catch continue;
+            const owner_hash = decoded.data[0..decoded.len];
             if (!std.mem.eql(u8, &qname_hash, owner_hash)) continue;
 
             // Found matching NSEC3, check type bitmap
@@ -799,38 +800,100 @@ fn nameInNsecRange(name: []const u8, nsec_owner: []const u8, next_name: []const 
     // Handle wrap-around for last NSEC (next < owner)
     const cmp_owner = compareDnsNames(name, nsec_owner);
     const cmp_next = compareDnsNames(name, next_name);
-    const wrap = compareDnsNames(next_name, nsec_owner) <= 0;
+    const wrap = compareDnsNames(next_name, nsec_owner) != .gt;
 
     if (wrap) {
         // Wrap-around case: name > owner OR name < next
-        return cmp_owner > 0 or cmp_next < 0;
+        return cmp_owner == .gt or cmp_next == .lt;
     } else {
         // Normal case: owner < name < next
-        return cmp_owner > 0 and cmp_next < 0;
+        return cmp_owner == .gt and cmp_next == .lt;
     }
 }
 
-/// Compare two DNS names in canonical order
-fn compareDnsNames(a: []const u8, b: []const u8) i32 {
-    // Canonical DNS name ordering (RFC 4034 Section 6.1)
-    // Compare from right to left (root first)
-    const len = @min(a.len, b.len);
+/// Compare two DNS names in canonical order per RFC 4034 Section 6.1.
+///
+/// Names must be in wire format (length-prefixed labels terminated by a zero
+/// length root label). The comparison proceeds label-by-label from the root
+/// (rightmost label) to the leaf (leftmost label), with case-insensitive
+/// byte comparison within each label. A name with fewer labels sorts before
+/// a name with more labels when all shared ancestor labels are equal.
+fn compareDnsNames(a: []const u8, b: []const u8) std.math.Order {
+    // Extract labels from wire-format names into stack arrays.
+    // Labels are stored leaf-first, so we reverse to compare root-first.
+    const max_labels = 128;
+
+    const a_labels = extractWireLabels(a, max_labels);
+    const b_labels = extractWireLabels(b, max_labels);
+
+    // Compare from root (last in array) to leaf (first in array).
+    // a_labels and b_labels contain slices in leaf-to-root order,
+    // so index [count-1] is the root-most label.
+    const a_count = a_labels.count;
+    const b_count = b_labels.count;
+    const min_count = @min(a_count, b_count);
+
     var i: usize = 0;
-    while (i < len) : (i += 1) {
-        const ca = if (a[i] >= 'A' and a[i] <= 'Z') a[i] + 32 else a[i];
-        const cb = if (b[i] >= 'A' and b[i] <= 'Z') b[i] + 32 else b[i];
-        if (ca < cb) return -1;
-        if (ca > cb) return 1;
+    while (i < min_count) : (i += 1) {
+        // Compare from root: a_labels[a_count - 1 - i] vs b_labels[b_count - 1 - i]
+        const a_label = a_labels.items[a_count - 1 - i];
+        const b_label = b_labels.items[b_count - 1 - i];
+
+        const label_order = compareLabelsCaseInsensitive(a_label, b_label);
+        if (label_order != .eq) return label_order;
     }
-    if (a.len < b.len) return -1;
-    if (a.len > b.len) return 1;
-    return 0;
+
+    // All shared labels matched; shorter name sorts first
+    return std.math.order(a_count, b_count);
+}
+
+const LabelList = struct {
+    items: [128][]const u8,
+    count: usize,
+};
+
+/// Extract individual labels from a wire-format DNS name.
+/// Returns labels in leaf-to-root order (excluding the root label itself).
+fn extractWireLabels(wire_name: []const u8, comptime max_labels: usize) LabelList {
+    var labels = LabelList{
+        .items = undefined,
+        .count = 0,
+    };
+    var pos: usize = 0;
+    while (pos < wire_name.len) {
+        const label_len = wire_name[pos];
+        if (label_len == 0) break; // root label
+        if (label_len >= 0xC0) break; // compression pointer (shouldn't appear in canonical form)
+        pos += 1;
+        if (pos + label_len > wire_name.len) break;
+        if (labels.count < max_labels) {
+            labels.items[labels.count] = wire_name[pos..][0..label_len];
+            labels.count += 1;
+        }
+        pos += label_len;
+    }
+    return labels;
+}
+
+/// Compare two label byte sequences case-insensitively.
+/// Shorter label sorts before longer label when the shared prefix matches.
+fn compareLabelsCaseInsensitive(a: []const u8, b: []const u8) std.math.Order {
+    const min_len = @min(a.len, b.len);
+    var i: usize = 0;
+    while (i < min_len) : (i += 1) {
+        const ca = std.ascii.toLower(a[i]);
+        const cb = std.ascii.toLower(b[i]);
+        if (ca < cb) return .lt;
+        if (ca > cb) return .gt;
+    }
+    return std.math.order(a.len, b.len);
 }
 
 /// Check if a hash falls within an NSEC3 range
 fn hashInNsec3Range(hash: []const u8, nsec3_owner: []const u8, next_hash: []const u8) bool {
-    // Extract owner hash from NSEC3 owner name
-    const owner_hash = extractNsec3OwnerHash(nsec3_owner) catch return false;
+    // Extract and decode owner hash from NSEC3 owner name (base32hex -> raw bytes)
+    const decoded = decodeNsec3OwnerHash(nsec3_owner) catch return false;
+    const owner_hash = decoded.data[0..decoded.len];
 
     const cmp_owner = std.mem.order(u8, hash, owner_hash);
     const cmp_next = std.mem.order(u8, hash, next_hash);
@@ -843,8 +906,19 @@ fn hashInNsec3Range(hash: []const u8, nsec3_owner: []const u8, next_hash: []cons
     }
 }
 
-/// Extract hash from NSEC3 owner name (first label is base32hex encoded hash)
-fn extractNsec3OwnerHash(owner_name: []const u8) ![]const u8 {
+const DecodedHash = struct {
+    data: [32]u8,
+    len: usize,
+};
+
+/// Extract and decode hash from NSEC3 owner name.
+///
+/// The first label of an NSEC3 owner name is the base32hex-encoded hash
+/// (RFC 5155 Section 3.2, RFC 4648 Section 7). This function decodes that
+/// label from base32hex ASCII to raw binary bytes so that the result can
+/// be compared directly with the binary output of computeNsec3Hash and
+/// the binary next_hashed_owner field from NSEC3 RDATA.
+fn decodeNsec3OwnerHash(owner_name: []const u8) !DecodedHash {
     if (owner_name.len < 2) return error.InvalidData;
 
     const label_len = owner_name[0];
@@ -852,9 +926,97 @@ fn extractNsec3OwnerHash(owner_name: []const u8) ![]const u8 {
         return error.InvalidData;
     }
 
-    // The first label is the base32hex encoded hash
-    // For now, return the raw bytes (a full implementation would decode)
-    return owner_name[1..][0..label_len];
+    const label = owner_name[1..][0..label_len];
+
+    // Decode base32hex to raw bytes
+    const decoded_len = base32hexDecodedLength(label_len);
+    if (decoded_len > 32) return error.InvalidData;
+
+    var result = DecodedHash{ .data = undefined, .len = decoded_len };
+    base32hexDecode(label, result.data[0..decoded_len]) catch return error.InvalidData;
+
+    return result;
+}
+
+// =========================================================================
+// Base32hex encoding/decoding (RFC 4648 Section 7)
+// =========================================================================
+
+/// Base32hex alphabet: 0-9 A-V (values 0-31)
+const base32hex_encode_table = "0123456789ABCDEFGHIJKLMNOPQRSTUV";
+
+/// Decode table mapping ASCII byte to 5-bit value (255 = invalid)
+const base32hex_decode_table: [256]u8 = blk: {
+    var table: [256]u8 = .{0xFF} ** 256;
+    for (base32hex_encode_table, 0..) |c, i| {
+        table[c] = @intCast(i);
+        // Also accept lowercase
+        if (c >= 'A' and c <= 'V') {
+            table[c + 32] = @intCast(i);
+        }
+    }
+    break :blk table;
+};
+
+/// Compute the number of decoded bytes from base32hex encoded length.
+/// Each 8 base32hex characters encode 5 bytes. Partial groups handled.
+fn base32hexDecodedLength(encoded_len: usize) usize {
+    return (encoded_len * 5) / 8;
+}
+
+/// Decode base32hex (RFC 4648 Section 7) encoded data to raw bytes.
+/// Case-insensitive. No padding characters expected (DNS NSEC3 doesn't use padding).
+fn base32hexDecode(encoded: []const u8, dest: []u8) !void {
+    var bit_buffer: u32 = 0;
+    var bits_in_buffer: u5 = 0;
+    var dest_idx: usize = 0;
+
+    for (encoded) |c| {
+        const val = base32hex_decode_table[c];
+        if (val == 0xFF) return error.InvalidData;
+
+        bit_buffer = (bit_buffer << 5) | val;
+        bits_in_buffer += 5;
+
+        if (bits_in_buffer >= 8) {
+            bits_in_buffer -= 8;
+            if (dest_idx >= dest.len) return error.InvalidData;
+            dest[dest_idx] = @intCast((bit_buffer >> bits_in_buffer) & 0xFF);
+            dest_idx += 1;
+        }
+    }
+}
+
+/// Encode raw bytes to base32hex (RFC 4648 Section 7) without padding.
+/// Returns a fixed-size array for the encoded output.
+/// For a 20-byte SHA-1 hash, produces exactly 32 characters.
+fn base32hexEncode(data: *const [20]u8) [32]u8 {
+    var result: [32]u8 = undefined;
+    var bit_buffer: u64 = 0;
+    var bits_in_buffer: u6 = 0;
+    var out_idx: usize = 0;
+
+    for (data) |byte| {
+        bit_buffer = (bit_buffer << 8) | byte;
+        bits_in_buffer += 8;
+
+        while (bits_in_buffer >= 5) {
+            bits_in_buffer -= 5;
+            const idx: u5 = @intCast((bit_buffer >> bits_in_buffer) & 0x1F);
+            result[out_idx] = base32hex_encode_table[idx];
+            out_idx += 1;
+        }
+    }
+
+    // Handle remaining bits (20 bytes = 160 bits, 160/5 = 32 exactly, no remainder)
+    if (bits_in_buffer > 0 and out_idx < result.len) {
+        const shift: u6 = 5 - bits_in_buffer;
+        const idx: u5 = @intCast((bit_buffer << shift) & 0x1F);
+        result[out_idx] = base32hex_encode_table[idx];
+        out_idx += 1;
+    }
+
+    return result;
 }
 
 /// Find RRSIG record covering a specific type
@@ -916,10 +1078,11 @@ test "verifyEcdsaP256 with invalid key size" {
 }
 
 test "compareDnsNames" {
-    try std.testing.expectEqual(@as(i32, 0), compareDnsNames("example.com", "example.com"));
-    try std.testing.expectEqual(@as(i32, 0), compareDnsNames("EXAMPLE.COM", "example.com"));
-    try std.testing.expect(compareDnsNames("aaa.com", "bbb.com") < 0);
-    try std.testing.expect(compareDnsNames("bbb.com", "aaa.com") > 0);
+    // Wire-format names: \x07example\x03com\x00
+    try std.testing.expectEqual(std.math.Order.eq, compareDnsNames("\x07example\x03com\x00", "\x07example\x03com\x00"));
+    try std.testing.expectEqual(std.math.Order.eq, compareDnsNames("\x07EXAMPLE\x03COM\x00", "\x07example\x03com\x00"));
+    try std.testing.expectEqual(std.math.Order.lt, compareDnsNames("\x03aaa\x03com\x00", "\x03bbb\x03com\x00"));
+    try std.testing.expectEqual(std.math.Order.gt, compareDnsNames("\x03bbb\x03com\x00", "\x03aaa\x03com\x00"));
 }
 
 test "Validator.computeNsec3Hash" {
@@ -1109,8 +1272,8 @@ test "GAP-0057: findRrsig compiles and handles empty slice" {
 }
 
 test "GAP-0057: nameInNsecRange compiles with []const u8 args" {
-    // Ensure the function compiles correctly with []const u8 arguments
-    const result = nameInNsecRange("bbb.com", "aaa.com", "ccc.com");
+    // Ensure the function compiles correctly with wire-format []const u8 arguments
+    const result = nameInNsecRange("\x03bbb\x03com\x00", "\x03aaa\x03com\x00", "\x03ccc\x03com\x00");
     try std.testing.expect(result);
 }
 
@@ -1169,4 +1332,224 @@ test "GAP-0063: validateNodataWithNsec uses case-insensitive name comparison" {
     const empty_msg = [_]u8{};
     const result = try validator.validateNodataWithNsec("EXAMPLE.COM", .a, &empty_records, &empty_msg);
     try std.testing.expect(!result);
+}
+
+// =========================================================================
+// GAP-0064: compareDnsNames — RFC 4034 Section 6.1 canonical ordering
+// =========================================================================
+
+test "GAP-0064: compareDnsNames equal wire-format names" {
+    // \x07example\x03com\x00 == \x07example\x03com\x00
+    const a = "\x07example\x03com\x00";
+    const b = "\x07example\x03com\x00";
+    try std.testing.expectEqual(std.math.Order.eq, compareDnsNames(a, b));
+}
+
+test "GAP-0064: compareDnsNames case-insensitive wire-format names" {
+    // \x07EXAMPLE\x03COM\x00 == \x07example\x03com\x00
+    const a = "\x07EXAMPLE\x03COM\x00";
+    const b = "\x07example\x03com\x00";
+    try std.testing.expectEqual(std.math.Order.eq, compareDnsNames(a, b));
+}
+
+test "GAP-0064: compareDnsNames label-by-label from root (RFC 4034 canonical order)" {
+    // RFC 4034 Section 6.1: compare from root (rightmost label) to leaf.
+    // a.example.com vs z.alpha.com:
+    //   Root labels: com == com
+    //   Second labels: alpha < example
+    //   So z.alpha.com < a.example.com
+    // Wire format: \x01a\x07example\x03com\x00 vs \x01z\x05alpha\x03com\x00
+    const a_example_com = "\x01a\x07example\x03com\x00";
+    const z_alpha_com = "\x01z\x05alpha\x03com\x00";
+    // Canonical: z.alpha.com < a.example.com (because alpha < example at second level)
+    try std.testing.expectEqual(std.math.Order.gt, compareDnsNames(a_example_com, z_alpha_com));
+    try std.testing.expectEqual(std.math.Order.lt, compareDnsNames(z_alpha_com, a_example_com));
+}
+
+test "GAP-0064: compareDnsNames shorter name sorts before longer name with shared labels" {
+    // example.com vs a.example.com:
+    //   Root labels: com == com
+    //   Second labels: example == example
+    //   example.com has no more labels, a.example.com has 'a'
+    //   => example.com < a.example.com
+    const example_com = "\x07example\x03com\x00";
+    const a_example_com = "\x01a\x07example\x03com\x00";
+    try std.testing.expectEqual(std.math.Order.lt, compareDnsNames(example_com, a_example_com));
+    try std.testing.expectEqual(std.math.Order.gt, compareDnsNames(a_example_com, example_com));
+}
+
+test "GAP-0064: compareDnsNames root name sorts before everything" {
+    // Root (\x00) sorts before any other name
+    const root = "\x00";
+    const example_com = "\x07example\x03com\x00";
+    try std.testing.expectEqual(std.math.Order.lt, compareDnsNames(root, example_com));
+    try std.testing.expectEqual(std.math.Order.gt, compareDnsNames(example_com, root));
+}
+
+test "GAP-0064: compareDnsNames same TLD different second level" {
+    // aaa.com vs bbb.com:
+    //   Root labels: com == com
+    //   Second labels: aaa < bbb
+    const aaa_com = "\x03aaa\x03com\x00";
+    const bbb_com = "\x03bbb\x03com\x00";
+    try std.testing.expectEqual(std.math.Order.lt, compareDnsNames(aaa_com, bbb_com));
+    try std.testing.expectEqual(std.math.Order.gt, compareDnsNames(bbb_com, aaa_com));
+}
+
+test "GAP-0064: compareDnsNames different TLDs" {
+    // example.com vs example.org:
+    //   Root labels: com vs org => com < org
+    const example_com = "\x07example\x03com\x00";
+    const example_org = "\x07example\x03org\x00";
+    try std.testing.expectEqual(std.math.Order.lt, compareDnsNames(example_com, example_org));
+    try std.testing.expectEqual(std.math.Order.gt, compareDnsNames(example_org, example_com));
+}
+
+test "GAP-0064: compareDnsNames RFC 4034 Section 6.1 example ordering" {
+    // RFC 4034 Section 6.1 specifies this canonical ordering:
+    // example < a.example < yljkjljk.a.example < Z.a.example < zABC.a.EXAMPLE
+    // < z.example < \001.z.example < *.z.example < \200.z.example
+    // Using .example as the zone for simplicity (2-label names under example)
+    const example = "\x07example\x00";
+    const a_example = "\x01a\x07example\x00";
+    const z_example = "\x01z\x07example\x00";
+    const yljk_a_example = "\x08yljkjljk\x01a\x07example\x00";
+    const Z_a_example = "\x01Z\x01a\x07example\x00";
+
+    // example < a.example
+    try std.testing.expectEqual(std.math.Order.lt, compareDnsNames(example, a_example));
+    // a.example < yljkjljk.a.example
+    try std.testing.expectEqual(std.math.Order.lt, compareDnsNames(a_example, yljk_a_example));
+    // yljkjljk.a.example < Z.a.example (y > z case-insensitively? No, y > z is false. y < z)
+    // Actually: yljkjljk vs Z (case-insensitive z). y > z? No, y(0x79) < z(0x7a). Wait...
+    // These share parent a.example. So compare first labels: yljkjljk vs Z (lowered: z).
+    // y(0x79) < z(0x7A) => yljkjljk < z => yljkjljk.a.example < Z.a.example
+    try std.testing.expectEqual(std.math.Order.lt, compareDnsNames(yljk_a_example, Z_a_example));
+    // a.example < z.example (same parent 'example', compare labels: a < z)
+    try std.testing.expectEqual(std.math.Order.lt, compareDnsNames(a_example, z_example));
+}
+
+test "GAP-0064: nameInNsecRange works with canonical ordering" {
+    // Test that nameInNsecRange uses correct canonical ordering
+    // Setup: owner=aaa.example.com, next=zzz.example.com
+    // Name bbb.example.com should be in range
+    const owner = "\x03aaa\x07example\x03com\x00";
+    const next = "\x03zzz\x07example\x03com\x00";
+    const name = "\x03bbb\x07example\x03com\x00";
+    try std.testing.expect(nameInNsecRange(name, owner, next));
+}
+
+// =========================================================================
+// GAP-0065: extractNsec3OwnerHash — base32hex encoding mismatch
+// =========================================================================
+
+test "GAP-0065: decodeNsec3OwnerHash decodes base32hex to raw bytes" {
+    // An NSEC3 owner name has its first label as base32hex-encoded hash.
+    // SHA-1 produces 20 bytes = 32 base32hex characters.
+    //
+    // Example: 20 zero bytes in base32hex = "00000000000000000000000000000000"
+    // base32hex alphabet: 0-9 A-V (RFC 4648 Section 7)
+    // '0' in base32hex = value 0, so 32 '0' chars decode to 20 zero bytes.
+    const zero_hash_b32 = "00000000000000000000000000000000";
+    // Build wire-format owner name: label_len(32) + base32hex + rest_of_name
+    var owner_name: [32 + 1 + 8 + 1]u8 = undefined;
+    owner_name[0] = 32; // label length
+    @memcpy(owner_name[1..33], zero_hash_b32);
+    // Append ".example" zone suffix in wire format
+    owner_name[33] = 7; // length of "example"
+    @memcpy(owner_name[34..41], "example");
+    owner_name[41] = 0; // root label
+
+    const decoded = decodeNsec3OwnerHash(&owner_name) catch unreachable;
+    // Should be 20 decoded bytes (all zeros)
+    try std.testing.expectEqual(@as(usize, 20), decoded.len);
+    for (decoded.data[0..decoded.len]) |byte| {
+        try std.testing.expectEqual(@as(u8, 0), byte);
+    }
+}
+
+test "GAP-0065: decodeNsec3OwnerHash decodes known base32hex value" {
+    // base32hex of 0xFF repeated 20 times:
+    // 20 bytes of 0xFF = 160 bits of 1s.
+    // In base32hex (5 bits per char): all 5-bit groups are 11111 = 31 = 'V'
+    // So 32 'V' characters decode to 20 bytes of 0xFF.
+    const ff_hash_b32 = "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV";
+    var owner_name: [32 + 1 + 1]u8 = undefined;
+    owner_name[0] = 32; // label length
+    @memcpy(owner_name[1..33], ff_hash_b32);
+    owner_name[33] = 0; // root label
+
+    const decoded = decodeNsec3OwnerHash(&owner_name) catch unreachable;
+    try std.testing.expectEqual(@as(usize, 20), decoded.len);
+    for (decoded.data[0..decoded.len]) |byte| {
+        try std.testing.expectEqual(@as(u8, 0xFF), byte);
+    }
+}
+
+test "GAP-0065: hashInNsec3Range works with decoded owner hash" {
+    // The computed hash (raw binary) and the NSEC3 owner hash (base32hex in wire name)
+    // must be comparable. After fixing extractNsec3OwnerHash to decode base32hex,
+    // hashInNsec3Range should correctly detect a hash in range.
+    //
+    // Setup: owner_hash=0x05...(20 bytes), next_hash=0x15...(20 bytes)
+    // Test hash=0x10...(20 bytes) should be in range.
+    var owner_hash_bytes: [20]u8 = undefined;
+    @memset(&owner_hash_bytes, 0x05);
+    var next_hash_bytes: [20]u8 = undefined;
+    @memset(&next_hash_bytes, 0x15);
+    var test_hash: [20]u8 = undefined;
+    @memset(&test_hash, 0x10);
+
+    // Encode owner_hash to base32hex for the wire-format owner name
+    const owner_b32 = base32hexEncode(&owner_hash_bytes);
+    var owner_name: [32 + 1 + 1]u8 = undefined;
+    owner_name[0] = 32;
+    @memcpy(owner_name[1..33], &owner_b32);
+    owner_name[33] = 0;
+
+    // hashInNsec3Range(hash, nsec3_owner_wire_name, next_hash_raw_bytes)
+    try std.testing.expect(hashInNsec3Range(&test_hash, &owner_name, &next_hash_bytes));
+
+    // Test hash outside range (0x01 < 0x05)
+    var outside_hash: [20]u8 = undefined;
+    @memset(&outside_hash, 0x01);
+    try std.testing.expect(!hashInNsec3Range(&outside_hash, &owner_name, &next_hash_bytes));
+}
+
+test "GAP-0065: base32hex encode-decode round-trip" {
+    // Verify that encoding and then decoding produces the original bytes
+    var original: [20]u8 = undefined;
+    // Fill with a recognizable pattern
+    for (&original, 0..) |*byte, i| {
+        byte.* = @intCast(i * 13 + 7); // arbitrary non-trivial pattern
+    }
+
+    // Encode to base32hex
+    const encoded = base32hexEncode(&original);
+
+    // Decode back
+    var decoded: [20]u8 = undefined;
+    try base32hexDecode(&encoded, &decoded);
+
+    try std.testing.expectEqualSlices(u8, &original, &decoded);
+}
+
+test "GAP-0065: base32hex decode is case-insensitive" {
+    // NSEC3 owner names may be lowercase in some implementations
+    const upper = "0123456789ABCDEFGHIJKLMNOPQRSTUV";
+    const lower = "0123456789abcdefghijklmnopqrstuv";
+
+    var decoded_upper: [20]u8 = undefined;
+    var decoded_lower: [20]u8 = undefined;
+    try base32hexDecode(upper, &decoded_upper);
+    try base32hexDecode(lower, &decoded_lower);
+
+    try std.testing.expectEqualSlices(u8, &decoded_upper, &decoded_lower);
+}
+
+test "GAP-0065: base32hex decode rejects invalid characters" {
+    // Characters outside base32hex alphabet (0-9, A-V / a-v) should fail
+    const invalid = "WXYZ0000000000000000000000000000"; // W, X, Y, Z are invalid
+    var decoded: [20]u8 = undefined;
+    try std.testing.expectError(error.InvalidData, base32hexDecode(invalid, &decoded));
 }

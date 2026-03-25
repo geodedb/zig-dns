@@ -369,6 +369,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "channel", .module = channel_mod },
+            .{ .name = "types", .module = types_mod },
         },
     });
 

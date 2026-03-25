@@ -82,9 +82,8 @@ pub const StubConfig = struct {
 
 /// Stub Resolver
 /// Forwards DNS queries to configured upstream servers
-/// Maximum number of spurious (non-matching source) packets to discard before
-/// returning an error. Prevents CPU pinning from flood attacks (SEC-AUDIT-02).
-const max_spurious_discards: u32 = 1000;
+/// QR-02: Shared constant from types module; see types.max_spurious_discards.
+const max_spurious_discards = types_mod.max_spurious_discards;
 
 pub const StubResolver = struct {
     allocator: std.mem.Allocator,
@@ -202,7 +201,17 @@ pub const StubResolver = struct {
                         else => continue,
                     };
                     self.allocator.free(response);
-                    return Message.parse(tcp_response) catch continue;
+
+                    // SEC-AUDIT-10: Re-validate the TCP response (TXID, QNAME, QTYPE).
+                    // Although TCP is connection-oriented and less susceptible to spoofing
+                    // than UDP, defense-in-depth requires verifying the response matches
+                    // the query to guard against on-path attackers or misbehaving servers.
+                    const tcp_msg = Message.parse(tcp_response) catch continue;
+                    if (tcp_msg.header.id != id or !responseMatchesQuery(tcp_msg, domain, qtype, qclass)) {
+                        self.allocator.free(tcp_response);
+                        continue;
+                    }
+                    return tcp_msg;
                 }
 
                 return msg;
@@ -212,7 +221,15 @@ pub const StubResolver = struct {
         return error.NoResponse;
     }
 
-    /// Send a query over UDP
+    /// Send a query over UDP.
+    ///
+    /// SEC-AUDIT-09: Source port randomization relies on the operating system's
+    /// ephemeral port assignment. The socket is not explicitly bound, so the OS
+    /// selects the source port via its default algorithm. Modern OSes (Linux 3.x+,
+    /// macOS, Windows Vista+) randomize ephemeral ports, but this library does
+    /// not perform explicit port randomization itself. Deployments on legacy or
+    /// embedded systems should verify that the OS provides adequate port entropy
+    /// to mitigate DNS cache poisoning attacks (RFC 5452 Section 3).
     fn sendQuery(self: *Self, query: []const u8, server: ServerAddress) ![]u8 {
         const sock = try std.posix.socket(
             server.address.any.family,
@@ -235,7 +252,7 @@ pub const StubResolver = struct {
 
         const start_ms = std.time.milliTimestamp();
         // SEC-AUDIT-02: Limit discarded packets to prevent CPU pinning from flood attacks.
-        var discards: u32 = 0;
+        var discards = types_mod.SpuriousDiscardCounter{};
         while (true) {
             if (std.time.milliTimestamp() - start_ms >= self.config.timeout_ms) {
                 return error.Timeout;
@@ -253,10 +270,7 @@ pub const StubResolver = struct {
             };
 
             if (!std.net.Address.eql(src_addr, server.address)) {
-                discards += 1;
-                if (discards >= max_spurious_discards) {
-                    return error.TooManySpuriousPackets;
-                }
+                discards.increment() catch return error.TooManySpuriousPackets;
                 continue;
             }
 

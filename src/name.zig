@@ -72,6 +72,58 @@ pub const Name = struct {
             };
         }
 
+        /// Result of attempting to follow a compression pointer.
+        const FollowResult = enum {
+            /// Pointer followed successfully; data/pos updated, caller should continue loop.
+            followed,
+            /// No message available to resolve the pointer.
+            no_message,
+            /// Pointer byte pair is truncated (pos + 1 >= data.len).
+            truncated,
+        };
+
+        /// Follow a compression pointer, updating `data` and `pos` to the
+        /// target location.  Enforces hop counting and forward-pointer
+        /// rejection.
+        ///
+        /// SECURITY (SEC-SCAN-07, SEC-AUDIT-01): Rejects forward compression
+        /// pointers.  On the first hop, computes the current absolute position
+        /// in the message as the upper bound; on subsequent hops, uses the
+        /// previous target.
+        ///
+        /// Returns `FollowResult.followed` on success, or a non-followed
+        /// status for conditions each caller must handle in its own way.
+        /// Returns `error.CompressionLoopDetected` or `error.ForwardPointer`
+        /// for security violations that all callers must propagate.
+        fn followPointer(self: *LabelIterator, len_byte: u8) error{ CompressionLoopDetected, ForwardPointer }!FollowResult {
+            const msg = self.message orelse return .no_message;
+
+            if (self.pos + 1 >= self.data.len) return .truncated;
+
+            self.pointer_hops += 1;
+            if (self.pointer_hops > max_compression_hops) {
+                self.done = true;
+                return error.CompressionLoopDetected;
+            }
+
+            const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | self.data[self.pos + 1];
+
+            const bound: u16 = if (self.last_ptr_target) |prev|
+                prev
+            else
+                @intCast(@intFromPtr(self.data.ptr) - @intFromPtr(msg.ptr) + self.pos);
+
+            if (ptr_offset >= bound) {
+                self.done = true;
+                return error.ForwardPointer;
+            }
+
+            self.last_ptr_target = ptr_offset;
+            self.data = msg[ptr_offset..];
+            self.pos = 0;
+            return .followed;
+        }
+
         /// Returns the next label as a slice of raw bytes (without the length
         /// prefix), or `null` when done.  Follows compression pointers with
         /// all security checks.
@@ -89,37 +141,16 @@ pub const Name = struct {
 
                 // Compression pointer
                 if ((len_byte & compression_marker) == compression_marker) {
-                    if (self.message) |msg| {
-                        if (self.pos + 1 >= self.data.len) {
+                    switch (try self.followPointer(len_byte)) {
+                        .followed => continue,
+                        .truncated => {
                             self.done = true;
                             return error.InvalidCompression;
-                        }
-                        self.pointer_hops += 1;
-                        if (self.pointer_hops > max_compression_hops) {
+                        },
+                        .no_message => {
                             self.done = true;
-                            return error.CompressionLoopDetected;
-                        }
-                        const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | self.data[self.pos + 1];
-                        // SECURITY (SEC-SCAN-07, SEC-AUDIT-01): Reject forward
-                        // compression pointers.  On the first hop, compute the
-                        // current absolute position in the message as the upper
-                        // bound; on subsequent hops, use the previous target.
-                        const bound: u16 = if (self.last_ptr_target) |prev|
-                            prev
-                        else
-                            @intCast(@intFromPtr(self.data.ptr) - @intFromPtr(msg.ptr) + self.pos);
-                        if (ptr_offset >= bound) {
-                            self.done = true;
-                            return error.ForwardPointer;
-                        }
-                        self.last_ptr_target = ptr_offset;
-                        self.data = msg[ptr_offset..];
-                        self.pos = 0;
-                        continue;
-                    } else {
-                        // Compressed name without full message -- cannot resolve
-                        self.done = true;
-                        return error.CompressionRequiresFullMessage;
+                            return error.CompressionRequiresFullMessage;
+                        },
                     }
                 }
 
@@ -154,35 +185,12 @@ pub const Name = struct {
                 }
 
                 if ((len_byte & compression_marker) == compression_marker) {
-                    if (self.message) |msg| {
-                        if (self.pos + 1 >= self.data.len) {
+                    switch (try self.followPointer(len_byte)) {
+                        .followed => continue,
+                        .truncated, .no_message => {
                             self.done = true;
                             return null;
-                        }
-                        self.pointer_hops += 1;
-                        if (self.pointer_hops > max_compression_hops) {
-                            self.done = true;
-                            return error.CompressionLoopDetected;
-                        }
-                        const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | self.data[self.pos + 1];
-                        // SECURITY (SEC-SCAN-07, SEC-AUDIT-01): Reject forward
-                        // compression pointers (same logic as next()).
-                        const bound: u16 = if (self.last_ptr_target) |prev|
-                            prev
-                        else
-                            @intCast(@intFromPtr(self.data.ptr) - @intFromPtr(msg.ptr) + self.pos);
-                        if (ptr_offset >= bound) {
-                            self.done = true;
-                            return error.ForwardPointer;
-                        }
-                        self.last_ptr_target = ptr_offset;
-                        self.data = msg[ptr_offset..];
-                        self.pos = 0;
-                        continue;
-                    } else {
-                        // No full message -- stop iteration silently
-                        self.done = true;
-                        return null;
+                        },
                     }
                 }
 
@@ -222,34 +230,18 @@ pub const Name = struct {
                 }
 
                 if ((len_byte & compression_marker) == compression_marker) {
-                    if (self.message) |msg| {
-                        if (self.pos + 1 >= self.data.len) {
-                            self.done = true;
-                            return .{ .err = {} };
-                        }
-                        self.pointer_hops += 1;
-                        if (self.pointer_hops > max_compression_hops) {
-                            self.done = true;
-                            return .{ .err = {} };
-                        }
-                        const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | self.data[self.pos + 1];
-                        // SECURITY (SEC-SCAN-07, SEC-AUDIT-01): Reject forward
-                        // compression pointers (same logic as next()).
-                        const bound: u16 = if (self.last_ptr_target) |prev|
-                            prev
-                        else
-                            @intCast(@intFromPtr(self.data.ptr) - @intFromPtr(msg.ptr) + self.pos);
-                        if (ptr_offset >= bound) {
-                            self.done = true;
-                            return .{ .err = {} };
-                        }
-                        self.last_ptr_target = ptr_offset;
-                        self.data = msg;
-                        self.pos = ptr_offset;
-                        continue;
-                    } else {
-                        self.done = true;
+                    const result = self.followPointer(len_byte) catch {
+                        // followPointer only errors on CompressionLoopDetected
+                        // or ForwardPointer -- both are security violations
+                        // that eql() treats as inequality.
                         return .{ .err = {} };
+                    };
+                    switch (result) {
+                        .followed => continue,
+                        .truncated, .no_message => {
+                            self.done = true;
+                            return .{ .err = {} };
+                        },
                     }
                 }
 

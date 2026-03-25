@@ -209,7 +209,11 @@ pub const HappyEyeballs = struct {
                             // Update cache (best-effort; OOM must not leak the
                             // winning fd -- QA-AUDIT-04)
                             if (self.config.enable_family_cache) {
-                                self.updateFamilyCache(hostname_hash, attempt.family) catch {};
+                                self.updateFamilyCache(hostname_hash, attempt.family) catch |cache_err| {
+                                    // Cache update is best-effort; connection succeeds regardless.
+                                    // Log at debug level so operators can diagnose cache issues.
+                                    std.log.debug("updateFamilyCache failed: {}", .{cache_err});
+                                };
                             }
 
                             // Update stats

@@ -1,6 +1,6 @@
 # Gap Analysis -- Resolved
 
-Last updated: 2026-03-25 (Full audit closure: GAP-0057 through GAP-0063 resolved -- 7 items from security+quality audit all closed)
+Last updated: 2026-03-25 (Final closure: GAP-0064, GAP-0065, SEC-AUDIT-06 through SEC-AUDIT-10, QR-01 through QR-R01, PF-NEW-14 all resolved. 499/499 tests passing.)
 
 Items below were identified in prior gap analyses and verified as resolved. They are listed here for audit trail purposes.
 
@@ -831,9 +831,9 @@ The following items were evaluated and intentionally classified as Won't Do with
 - **Category:** Performance (P0)
 - **Reason:** Benchmark infrastructure investment outside scope of gap closure.
 
-### PF-NEW-14 / PF-NEW-16 / PF-NEW-17 / PF-NEW-18 / PF-NEW-19: Small perf items [WON'T DO]
+### PF-NEW-16 / PF-NEW-17 / PF-NEW-18 / PF-NEW-19: Small perf items [WON'T DO]
 - **Category:** Performance (P2-P3)
-- **Reason:** Marginal improvements; some structurally required, others dominated by larger costs (HTTP round-trip, not in hot path).
+- **Reason:** Marginal improvements; some structurally required, others dominated by larger costs (HTTP round-trip, not in hot path). Note: PF-NEW-14 was reclassified from Won't Do to Open, then Resolved (see below).
 
 ### SEC-C29 / ADV-02: Replay protection [WON'T DO]
 - **Category:** Security (Medium/Low)
@@ -1185,6 +1185,90 @@ The following 7 items were identified in the 2026-03-25 full security and qualit
 - **Category:** Security (Medium, CWE-178)
 - **Resolution:** Replaced `std.mem.eql` with `std.ascii.eqlIgnoreCase` for DNS name comparison in NSEC NODATA validation, per RFC 4343 case-insensitive DNS name matching requirement. Unblocked by GAP-0057 fix (DNSSEC module now compiles).
 - **Evidence:** `src/resolver/dnssec.zig:245` -- std.ascii.eqlIgnoreCase; 1 new test
+- **Resolved date:** 2026-03-25
+
+---
+
+## DNSSEC + Quality + Performance Final Closure (2026-03-25)
+
+The following 15 items were resolved in the final gap closure round. 499/499 tests passing.
+
+### GAP-0064 / SEC-AUDIT-06: compareDnsNames wrong ordering -- NSEC NXDOMAIN proof bypass [RESOLVED]
+- **Category:** Bug / Security (High, CWE-697)
+- **Resolution:** `compareDnsNames` rewritten to extract labels from wire-format names into stack arrays, reverse to root-first order, and compare label-by-label with case-insensitive byte comparison per RFC 4034 Section 6.1. `nameInNsecRange` now produces correct results for all name orderings.
+- **Evidence:** `src/resolver/dnssec.zig:821` -- `compareDnsNames` with label extraction + root-first comparison; 9 new tests
+- **Resolved date:** 2026-03-25
+
+### GAP-0065 / SEC-AUDIT-07: NSEC3 owner hash format mismatch -- validation non-functional [RESOLVED]
+- **Category:** Bug / Security (High, CWE-704)
+- **Resolution:** `extractNsec3OwnerHash` replaced with `decodeNsec3OwnerHash` that decodes base32hex ASCII owner labels to raw binary bytes. Base32hex codec added. `hashInNsec3Range` and `validateNodataWithNsec3` now compare binary-to-binary.
+- **Evidence:** `src/resolver/dnssec.zig` -- `decodeNsec3OwnerHash` with base32hex codec; 6 new tests
+- **Resolved date:** 2026-03-25
+
+### SEC-AUDIT-08: TSIG fudge u16*2 overflow [RESOLVED]
+- **Category:** Security (Low, CWE-190)
+- **Resolution:** TSIG fudge comparison widened from u16 to u32 before multiplication to prevent overflow when `self.fudge > 32767`.
+- **Evidence:** `src/security/tsig.zig:417` -- `@as(u32, tsig.fudge) > @as(u32, self.fudge) * 2`; 2 new tests
+- **Resolved date:** 2026-03-25
+
+### SEC-AUDIT-09: No explicit source port randomization (OS-dependent) [RESOLVED]
+- **Category:** Security (Low, CWE-330)
+- **Resolution:** Doc comments added to `sendQuery` in both `stub.zig` and `recursive.zig` documenting OS-dependent source port randomization per RFC 5452. The library relies on OS ephemeral port assignment; deployments on legacy/embedded systems should verify port entropy.
+- **Evidence:** `src/stub.zig:227`, `src/recursive.zig:575` -- doc comments about RFC 5452 source port randomization
+- **Resolved date:** 2026-03-25
+
+### SEC-AUDIT-10: TCP fallback response not re-validated after TC bit [RESOLVED]
+- **Category:** Security (Low, CWE-345)
+- **Resolution:** TCP fallback response now re-validated with TXID match and `responseMatchesQuery` check before accepting. Previously only UDP responses were validated.
+- **Evidence:** `src/stub.zig:210-211` -- `tcp_msg.header.id != id or !responseMatchesQuery(tcp_msg, ...)` check on TCP response
+- **Resolved date:** 2026-03-25
+
+### QR-01: Forward-pointer security logic triplicated in LabelIterator [RESOLVED]
+- **Category:** Quality / Maintainability (Medium)
+- **Resolution:** Extracted private `followPointer()` helper method in `LabelIterator`, used by `next()`, `nextOrStop()`, and `nextForEql()`. Deduplicates ~75 lines of identical pointer-following, loop-count, and offset-bounds logic.
+- **Evidence:** `src/name.zig:98` -- `followPointer()` helper; called from 3 methods
+- **Resolved date:** 2026-03-25
+
+### QR-02: max_spurious_discards constant triplicated [RESOLVED]
+- **Category:** Quality / Maintainability (Low)
+- **Resolution:** `max_spurious_discards` constant extracted to `src/types.zig`; imported by `recursive.zig`, `stub.zig`, and `udp.zig`.
+- **Evidence:** `src/types.zig:253` -- shared constant; 3 import sites
+- **Resolved date:** 2026-03-25
+
+### QR-R02: SEC-AUDIT-02 tests only verify constant bounds [RESOLVED]
+- **Category:** Quality / Tests (Medium)
+- **Resolution:** `SpuriousDiscardCounter` struct added to `types.zig` with `increment()` method and 3 tests: allows discards below limit, triggers error at limit, and reset behavior. All 3 UDP discard loops refactored to use the shared struct.
+- **Evidence:** `src/types.zig:258` -- `SpuriousDiscardCounter` struct; `src/types.zig:289` -- 3 tests
+- **Resolved date:** 2026-03-25
+
+### QR-04: CNAME limits differ 2x with no cross-reference [RESOLVED]
+- **Category:** Quality / Readability (Low)
+- **Resolution:** Cross-reference comments added to `recursive.zig:135-138` documenting the relationship between `max_cname_chain_length=8` (traversal depth) and `max_cname_depth=8` / `max_cname_mappings=16` (storage bound) in client.zig.
+- **Evidence:** `src/recursive.zig:135-138` -- cross-reference comment
+- **Resolved date:** 2026-03-25
+
+### QR-05: client.zig uses magic number 8 for CNAME depth [RESOLVED]
+- **Category:** Quality / Readability (Low)
+- **Resolution:** Magic number 8 replaced with `max_cname_depth` named constant in client.zig.
+- **Evidence:** `src/client.zig` -- `max_cname_depth` constant
+- **Resolved date:** 2026-03-25
+
+### QR-03: nextForEql() pointer traversal style differs [RESOLVED]
+- **Category:** Quality / Readability (Info)
+- **Resolution:** Style difference resolved by QR-01 `followPointer()` extraction. All three LabelIterator methods now share identical pointer traversal logic via the shared helper.
+- **Evidence:** `src/name.zig:98` -- unified via `followPointer()`
+- **Resolved date:** 2026-03-25
+
+### QR-R01: catch {} on updateFamilyCache loses OOM observability [RESOLVED]
+- **Category:** Quality / Reliability (Info)
+- **Resolution:** `catch {}` replaced with `catch |cache_err| std.log.debug("updateFamilyCache failed: {}", .{cache_err})` matching the codebase pattern used in recursive.zig:338.
+- **Evidence:** `src/transports/happy_eyeballs.zig:212` -- debug log on cache error
+- **Resolved date:** 2026-03-25
+
+### PF-NEW-14: extractReferral NS name toString allocation [RESOLVED]
+- **Category:** Performance (P3, PerfScore 32)
+- **Resolution:** `extractReferral` NS name conversion changed from `toString` (ArrayList with 3-5 allocs per name) to `toStringBuf` with stack buffer + `allocator.dupe` (single allocation). Matches pattern applied to all other toString sites in recursive.zig.
+- **Evidence:** `src/recursive.zig:666-670` -- `toStringBuf(&ns_buf, response)` + `allocator.dupe(u8, ns_str)`
 - **Resolved date:** 2026-03-25
 
 ---
