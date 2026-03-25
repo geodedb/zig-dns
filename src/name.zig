@@ -100,12 +100,17 @@ pub const Name = struct {
                             return error.CompressionLoopDetected;
                         }
                         const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | self.data[self.pos + 1];
-                        // SECURITY (SEC-SCAN-07): Reject forward compression pointers.
-                        if (self.last_ptr_target) |prev| {
-                            if (ptr_offset >= prev) {
-                                self.done = true;
-                                return error.ForwardPointer;
-                            }
+                        // SECURITY (SEC-SCAN-07, SEC-AUDIT-01): Reject forward
+                        // compression pointers.  On the first hop, compute the
+                        // current absolute position in the message as the upper
+                        // bound; on subsequent hops, use the previous target.
+                        const bound: u16 = if (self.last_ptr_target) |prev|
+                            prev
+                        else
+                            @intCast(@intFromPtr(self.data.ptr) - @intFromPtr(msg.ptr) + self.pos);
+                        if (ptr_offset >= bound) {
+                            self.done = true;
+                            return error.ForwardPointer;
                         }
                         self.last_ptr_target = ptr_offset;
                         self.data = msg[ptr_offset..];
@@ -160,11 +165,15 @@ pub const Name = struct {
                             return error.CompressionLoopDetected;
                         }
                         const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | self.data[self.pos + 1];
-                        if (self.last_ptr_target) |prev| {
-                            if (ptr_offset >= prev) {
-                                self.done = true;
-                                return error.ForwardPointer;
-                            }
+                        // SECURITY (SEC-SCAN-07, SEC-AUDIT-01): Reject forward
+                        // compression pointers (same logic as next()).
+                        const bound: u16 = if (self.last_ptr_target) |prev|
+                            prev
+                        else
+                            @intCast(@intFromPtr(self.data.ptr) - @intFromPtr(msg.ptr) + self.pos);
+                        if (ptr_offset >= bound) {
+                            self.done = true;
+                            return error.ForwardPointer;
                         }
                         self.last_ptr_target = ptr_offset;
                         self.data = msg[ptr_offset..];
@@ -224,11 +233,15 @@ pub const Name = struct {
                             return .{ .err = {} };
                         }
                         const ptr_offset = (@as(u16, len_byte & 0x3F) << 8) | self.data[self.pos + 1];
-                        if (self.last_ptr_target) |prev| {
-                            if (ptr_offset >= prev) {
-                                self.done = true;
-                                return .{ .err = {} };
-                            }
+                        // SECURITY (SEC-SCAN-07, SEC-AUDIT-01): Reject forward
+                        // compression pointers (same logic as next()).
+                        const bound: u16 = if (self.last_ptr_target) |prev|
+                            prev
+                        else
+                            @intCast(@intFromPtr(self.data.ptr) - @intFromPtr(msg.ptr) + self.pos);
+                        if (ptr_offset >= bound) {
+                            self.done = true;
+                            return .{ .err = {} };
                         }
                         self.last_ptr_target = ptr_offset;
                         self.data = msg;
@@ -869,6 +882,38 @@ test "LabelIterator detects self-referencing pointer" {
     };
     var iter = Name.LabelIterator.init(name, &circular);
 
+    try std.testing.expectError(error.ForwardPointer, iter.next());
+}
+
+test "SEC-AUDIT-01: LabelIterator rejects single forward pointer on first hop" {
+    // Regression test: the first compression pointer hop must also be checked
+    // for forward references. Previously, last_ptr_target started as null so
+    // the forward-pointer guard was skipped on the very first hop.
+    //
+    // Message layout:
+    //   offset 0: name "www." followed by compression pointer to offset 10
+    //   offset 5: the compression pointer 0xC0 0x0A (points to offset 10)
+    //   offset 10: "com" label + root terminator
+    //
+    // The pointer at offset 5 points FORWARD to offset 10 -- this must be rejected.
+    const msg = [_]u8{
+        3, 'w', 'w', 'w', // label "www" at offset 0
+        0xC0, 0x0A, // compression pointer to offset 10 (forward!)
+        0x00, 0x00, 0x00, 0x00, // padding
+        3, 'c', 'o', 'm', 0x00, // "com" at offset 10
+    };
+    const name = Name{
+        .labels = msg[0..6], // "www" + pointer
+        .wire_length = 6,
+        .compressed = true,
+    };
+    var iter = Name.LabelIterator.init(name, &msg);
+
+    // First call yields "www" (regular label)
+    const label1 = (try iter.next()).?;
+    try std.testing.expectEqualStrings("www", label1);
+
+    // Second call follows the compression pointer -- must reject as forward
     try std.testing.expectError(error.ForwardPointer, iter.next());
 }
 

@@ -209,8 +209,21 @@ pub const Zone = struct {
         }
     }
 
-    /// Get all records of a specific type
-    pub fn getRecords(self: *const Self, name: []const u8, rtype: RecordType) []const ResourceRecord {
+    /// Get all records of a specific type.
+    ///
+    /// Returns a heap-allocated slice of ResourceRecord values matching the
+    /// given name and record type. The returned records reference the same
+    /// underlying data as the zone's record list (rdata, name strings, etc.),
+    /// but the slice itself is a new allocation.
+    ///
+    /// The caller owns the returned slice and must free it with
+    /// `allocator.free(result)` when done. The individual ResourceRecord
+    /// values should NOT be freed separately -- they are views into the
+    /// Zone's internal storage and are freed when the Zone is deinitialized.
+    ///
+    /// Returns an empty (zero-length) slice when no matching records exist.
+    /// Propagates `error.OutOfMemory` if the slice cannot be allocated.
+    pub fn getRecords(self: *const Self, name: []const u8, rtype: RecordType) ![]const ResourceRecord {
         var count: usize = 0;
         for (self.records.items) |rr| {
             if (std.ascii.eqlIgnoreCase(rr.name, name) and rr.rtype == rtype) {
@@ -220,8 +233,9 @@ pub const Zone = struct {
 
         if (count == 0) return &[_]ResourceRecord{};
 
-        // Note: This returns a view into the records, not a copy
-        var result = self.allocator.alloc(ResourceRecord, count) catch return &[_]ResourceRecord{};
+        // Heap-allocate a slice of matching records (QA-AUDIT-03: not a view,
+        // this is a new allocation that the caller must free).
+        const result = try self.allocator.alloc(ResourceRecord, count);
         var i: usize = 0;
         for (self.records.items) |rr| {
             if (std.ascii.eqlIgnoreCase(rr.name, name) and rr.rtype == rtype) {
@@ -844,6 +858,58 @@ test "ZoneParser MX record" {
     const rr = zone.records.items[0];
     try std.testing.expectEqual(RecordType.mx, rr.rtype);
     try std.testing.expectEqual(@as(u16, 10), rr.rdata.mx.preference);
+}
+
+test "QA-AUDIT-03: getRecords returns heap-allocated slice" {
+    const allocator = std.testing.allocator;
+
+    // Test 1: Single record
+    {
+        var parser = ZoneParser.init(allocator);
+        defer parser.deinit();
+
+        const content =
+            \\$ORIGIN example.com.
+            \\www IN A 192.168.1.1
+        ;
+
+        var zone = try parser.parse(content);
+        defer zone.deinit();
+
+        try std.testing.expectEqual(@as(usize, 1), zone.records.items.len);
+        const stored_name = zone.records.items[0].name;
+
+        // getRecords returns a heap-allocated slice that must be freed
+        const a_records = try zone.getRecords(stored_name, .a);
+        defer allocator.free(a_records);
+        try std.testing.expectEqual(@as(usize, 1), a_records.len);
+
+        // Non-matching query returns empty (zero-length) slice, not an error
+        const empty = try zone.getRecords("nonexistent.example.com.", .a);
+        try std.testing.expectEqual(@as(usize, 0), empty.len);
+        // No free needed for the zero-length sentinel slice
+    }
+
+    // Test 2: MX record via @
+    {
+        var parser2 = ZoneParser.init(allocator);
+        defer parser2.deinit();
+
+        const content2 =
+            \\$ORIGIN example.com.
+            \\@ IN MX 10 mail.example.com.
+        ;
+
+        var zone2 = try parser2.parse(content2);
+        defer zone2.deinit();
+
+        try std.testing.expectEqual(@as(usize, 1), zone2.records.items.len);
+        const mx_name = zone2.records.items[0].name;
+
+        const mx_records = try zone2.getRecords(mx_name, .mx);
+        defer allocator.free(mx_records);
+        try std.testing.expectEqual(@as(usize, 1), mx_records.len);
+    }
 }
 
 test "expandIPv6" {

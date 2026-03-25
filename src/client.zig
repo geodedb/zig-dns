@@ -152,8 +152,24 @@ pub const Client = struct {
         }
     }
 
-    /// Resolve a hostname to IP addresses
+    /// Resolve a hostname to string-formatted addresses.
+    ///
+    /// This method only formats A and AAAA records into string results.
+    /// For other record types (MX, SRV, TXT, NS, etc.), use the
+    /// type-specific lookup methods (lookupMX, lookupSRV, etc.) or
+    /// the lower-level stub/recursive resolvers directly.
+    ///
+    /// Returns `error.UnsupportedRecordType` if called with a record type
+    /// other than A or AAAA (QA-AUDIT-02).
     pub fn resolve(self: *Self, hostname: []const u8, qtype: Type) !ResolveResult {
+        // QA-AUDIT-02: Only A and AAAA records can be formatted by resolve().
+        // Return an explicit error instead of silently returning NoAnswer for
+        // types we cannot format. Callers should use type-specific methods
+        // (lookupMX, lookupSRV, etc.) for other record types.
+        if (qtype != .a and qtype != .aaaa) {
+            return error.UnsupportedRecordType;
+        }
+
         // Check cache first (PF-24-dual-cache: O(1) lookup)
         if (self.cache) |*cache| {
             if (cache.get(hostname, qtype, .in)) |entry| {
@@ -894,4 +910,25 @@ test "formatCachedRdata compressed name returns error" {
     // position in the small 2-byte buffer, returning ForwardPointer.
     const rdata = [_]u8{ 0xC0, 0x0C };
     try std.testing.expectError(error.ForwardPointer, formatCachedRdata(allocator, .ns, &rdata));
+}
+
+test "QA-AUDIT-02: resolve rejects unsupported record types" {
+    // resolve() only supports A and AAAA formatting. For other types it must
+    // return UnsupportedRecordType instead of silently returning NoAnswer.
+    const allocator = std.testing.allocator;
+
+    var client = Client.initWithConfig(allocator, .{
+        .servers = &[_][]const u8{"8.8.8.8"},
+        .cache_size = 0,
+    }) catch {
+        // Expected to fail without network -- skip.
+        return;
+    };
+    defer client.deinit();
+
+    // MX, TXT, SRV, NS, CNAME, PTR, SOA should all return UnsupportedRecordType.
+    const unsupported_types = [_]Type{ .mx, .txt, .srv, .ns, .cname, .ptr, .soa };
+    for (unsupported_types) |rtype| {
+        try std.testing.expectError(error.UnsupportedRecordType, client.resolve("example.com", rtype));
+    }
 }

@@ -304,7 +304,9 @@ pub const Sig0Context = struct {
     /// Sign a DNS message with SIG(0)
     pub fn sign(self: *Self, message: []const u8, key_pair: *const Sig0KeyPair) ![]u8 {
         const now: u32 = @intCast(@as(u64, @bitCast(std.time.timestamp())));
-        const expiration = now + self.validity_seconds;
+        // SECURITY (SEC-AUDIT-04): Checked addition prevents u32 overflow (CWE-190).
+        const expiration = std.math.add(u32, now, self.validity_seconds) catch
+            return error.TimestampOverflow;
 
         // Build SIG(0) RDATA without signature
         var sig_rdata: std.ArrayList(u8) = .empty;
@@ -880,4 +882,23 @@ test "SEC-SCAN-02: SIG(0) sign rejects ARCOUNT overflow" {
     // sign() should detect the ARCOUNT overflow
     const result = ctx.sign(&msg, &key_pair);
     try std.testing.expectError(error.ArcountOverflow, result);
+}
+
+test "SEC-AUDIT-04: SIG(0) sign rejects expiration timestamp overflow" {
+    // Regression test: now + validity_seconds must not overflow u32.
+    // With validity_seconds = maxInt(u32) and any positive timestamp,
+    // the addition would wrap.  The fix returns TimestampOverflow.
+    const allocator = std.testing.allocator;
+
+    var key_pair = try Sig0KeyPair.generate(allocator, "test.example.com", .ed25519);
+    defer key_pair.deinit(allocator);
+
+    // Use maxInt(u32) as validity so now + validity always overflows
+    var ctx = Sig0Context.initWithValidity(allocator, std.math.maxInt(u32));
+
+    // Minimal valid DNS message (12-byte header)
+    var msg: [16]u8 = .{0} ** 16;
+
+    const result = ctx.sign(&msg, &key_pair);
+    try std.testing.expectError(error.TimestampOverflow, result);
 }

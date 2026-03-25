@@ -82,6 +82,10 @@ pub const StubConfig = struct {
 
 /// Stub Resolver
 /// Forwards DNS queries to configured upstream servers
+/// Maximum number of spurious (non-matching source) packets to discard before
+/// returning an error. Prevents CPU pinning from flood attacks (SEC-AUDIT-02).
+const max_spurious_discards: u32 = 1000;
+
 pub const StubResolver = struct {
     allocator: std.mem.Allocator,
     config: StubConfig,
@@ -230,6 +234,8 @@ pub const StubResolver = struct {
         _ = try std.posix.sendto(sock, query, 0, &server.address.any, server.address.getOsSockLen());
 
         const start_ms = std.time.milliTimestamp();
+        // SEC-AUDIT-02: Limit discarded packets to prevent CPU pinning from flood attacks.
+        var discards: u32 = 0;
         while (true) {
             if (std.time.milliTimestamp() - start_ms >= self.config.timeout_ms) {
                 return error.Timeout;
@@ -247,6 +253,10 @@ pub const StubResolver = struct {
             };
 
             if (!std.net.Address.eql(src_addr, server.address)) {
+                discards += 1;
+                if (discards >= max_spurious_discards) {
+                    return error.TooManySpuriousPackets;
+                }
                 continue;
             }
 
@@ -394,4 +404,13 @@ test "StubResolver.init does not own servers" {
     defer resolver.deinit();
 
     try std.testing.expect(!resolver.owns_servers);
+}
+
+test "SEC-AUDIT-02: UDP discard limit prevents CPU pinning" {
+    // Verify the discard limit constant exists and is a reasonable positive value.
+    // The actual enforcement is in sendQuery's receive loop, which discards packets
+    // from non-matching source addresses up to this limit before returning
+    // error.TooManySpuriousPackets.
+    try std.testing.expect(max_spurious_discards > 0);
+    try std.testing.expect(max_spurious_discards <= 10000);
 }

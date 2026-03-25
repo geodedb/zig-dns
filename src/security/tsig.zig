@@ -326,7 +326,8 @@ pub const TsigContext = struct {
         const now: u48 = @intCast(@as(u64, @bitCast(std.time.timestamp())));
 
         // Build TSIG variables for MAC computation
-        const tsig_vars = try self.buildTsigVariables(now, null);
+        // When signing a new message, error is 0 and other_data is empty.
+        const tsig_vars = try self.buildTsigVariables(now, null, 0, &.{});
         defer self.allocator.free(tsig_vars);
 
         // Compute MAC over: message + TSIG variables
@@ -372,8 +373,14 @@ pub const TsigContext = struct {
         // timing oracle attacks. An attacker could manipulate fudge/time_signed
         // to learn whether the MAC was valid by observing different error codes.
 
-        // Recompute MAC
-        const tsig_vars = try self.buildTsigVariables(tsig.time_signed, null);
+        // Recompute MAC using actual error and other_data from received TSIG
+        // (SEC-AUDIT-03: these fields are part of the MAC input per RFC 2845)
+        const tsig_vars = try self.buildTsigVariables(
+            tsig.time_signed,
+            null,
+            tsig.error_code.toResponseCode(),
+            tsig.other_data,
+        );
         defer self.allocator.free(tsig_vars);
 
         // Message without TSIG for MAC computation
@@ -429,7 +436,12 @@ pub const TsigContext = struct {
     }
 
     /// Build TSIG variables for MAC computation (RFC 2845 Section 3.4.2)
-    fn buildTsigVariables(self: *Self, time_signed: u48, prior_mac: ?[]const u8) ![]u8 {
+    ///
+    /// `error_code` and `other_data` are included in the MAC input per the
+    /// RFC.  Callers signing a new message pass 0 / empty; callers verifying
+    /// a received message must pass the values from the received TSIG record
+    /// so that the recomputed MAC matches the original (SEC-AUDIT-03).
+    fn buildTsigVariables(self: *Self, time_signed: u48, prior_mac: ?[]const u8, error_code: u16, other_data: []const u8) ![]u8 {
         var buffer: std.ArrayList(u8) = .empty;
         errdefer buffer.deinit(self.allocator);
 
@@ -460,11 +472,14 @@ pub const TsigContext = struct {
         // Fudge
         try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, self.fudge)));
 
-        // Error (0 for signing)
-        try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0)));
+        // Error code (SEC-AUDIT-03: use actual value, not hardcoded 0)
+        try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, error_code)));
 
-        // Other length (0)
-        try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0)));
+        // Other data length + data (SEC-AUDIT-03: use actual values)
+        try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(other_data.len))));
+        if (other_data.len > 0) {
+            try buffer.appendSlice(self.allocator, other_data);
+        }
 
         return buffer.toOwnedSlice(self.allocator);
     }
@@ -1085,4 +1100,35 @@ test "SEC-SCAN-02: TSIG appendTsig rejects ARCOUNT overflow" {
     // sign() internally calls appendTsig which should detect the overflow
     const result = ctx.sign(&msg);
     try std.testing.expectError(error.ArcountOverflow, result);
+}
+
+test "SEC-AUDIT-03: buildTsigVariables uses actual error and other_data" {
+    // Regression test: buildTsigVariables must include the actual error code
+    // and other_data from the TSIG record, not hardcoded zeros.  When these
+    // fields differ, the MAC input -- and thus the MAC -- must differ.
+    const allocator = std.testing.allocator;
+
+    const key = TsigKey.init("test-key.example.com", .hmac_sha256, &[_]u8{0} ** 32);
+    var ctx = TsigContext.initNoWarn(allocator, key);
+
+    const time_signed: u48 = 1700000000;
+
+    // Build TSIG variables with error=0, other_data=empty (signing path)
+    const vars_zero = try ctx.buildTsigVariables(time_signed, null, 0, &.{});
+    defer allocator.free(vars_zero);
+
+    // Build TSIG variables with error=18 (BADTIME), other_data=6 bytes of server time
+    const other_data = [_]u8{ 0x00, 0x00, 0x65, 0x54, 0xF8, 0x00 };
+    const vars_nonzero = try ctx.buildTsigVariables(time_signed, null, 18, &other_data);
+    defer allocator.free(vars_nonzero);
+
+    // They must NOT be equal -- different error/other_data must change the output
+    try std.testing.expect(!std.mem.eql(u8, vars_zero, vars_nonzero));
+
+    // Verify the non-zero variant is longer (it includes other_data bytes)
+    try std.testing.expect(vars_nonzero.len > vars_zero.len);
+
+    // Verify the last bytes of the non-zero variant contain the other_data
+    const tail = vars_nonzero[vars_nonzero.len - other_data.len ..];
+    try std.testing.expectEqualSlices(u8, &other_data, tail);
 }

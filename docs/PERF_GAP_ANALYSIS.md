@@ -1,6 +1,6 @@
 # Performance Gap Analysis
 
-Last updated: 2026-03-24 (Round 4 gap closure: PF-24-dual-cache, PF-22-prefetch, PF-NEW-21, PF-NEW-30 resolved; PF-23-spice blocked; PF-13, PF-16, PF-10, PF-NEW-28 won't do)
+Last updated: 2026-03-25 (Full audit: no new performance findings. Status inconsistencies corrected. 46 Resolved, 22 Won't Do, 1 Blocked.)
 
 ## Summary
 
@@ -136,12 +136,12 @@ Remaining items by priority (after deep audit; Won't-Do items classified):
 | 1 | P0 | 400 | PF-18: No benchmarks or perf regression CI | N/A | No bench/ directory, no benchmark CI stage | Cannot detect regressions; blocks all optimization validation | [#125](https://gitlab.com/devnw/zig/dns/-/issues/125) | Add bench/ suite + CI stage with regression detection | Core maintainer | Immediate | **Won't Do** |
 | 2 | P1 | 324 | PF-24-dual-cache: Two cache impls; hot path uses slower O(n) one | `src/cache.zig`, `src/resolver/dns_cache.zig` | client.zig and recursive.zig now import `dns_cache` (O(1) LRU HashMap); packed multi-record rdata support added | O(1) amortized lookups | -- | Migrated recursive/client resolvers from Cache to DnsCache with PackedRdataIterator | Core maintainer | Sprint | **Resolved** |
 | 3 | P1 | 252 | PF-03b: Sequential server dispatch in queryWithRetry | `src/recursive.zig:489-508` | `for (servers[0..max_tries])` loop sends queries one at a time | Latency = sum of timeouts | -- | Won't Do: requires transport architecture rework | Core maintainer | Sprint | **Won't Do** |
-| 4 | P1 | 189 | PF-02: O(n) linear-scan cache, O(1) DnsCache unused | `src/cache.zig:166-231` | Linear for-loop over entries[0..count]; confirmed n=1000 default `max_entries` | ~50-100us at n=1000 vs <1us with hash map | [#87](https://gitlab.com/devnw/zig/dns/-/issues/87) | Migrate to DnsCache (LRU HashMap) | Core maintainer | Sprint | Deferred |
-| 5 | P1 | 160 | PF-03: New UDP socket per query (5 syscalls) | `src/stub.zig:199-205`, `src/recursive.zig:518-524`, `src/transports/udp.zig:39-44` | `socket()`+`setsockopt()`+`sendto()`+`recvfrom()`+`close()` per query, confirmed in all three locations | ~5-10us overhead/query | [#90](https://gitlab.com/devnw/zig/dns/-/issues/90) | Wire existing ConnectionPool into resolvers | Core maintainer | Sprint | Deferred |
-| 6 | P1 | 112 | PF-05: No per-query arena allocator | `src/recursive.zig`, `src/stub.zig`, `src/client.zig` | ~41 individual alloc/free per resolution traced in Phase 3 audit | ~1-12us GPA, ~80-240us page_alloc per alloc | [#96](https://gitlab.com/devnw/zig/dns/-/issues/96) | ArenaAllocator per resolve() call | Core maintainer | Sprint | Deferred |
+| 4 | P1 | 189 | PF-02: O(n) linear-scan cache, O(1) DnsCache unused | `src/cache.zig:166-231` | Linear for-loop over entries[0..count]; confirmed n=1000 default `max_entries` | ~50-100us at n=1000 vs <1us with hash map | [#87](https://gitlab.com/devnw/zig/dns/-/issues/87) | Won't Do: subsumed by PF-24-dual-cache migration | Core maintainer | Sprint | **Won't Do** |
+| 5 | P1 | 160 | PF-03: New UDP socket per query (5 syscalls) | `src/stub.zig:199-205`, `src/recursive.zig:518-524`, `src/transports/udp.zig:39-44` | `socket()`+`setsockopt()`+`sendto()`+`recvfrom()`+`close()` per query, confirmed in all three locations | ~5-10us overhead/query | [#90](https://gitlab.com/devnw/zig/dns/-/issues/90) | Won't Do: requires transport architecture rework | Core maintainer | Sprint | **Won't Do** |
+| 6 | P1 | 112 | PF-05: No per-query arena allocator | `src/recursive.zig`, `src/stub.zig`, `src/client.zig` | ~41 individual alloc/free per resolution traced in Phase 3 audit | ~1-12us GPA, ~80-240us page_alloc per alloc | [#96](https://gitlab.com/devnw/zig/dns/-/issues/96) | Won't Do: large architectural change | Core maintainer | Sprint | **Won't Do** |
 | 7 | P0 | 100 | PF-01: Name.eql() uses page_allocator | `src/name.zig:254-263` | `std.heap.page_allocator` in eql(); 2 mmap+munmap per call | ~16us/call vs ~50ns optimal | [#82](https://gitlab.com/devnw/zig/dns/-/issues/82) | Label-by-label comparison, zero allocation | Core maintainer | Immediate | **Resolved** |
 | 8 | P1 | 87.5 | PF-02b-evict: evictExpired O(n) on every put at capacity | `src/cache.zig:119-121`, `src/cache.zig:205-217` | `evictExpired(now)` called on every `put()` | O(n) scan per insert at capacity | -- | Won't Do: subsumed by cache migration | Core maintainer | Sprint | **Won't Do** |
-| 9 | P2 | 81 | PF-14: Cache has no thread safety | `src/cache.zig` | No Mutex/RwLock in cache module | Data races under concurrency; correctness prerequisite for PF-13 | [#118](https://gitlab.com/devnw/zig/dns/-/issues/118) | Add RwLock; prerequisite for PF-13 | Core maintainer | Quarter | Deferred |
+| 9 | P2 | 81 | PF-14: Cache has no thread safety | `src/cache.zig` | No Mutex/RwLock in cache module | Data races under concurrency; correctness prerequisite for PF-13 | [#118](https://gitlab.com/devnw/zig/dns/-/issues/118) | Won't Do: requires architecture redesign; cache documented as single-threaded-only | Core maintainer | Quarter | **Won't Do** |
 | 10 | P1 | 72 | PF-21: DnsCache.get heap-allocates key via allocPrint on every lookup | `src/resolver/dns_cache.zig:134-146` | get() uses makeKeyBuf with stack buffer; falls back to allocPrint only for oversized names | Zero heap allocs on hot path | [#145](https://gitlab.com/devnw/zig/dns/-/issues/145) | Stack buffer via makeKeyBuf + bufPrint in get() | Core maintainer | Sprint | **Resolved** |
 | 11 | P1 | 64 | PF-04: O(ns*additional) in extractReferral | `src/recursive.zig:570-661` | Single-pass: additional() iterated once, glue collected in ArrayList | O(ns+additional) | [#93](https://gitlab.com/devnw/zig/dns/-/issues/93) | Single-pass additional collection + linear lookup | Core maintainer | Sprint | **Resolved** |
 | 12 | P1 | 64 | PF-24: Name.toString allocates ArrayList with no pre-alloc | `src/name.zig:213-264` | ArrayList starts empty, ~8 re-allocs per typical name; no ensureTotalCapacity | ~3-5 re-allocs per name | [#155](https://gitlab.com/devnw/zig/dns/-/issues/155) | Added toStringBuf variant (stack buffer); zero-allocation name formatting | Core maintainer | Sprint | **Resolved** |
@@ -206,8 +206,8 @@ Remaining items by priority (after deep audit; Won't-Do items classified):
 | ID | PerfSeverity | PerfScore | Finding | Issue | Status |
 |---|---|---|---|---|---|
 | PF-03b | P1 | 252 | Sequential server dispatch in queryWithRetry | -- | **Won't Do** |
-| PF-03 | P1 | 160 | Socket per query (5 syscalls) | [#90](https://gitlab.com/devnw/zig/dns/-/issues/90) | Deferred |
-| PF-05 | P1 | 112 | No arena allocator (~41 alloc/free per resolution) | [#96](https://gitlab.com/devnw/zig/dns/-/issues/96) | Deferred |
+| PF-03 | P1 | 160 | Socket per query (5 syscalls) | [#90](https://gitlab.com/devnw/zig/dns/-/issues/90) | **Won't Do** |
+| PF-05 | P1 | 112 | No arena allocator (~41 alloc/free per resolution) | [#96](https://gitlab.com/devnw/zig/dns/-/issues/96) | **Won't Do** |
 | PF-01 | P0 | 100 | Name.eql() page_allocator | [#82](https://gitlab.com/devnw/zig/dns/-/issues/82) | **Resolved** |
 | PF-04 | P1 | 64 | extractReferral quadratic | [#93](https://gitlab.com/devnw/zig/dns/-/issues/93) | **Resolved** |
 | PF-24 | P1 | 64 | Name.toString no pre-alloc | [#155](https://gitlab.com/devnw/zig/dns/-/issues/155) | **Resolved** |
@@ -259,9 +259,9 @@ Remaining items by priority (after deep audit; Won't-Do items classified):
 | ID | PerfSeverity | PerfScore | Finding | Issue | Status |
 |---|---|---|---|---|---|
 | PF-24-dual-cache | P1 | 324 | Two cache impls; hot path uses slower O(n) one | -- | **Resolved** |
-| PF-02 | P1 | 189 | O(n) linear cache (n=1000 default) | [#87](https://gitlab.com/devnw/zig/dns/-/issues/87) | Deferred |
+| PF-02 | P1 | 189 | O(n) linear cache (n=1000 default) | [#87](https://gitlab.com/devnw/zig/dns/-/issues/87) | **Won't Do** |
 | PF-02b-evict | P1 | 87.5 | evictExpired O(n) on every put at capacity | -- | **Won't Do** |
-| PF-14 | P2 | 81 | No cache thread safety (correctness) | [#118](https://gitlab.com/devnw/zig/dns/-/issues/118) | Deferred |
+| PF-14 | P2 | 81 | No cache thread safety (correctness) | [#118](https://gitlab.com/devnw/zig/dns/-/issues/118) | **Won't Do** |
 | PF-21 | P1 | 72 | DnsCache.get key alloc per lookup | [#145](https://gitlab.com/devnw/zig/dns/-/issues/145) | **Resolved** |
 | PF-02b | P1 | 48 | Cache.get non-contiguous slice | [#171](https://gitlab.com/devnw/zig/dns/-/issues/171) | **Resolved** |
 | PF-22-prefetch | P2 | 42 | Cache prefetching not wired into hot path | -- | **Resolved** |

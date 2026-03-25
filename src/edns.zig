@@ -23,6 +23,8 @@ pub const OptionCode = enum(u16) {
     tcp_keepalive = 11,
     /// RFC 7830: DNS Padding
     padding = 12,
+    /// RFC 8145: Key Tag Signaling
+    key_tag = 14,
     /// RFC 8914: Extended DNS Errors
     extended_error = 15,
 
@@ -233,7 +235,11 @@ pub const OptionIterator = struct {
     }
 };
 
-/// Build an EDNS option
+/// Build a complete EDNS option from an option code and encoded payload.
+///
+/// Serializes the 4-byte header (option code + data length) followed by the
+/// payload data. This is the shared helper that all EDNS option types delegate
+/// to from their `buildOption` methods (QA-AUDIT-07).
 pub fn buildOption(allocator: std.mem.Allocator, code: OptionCode, data: []const u8) ![]u8 {
     // SECURITY (SEC-NEW-05): Validate data length fits in u16 before cast
     if (data.len > std.math.maxInt(u16)) return error.OptionsTooLarge;
@@ -243,6 +249,10 @@ pub fn buildOption(allocator: std.mem.Allocator, code: OptionCode, data: []const
     @memcpy(result[4..], data);
     return result;
 }
+
+/// Private alias for the module-level buildOption, usable from within structs
+/// whose methods share the same `buildOption` name (QA-AUDIT-07).
+const serializeEdnsOption = buildOption;
 
 // =========================================================================
 // RFC 7871: Client Subnet in DNS Queries (EDNS Client Subnet / ECS)
@@ -314,21 +324,12 @@ pub const ClientSubnet = struct {
         return result;
     }
 
-    /// Build complete EDNS option (with option code and length)
+    /// Build complete EDNS option (with option code and length).
+    /// Delegates to the shared serializeEdnsOption helper (QA-AUDIT-07).
     pub fn buildOption(self: Self, allocator: std.mem.Allocator) ![]u8 {
         const data = try self.encode(allocator);
         defer allocator.free(data);
-
-        // SECURITY (SEC-NEW-05): Validate data length fits in u16 before cast
-        if (data.len > std.math.maxInt(u16)) {
-            return error.OptionsTooLarge;
-        }
-        const result = try allocator.alloc(u8, 4 + data.len);
-        std.mem.writeInt(u16, result[0..2], OptionCode.client_subnet.toInt(), .big);
-        std.mem.writeInt(u16, result[2..4], @intCast(data.len), .big);
-        @memcpy(result[4..], data);
-
-        return result;
+        return serializeEdnsOption(allocator, .client_subnet, data);
     }
 
     /// Create Client Subnet for IPv4 address
@@ -418,17 +419,12 @@ pub const Cookie = struct {
         return result;
     }
 
-    /// Build complete EDNS option (with option code and length)
+    /// Build complete EDNS option (with option code and length).
+    /// Delegates to the shared serializeEdnsOption helper (QA-AUDIT-07).
     pub fn buildOption(self: Self, allocator: std.mem.Allocator) ![]u8 {
         const data = try self.encode(allocator);
         defer allocator.free(data);
-
-        const result = try allocator.alloc(u8, 4 + data.len);
-        std.mem.writeInt(u16, result[0..2], OptionCode.cookie.toInt(), .big);
-        std.mem.writeInt(u16, result[2..4], @intCast(data.len), .big);
-        @memcpy(result[4..], data);
-
-        return result;
+        return serializeEdnsOption(allocator, .cookie, data);
     }
 
     /// Generate a new client cookie using random bytes
@@ -512,17 +508,12 @@ pub const TcpKeepalive = struct {
         }
     }
 
-    /// Build complete EDNS option (with option code and length)
+    /// Build complete EDNS option (with option code and length).
+    /// Delegates to the shared serializeEdnsOption helper (QA-AUDIT-07).
     pub fn buildOption(self: Self, allocator: std.mem.Allocator) ![]u8 {
         const data = try self.encode(allocator);
         defer allocator.free(data);
-
-        const result = try allocator.alloc(u8, 4 + data.len);
-        std.mem.writeInt(u16, result[0..2], OptionCode.tcp_keepalive.toInt(), .big);
-        std.mem.writeInt(u16, result[2..4], @intCast(data.len), .big);
-        @memcpy(result[4..], data);
-
-        return result;
+        return serializeEdnsOption(allocator, .tcp_keepalive, data);
     }
 
     /// Get timeout in seconds (from 100ms units)
@@ -569,17 +560,12 @@ pub const Padding = struct {
         return result;
     }
 
-    /// Build complete EDNS option (with option code and length)
+    /// Build complete EDNS option (with option code and length).
+    /// Delegates to the shared serializeEdnsOption helper (QA-AUDIT-07).
     pub fn buildOption(self: Self, allocator: std.mem.Allocator) ![]u8 {
         const data = try self.encode(allocator);
         defer allocator.free(data);
-
-        const result = try allocator.alloc(u8, 4 + data.len);
-        std.mem.writeInt(u16, result[0..2], OptionCode.padding.toInt(), .big);
-        std.mem.writeInt(u16, result[2..4], @intCast(data.len), .big);
-        @memcpy(result[4..], data);
-
-        return result;
+        return serializeEdnsOption(allocator, .padding, data);
     }
 
     /// Calculate padding needed to reach a target message size
@@ -653,17 +639,12 @@ pub const ExtendedError = struct {
         return result;
     }
 
-    /// Build complete EDNS option (with option code and length)
+    /// Build complete EDNS option (with option code and length).
+    /// Delegates to the shared serializeEdnsOption helper (QA-AUDIT-07).
     pub fn buildOption(self: Self, allocator: std.mem.Allocator) ![]u8 {
         const data = try self.encode(allocator);
         defer allocator.free(data);
-
-        const result = try allocator.alloc(u8, 4 + data.len);
-        std.mem.writeInt(u16, result[0..2], OptionCode.extended_error.toInt(), .big);
-        std.mem.writeInt(u16, result[2..4], @intCast(data.len), .big);
-        @memcpy(result[4..], data);
-
-        return result;
+        return serializeEdnsOption(allocator, .extended_error, data);
     }
 
     /// Create error with optional text
@@ -756,19 +737,12 @@ pub const KeyTag = struct {
         return result;
     }
 
-    /// Build complete EDNS option (with option code and length)
+    /// Build complete EDNS option (with option code and length).
+    /// Delegates to the shared serializeEdnsOption helper (QA-AUDIT-07).
     pub fn buildOption(self: Self, allocator: std.mem.Allocator) ![]u8 {
         const data = try self.encode(allocator);
         defer allocator.free(data);
-
-        // Option code for Key Tag is 14
-        const key_tag_code: u16 = 14;
-        const result = try allocator.alloc(u8, 4 + data.len);
-        std.mem.writeInt(u16, result[0..2], key_tag_code, .big);
-        std.mem.writeInt(u16, result[2..4], @intCast(data.len), .big);
-        @memcpy(result[4..], data);
-
-        return result;
+        return serializeEdnsOption(allocator, .key_tag, data);
     }
 
     /// Create from a slice of key tags

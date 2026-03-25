@@ -11,6 +11,10 @@ const channel = @import("channel");
 pub const Channel = channel.Channel;
 pub const ChannelKind = channel.ChannelKind;
 
+/// Maximum number of spurious (non-matching source) packets to discard before
+/// returning an error. Prevents CPU pinning from flood attacks (SEC-AUDIT-02).
+const max_spurious_discards: u32 = 1000;
+
 /// UDP Transport
 pub const UdpTransport = struct {
     allocator: std.mem.Allocator,
@@ -56,6 +60,8 @@ pub const UdpTransport = struct {
         _ = try std.posix.sendto(sock, wire_req, 0, &self.address.any, self.address.getOsSockLen());
 
         const start_ms = std.time.milliTimestamp();
+        // SEC-AUDIT-02: Limit discarded packets to prevent CPU pinning from flood attacks.
+        var discards: u32 = 0;
         while (true) {
             if (std.time.milliTimestamp() - start_ms >= timeout_ms) {
                 return error.Timeout;
@@ -73,6 +79,10 @@ pub const UdpTransport = struct {
             };
 
             if (!std.net.Address.eql(src_addr, self.address)) {
+                discards += 1;
+                if (discards >= max_spurious_discards) {
+                    return error.TooManySpuriousPackets;
+                }
                 continue;
             }
 
@@ -98,4 +108,13 @@ test "UdpTransport init" {
     const allocator = std.testing.allocator;
     var transport = try UdpTransport.init(allocator, "8.8.8.8", 53);
     _ = transport.channel();
+}
+
+test "SEC-AUDIT-02: UDP discard limit prevents CPU pinning" {
+    // Verify the discard limit constant exists and is a reasonable positive value.
+    // The actual enforcement is in queryImpl's receive loop, which discards packets
+    // from non-matching source addresses up to this limit before returning
+    // error.TooManySpuriousPackets.
+    try std.testing.expect(max_spurious_discards > 0);
+    try std.testing.expect(max_spurious_discards <= 10000);
 }

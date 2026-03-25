@@ -1,6 +1,6 @@
 # Gap Analysis -- Resolved
 
-Last updated: 2026-03-24 (Round 4 gap closure: 5 resolved, 1 blocked, 8 won't do -- PF-24-dual-cache, PF-22-prefetch, PF-NEW-21, PF-NEW-30, QH-05 resolved; PF-23-spice blocked; PF-13, PF-16, PF-10, PF-NEW-28, TC-01, QM-03, QL-03, QL-09 won't do)
+Last updated: 2026-03-25 (Full audit closure: GAP-0057 through GAP-0063 resolved -- 7 items from security+quality audit all closed)
 
 Items below were identified in prior gap analyses and verified as resolved. They are listed here for audit trail purposes.
 
@@ -1138,6 +1138,54 @@ The following 9 GitLab issues were previously in "Unknown" status and have been 
 ### PF-13 / PF-16 / PF-10 / PF-NEW-28: Performance won't-do items [WON'T DO]
 - **Category:** Performance (various)
 - **Reason:** PF-13 requires PF-14 thread safety. PF-16 already uses OS CSPRNG. PF-10 remaining sites return heap-owned strings. PF-NEW-28 is <1ns.
+
+---
+
+## Full Audit Closure (2026-03-25)
+
+The following 7 items were identified in the 2026-03-25 full security and quality audit, and have all been resolved.
+
+### GAP-0057 / QA-AUDIT-01: DNSSEC validation module compile-time API mismatches [RESOLVED]
+- **Category:** Bug (Critical)
+- **Resolution:** 11 code fixes in `dnssec.zig`: updated all `parseNSEC()`/`parseRRSIG()` call sites to pass `full_message` argument; fixed `next_name` to `next_domain`; replaced `[]const u8` with `Name` struct comparisons via `Name.toStringBuf`/`Name.eql`; replaced `std.mem.eql` on `Name` structs. DNSSEC module now compiles and passes integration tests.
+- **Evidence:** `src/resolver/dnssec.zig` -- 11 call site fixes; 7 new integration tests; all 479 tests pass
+- **Resolved date:** 2026-03-25
+
+### GAP-0058 / SEC-AUDIT-01: LabelIterator first compression pointer hop skips forward check [RESOLVED]
+- **Category:** Security (High, CWE-835)
+- **Resolution:** Forward pointer check added on first hop in `LabelIterator.next()`. When `last_ptr_target` is null, `ptr_offset` is validated against the current name offset to ensure backward-only pointers, preventing attacker-controlled data reads.
+- **Evidence:** `src/name.zig:107-114` -- forward pointer check on first hop; 1 new test
+- **Resolved date:** 2026-03-25
+
+### GAP-0059 / SEC-AUDIT-02: UDP receive loops lack packet discard count limit [RESOLVED]
+- **Category:** Security (Medium, CWE-400)
+- **Resolution:** Added `max_spurious_discards = 1000` counter to all three UDP receive loop implementations. Returns `error.TooManySpuriousPackets` when discard limit exceeded, preventing CPU DoS from spoofed packet floods.
+- **Evidence:** `src/stub.zig:87`, `src/recursive.zig:130`, `src/transports/udp.zig:16` -- max_spurious_discards constant; 3 new tests
+- **Resolved date:** 2026-03-25
+
+### GAP-0060 / QA-AUDIT-02: Client.resolve() silent failure for non-A/AAAA queries [RESOLVED]
+- **Category:** Bug (Medium)
+- **Resolution:** Added `error.UnsupportedRecordType` guard for non-A/AAAA queries in `Client.resolve()`. Callers now receive an explicit error instead of a silent `NoAnswer` when querying unsupported record types.
+- **Evidence:** `src/client.zig:169-171` -- error.UnsupportedRecordType guard; 1 new test
+- **Resolved date:** 2026-03-25
+
+### GAP-0061 / SEC-AUDIT-03: TSIG MAC recomputation hardcodes error/other fields to zero [RESOLVED]
+- **Category:** Security (Medium, CWE-345)
+- **Resolution:** `buildTsigVariables` parameterized with `error_code` and `other_data` parameters. `verify()` now passes actual wire values from the received TSIG record instead of hardcoded zeros, per RFC 2845 Section 3.4.2.
+- **Evidence:** `src/security/tsig.zig` -- buildTsigVariables parameterized with error_code/other_data; verify() passes wire values; 1 new test
+- **Resolved date:** 2026-03-25
+
+### GAP-0062 / SEC-AUDIT-04: SIG(0) sign() u32 expiration addition can overflow [RESOLVED]
+- **Category:** Security (Medium, CWE-190)
+- **Resolution:** Replaced unchecked `now + self.validity_seconds` with `std.math.add(u32, now, self.validity_seconds) catch return error.TimestampOverflow`. Prevents signature expiration from wrapping around to precede inception.
+- **Evidence:** `src/security/sig0.zig:308-309` -- std.math.add with error.TimestampOverflow; 1 new test
+- **Resolved date:** 2026-03-25
+
+### GAP-0063 / SEC-AUDIT-05: NSEC NODATA validation uses case-sensitive name comparison [RESOLVED]
+- **Category:** Security (Medium, CWE-178)
+- **Resolution:** Replaced `std.mem.eql` with `std.ascii.eqlIgnoreCase` for DNS name comparison in NSEC NODATA validation, per RFC 4343 case-insensitive DNS name matching requirement. Unblocked by GAP-0057 fix (DNSSEC module now compiles).
+- **Evidence:** `src/resolver/dnssec.zig:245` -- std.ascii.eqlIgnoreCase; 1 new test
+- **Resolved date:** 2026-03-25
 
 ---
 

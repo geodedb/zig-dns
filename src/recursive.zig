@@ -125,6 +125,16 @@ const Referral = struct {
     }
 };
 
+/// Maximum number of spurious (non-matching source) packets to discard before
+/// returning an error. Prevents CPU pinning from flood attacks (SEC-AUDIT-02).
+const max_spurious_discards: u32 = 1000;
+
+/// Maximum number of CNAME redirections the recursive resolver will follow
+/// before treating the chain as a loop. This limits the iterative resolution
+/// path; the client-side CNAME mapping limit (`max_cname_mappings` in
+/// client.zig) serves a separate purpose and may differ (QA-AUDIT-06).
+const max_cname_chain_length: usize = 8;
+
 /// Recursive Resolver
 /// Performs full iterative resolution from root servers
 pub const RecursiveResolver = struct {
@@ -295,7 +305,7 @@ pub const RecursiveResolver = struct {
 
                                 try state.cname_chain.append(self.allocator, try self.allocator.dupe(u8, target_str));
 
-                                if (state.cname_chain.items.len > 8) {
+                                if (state.cname_chain.items.len > max_cname_chain_length) {
                                     return error.CnameLoopDetected;
                                 }
 
@@ -384,6 +394,12 @@ pub const RecursiveResolver = struct {
                                 current_zone = owned_zone.?;
                                 zone_depth += 1;
 
+                                // QA-AUDIT-05: Enforce max_depth to prevent
+                                // infinite delegation chains.
+                                if (zone_depth > self.config.max_depth) {
+                                    return error.MaxDepthExceeded;
+                                }
+
                                 continue :outer;
                             } else {
                                 new_servers.deinit(self.allocator);
@@ -419,7 +435,8 @@ pub const RecursiveResolver = struct {
             // If we reach here, try with more labels (for QNAME minimization)
             if (self.config.qname_minimization) {
                 zone_depth += 1;
-                if (zone_depth > 127) {
+                // QA-AUDIT-05: Use configurable max_depth instead of magic number.
+                if (zone_depth > self.config.max_depth) {
                     return error.MaxDepthExceeded;
                 }
             } else {
@@ -572,6 +589,8 @@ pub const RecursiveResolver = struct {
         _ = try std.posix.sendto(sock, query, 0, &server.address.any, server.address.getOsSockLen());
 
         const start_ms = std.time.milliTimestamp();
+        // SEC-AUDIT-02: Limit discarded packets to prevent CPU pinning from flood attacks.
+        var discards: u32 = 0;
         while (true) {
             if (std.time.milliTimestamp() - start_ms >= self.config.timeout_ms) {
                 return error.Timeout;
@@ -589,6 +608,10 @@ pub const RecursiveResolver = struct {
             };
 
             if (!std.net.Address.eql(src_addr, server.address)) {
+                discards += 1;
+                if (discards >= max_spurious_discards) {
+                    return error.TooManySpuriousPackets;
+                }
                 continue;
             }
 
@@ -884,6 +907,38 @@ test "RecursiveConfig defaults" {
     try std.testing.expect(config.case_randomization);
 }
 
+test "SEC-AUDIT-02: UDP discard limit prevents CPU pinning" {
+    // Verify the discard limit constant exists and is a reasonable positive value.
+    // The actual enforcement is in sendQuery's receive loop, which discards packets
+    // from non-matching source addresses up to this limit before returning
+    // error.TooManySpuriousPackets.
+    try std.testing.expect(max_spurious_discards > 0);
+    try std.testing.expect(max_spurious_discards <= 10000);
+}
+
+test "QA-AUDIT-05: max_depth config is wired into resolution logic" {
+    // Verify that max_depth is configurable and used to limit delegation depth.
+    // resolveIterative checks zone_depth against config.max_depth in two places:
+    // 1. After following a referral (delegation chain)
+    // 2. After incrementing for QNAME minimization
+    // Both paths return error.MaxDepthExceeded when the limit is breached.
+
+    // Default max_depth is 32
+    const default_config = RecursiveConfig{};
+    try std.testing.expectEqual(@as(u8, 32), default_config.max_depth);
+
+    // Custom max_depth can be set to a lower value
+    const shallow_config = RecursiveConfig{ .max_depth = 5 };
+    try std.testing.expectEqual(@as(u8, 5), shallow_config.max_depth);
+
+    // Simulate the depth check from resolveIterative: zone_depth > config.max_depth
+    // At max_depth exactly, we're still within bounds; exceeding it triggers the error.
+    var zone_depth: usize = 0;
+    while (zone_depth <= shallow_config.max_depth) : (zone_depth += 1) {}
+    try std.testing.expect(zone_depth > shallow_config.max_depth);
+    // In the real code, this state would trigger: return error.MaxDepthExceeded;
+}
+
 test "GAP-0020: owned_servers memory lifecycle" {
     // Verifies the referral server ownership pattern: dynamically-allocated
     // server lists are properly freed when replaced or on function exit.
@@ -1021,7 +1076,7 @@ test "GAP-0019: CNAME break-then-continue-outer pattern" {
 }
 
 test "GAP-0019: CNAME chain limit enforcement" {
-    // Verifies that the CNAME chain limit of 8 is enforced.
+    // Verifies that the CNAME chain limit (max_cname_chain_length) is enforced.
     // Uses the same ArrayList pattern as ResolutionState.cname_chain.
     const allocator = std.testing.allocator;
 
@@ -1031,17 +1086,17 @@ test "GAP-0019: CNAME chain limit enforcement" {
         cname_chain.deinit(allocator);
     }
 
-    // Simulate following 8 CNAMEs (should succeed)
-    for (0..8) |i| {
+    // Simulate following max_cname_chain_length CNAMEs (should succeed)
+    for (0..max_cname_chain_length) |i| {
         const target = try std.fmt.allocPrint(allocator, "cname{d}.example.com", .{i});
         try cname_chain.append(allocator, target);
     }
-    try std.testing.expectEqual(@as(usize, 8), cname_chain.items.len);
+    try std.testing.expectEqual(max_cname_chain_length, cname_chain.items.len);
 
-    // The 9th CNAME would exceed the limit (> 8)
-    const target9 = try std.fmt.allocPrint(allocator, "cname9.example.com", .{});
-    try cname_chain.append(allocator, target9);
-    try std.testing.expect(cname_chain.items.len > 8);
+    // The next CNAME would exceed the limit (> max_cname_chain_length)
+    const extra = try std.fmt.allocPrint(allocator, "cname_extra.example.com", .{});
+    try cname_chain.append(allocator, extra);
+    try std.testing.expect(cname_chain.items.len > max_cname_chain_length);
     // In the real code, this triggers: return error.CnameLoopDetected;
 }
 

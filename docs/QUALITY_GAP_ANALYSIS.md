@@ -1,17 +1,17 @@
 # Quality Gap Analysis
 
-Last updated: 2026-03-24 (Round 4 gap closure -- QH-05 resolved; TC-01, QM-03 won't do; QL-03, QL-09 won't do)
+Last updated: 2026-03-25 (All 7 quality findings from full audit now resolved. QA-AUDIT-01 through QA-AUDIT-07 closed.)
 
 ## Summary
 
 | Severity | Open (incl. Deferred) | Resolved/Closed | Won't Do | Total |
 |----------|----------------------|-----------------|----------|-------|
-| Critical | 0 | 4 | 0 | 4 |
-| High | 0 | 13 | 2 | 15 |
-| Medium | 4 | 22 | 6 | 32 |
+| Critical | 0 | 5 | 0 | 5 |
+| High | 0 | 14 | 2 | 16 |
+| Medium | 0 | 27 | 6 | 33 |
 | Low | 0 | 12 | 5 | 17 |
 | Info | 0 | 6 | 0 | 6 |
-| **Total** | **4** | **57** | **13** | **74** |
+| **Total** | **0** | **64** | **13** | **77** |
 
 ### Top Active Risks (after Round 3 closure)
 
@@ -103,10 +103,17 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | -- | DG-04 | Info | -- | docs | rdataOffset invariant only documented in code comment, not in public API doc | record.zig | `src/record.zig` -- `///` doc added to ResourceRecord explaining rdata aliasing | -- | Added public API doc explaining rdata slices alias into original message buffer | record.zig maintainer | S | **Resolved** |
 | -- | DG-05 | Info | -- | docs | getMinimizedQname has no doc comment (RFC 9156) | recursive.zig | `src/recursive.zig` -- doc comment added referencing RFC 9156 | -- | Added doc comment referencing RFC 9156 and depth-based label minimization | Resolver maintainer | S | **Resolved** |
 | -- | DG-06 | Info | -- | docs | Cache formatting logic in resolve() has no comment explaining supported types | client.zig | `src/client.zig` -- comment added; QM-NEW-03 resolved (9 types now supported) | -- | Comment added; all cacheable types now formatted via `formatCachedRdata` | Client maintainer | S | **Resolved** |
+| 65 | QA-AUDIT-01 | Critical | 125 | architecture | DNSSEC validation module compile-time API mismatches: `parseNSEC`/`parseRRSIG` missing `full_message`, `Name` vs `[]const u8` type mismatches, `next_name` field doesn't exist | dnssec.zig | `src/resolver/dnssec.zig` -- 11 call site fixes; 7 new tests | -- | 11 code fixes; 7 new integration tests; all 479 tests pass (cross-ref GAP-0057) | Security/DNSSEC maintainer | L | **Resolved** |
+| 66 | QA-AUDIT-02 | Medium | 36 | api-contract | `Client.resolve()` silently returns `NoAnswer` for non-A/AAAA queries | client.zig | `src/client.zig:169-171` -- UnsupportedRecordType guard | -- | error.UnsupportedRecordType guard added; 1 new test (cross-ref GAP-0060) | Client maintainer | M | **Resolved** |
+| 67 | QA-AUDIT-03 | Medium | 36 | docs | `Zone.getRecords` misleading "not a copy" comment; heap-allocates with no free path | zone_file.zig | `src/zone_file.zig` -- doc comment fixed; return type ![]const ResourceRecord | -- | Doc comment corrected; return type clarified; 1 new test | Zone file maintainer | S | **Resolved** |
+| 68 | QA-AUDIT-04 | High | 48 | architecture | fd leak in happy_eyeballs.zig on OOM from `updateFamilyCache`: winning fd has `state=.connected` so `defer` cleanup skips it, but `try` propagates error before returning fd to caller | happy_eyeballs.zig | `src/transports/happy_eyeballs.zig:212` -- updateFamilyCache uses catch {} | -- | updateFamilyCache uses `catch {}` for best-effort cache update; fd not leaked on OOM; 1 new test | Transport maintainer | S | **Resolved** |
+| 69 | QA-AUDIT-05 | Medium | 24 | cleanup | `RecursiveConfig.max_depth` (default 32) defined and tested but never referenced in resolution logic -- dead config field | recursive.zig | `src/recursive.zig:399,439` -- max_depth wired into resolveIterative | -- | max_depth now wired into resolveIterative depth check; 1 new test | Resolver maintainer | S | **Resolved** |
+| 70 | QA-AUDIT-06 | Medium | 18 | readability | CNAME chain limit uses magic number `8` in recursive.zig; client.zig uses named `max_cname_mappings = 16` for its own limit | recursive.zig | `src/recursive.zig:136` -- max_cname_chain_length constant | -- | Extracted `max_cname_chain_length` named constant; existing test updated | Resolver maintainer | S | **Resolved** |
+| 71 | QA-AUDIT-07 | Medium | 16 | maintainability | `buildOption` method duplicated 6x across EDNS option types with identical 4-byte header + data serialization pattern | edns.zig | `src/edns.zig:255` -- serializeEdnsOption alias | -- | Extracted `serializeEdnsOption` shared helper; 6 buildOption methods delegate to it | edns.zig maintainer | S | **Resolved** |
 
 ## Findings by Category
 
-### Architecture (20 findings)
+### Architecture (21 findings)
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
@@ -130,6 +137,7 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | EH-11 | Medium | 18 | zdig TCP read loop silent truncation on connection close | [#194](https://gitlab.com/devnw/zig/dns/-/issues/194) | **Resolved** |
 | AC-03 | Medium | 18 | Cache-hit errdefer in resolve() -- errdefer fixed | -- | **Resolved** |
 | QS-NEW-05 | Medium | 18 | stub.zig OOM now propagated | -- | **Resolved** |
+| QA-AUDIT-04 | High | 48 | fd leak in happy_eyeballs.zig on OOM from updateFamilyCache -- catch {} for best-effort | -- | **Resolved** |
 
 ### API Contract (4 findings)
 
@@ -147,7 +155,7 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QH-04 | High | 64 | Name.eql() mmap syscalls | [#95](https://gitlab.com/devnw/zig/dns/-/issues/95) | **Resolved** |
 | QM-11 | Medium | 48 | PooledTcpTransport.query unnecessary connect per query | [#180](https://gitlab.com/devnw/zig/dns/-/issues/180) | **Resolved** |
 
-### Maintainability (12 findings)
+### Maintainability (13 findings)
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
@@ -163,27 +171,29 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | RM-07 | Medium | 24 | IPv4 formatting pattern repeated inline in 4+ places | -- | **Won't Do** |
 | QM-NEW-01 | Medium | 24 | Duplicate QueryType removed; uses types.Type | -- | **Resolved** |
 | QM-02 | **Resolved** | 24 | ~~Duplicated root server definitions~~ | [#106](https://gitlab.com/devnw/zig/dns/-/issues/106) | **Resolved** |
+| QA-AUDIT-07 | Medium | 16 | buildOption 6x duplication in edns.zig -- serializeEdnsOption extracted | -- | **Resolved** |
 
 ### Tests (6 findings)
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
-| QH-05 | High | 64 | Zero fuzz testing for wire parsers | [#98](https://gitlab.com/devnw/zig/dns/-/issues/98) | **Deferred** |
+| QH-05 | High | 64 | Zero fuzz testing for wire parsers | [#98](https://gitlab.com/devnw/zig/dns/-/issues/98) | **Resolved** |
 | QH-NEW-02 | High | 48 | resolveIterative (219 lines) has zero direct test coverage | -- | **Won't Do** |
-| TC-01 | Medium | 48 | resolveIterative zero integration test coverage (deep review confirmation of QH-NEW-02) | [#190](https://gitlab.com/devnw/zig/dns/-/issues/190) | Open |
+| TC-01 | Medium | 48 | resolveIterative zero integration test coverage (deep review confirmation of QH-NEW-02) | [#190](https://gitlab.com/devnw/zig/dns/-/issues/190) | **Won't Do** |
 | CI-04 | Medium | 30 | cmd/zdig.zig: 16 tests added for escapeJsonString and addressMatches | [#196](https://gitlab.com/devnw/zig/dns/-/issues/196) | **Resolved** |
 | QS-NEW-07 | Low | 12 | Client tests bail on network failure | -- | **Won't Do** |
 | QL-05 | **Resolved** | 16 | Mutable statics in MockTlsBackend | [#181](https://gitlab.com/devnw/zig/dns/-/issues/181) | **Resolved** |
 
-### Readability (5 findings)
+### Readability (6 findings)
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
-| QM-03 | Medium | 36 | resolveIterative 219 lines / 9 nesting levels (was 208) | [#109](https://gitlab.com/devnw/zig/dns/-/issues/109) | **Deferred** |
+| QM-03 | Medium | 36 | resolveIterative 219 lines / 9 nesting levels (was 208) | [#109](https://gitlab.com/devnw/zig/dns/-/issues/109) | **Won't Do** |
 | QL-07 | **Resolved** | 32 | ~~No zig fmt check in CI~~ | [#183](https://gitlab.com/devnw/zig/dns/-/issues/183) | **Resolved** |
-| QL-03 | Low | 16 | 12 files over 800 lines (was 9) | [#126](https://gitlab.com/devnw/zig/dns/-/issues/126) | **Deferred** |
-| QL-09 | Low | 16 | 41 functions exceed 50 lines (was 30) | [#185](https://gitlab.com/devnw/zig/dns/-/issues/185) | **Deferred** |
+| QL-03 | Low | 16 | 12 files over 800 lines (was 9) | [#126](https://gitlab.com/devnw/zig/dns/-/issues/126) | **Won't Do** |
+| QL-09 | Low | 16 | 41 functions exceed 50 lines (was 30) | [#185](https://gitlab.com/devnw/zig/dns/-/issues/185) | **Won't Do** |
 | QL-06 | **Resolved** | 12 | ~~Magic number 6 for SOA~~ | [#182](https://gitlab.com/devnw/zig/dns/-/issues/182) | **Resolved** |
+| QA-AUDIT-06 | Medium | 18 | CNAME chain limit magic number `8` -- max_cname_chain_length extracted | -- | **Resolved** |
 
 ### CI/CD (2 findings)
 
@@ -198,7 +208,7 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 |----|----------|---------------|---------|-------|--------|
 | QS-NEW-08 | Medium | 20 | Spice dependency pinned to main branch tarball | -- | **Won't Do** |
 
-### Cleanup (8 findings)
+### Cleanup (9 findings)
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
@@ -210,6 +220,7 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | QL-01 | **Resolved** | 12 | ~~7 identical @intFromPtr blocks~~ | [#121](https://gitlab.com/devnw/zig/dns/-/issues/121) | **Resolved** |
 | QL-02 | Low | 8 | verifyCase0x20 reimplements std.mem.eql | [#123](https://gitlab.com/devnw/zig/dns/-/issues/123) | **Resolved** |
 | QL-NEW-01 | **Resolved** | 8 | Duplicated testSocketPair in connection_pool.zig | -- | **Resolved** |
+| QA-AUDIT-05 | Medium | 24 | RecursiveConfig.max_depth wired into resolveIterative depth check | -- | **Resolved** |
 
 ### Documentation (13 findings)
 
@@ -301,7 +312,7 @@ New medium-term items from deep audit (2026-03-24):
 
 | ID | PriorityScore | Finding | Effort | Status |
 |----|---------------|---------|--------|--------|
-| TC-01 | 48 | Add mock transport + integration tests for resolveIterative (confirms QH-NEW-02) | L | Open |
+| TC-01 | 48 | Add mock transport + integration tests for resolveIterative (confirms QH-NEW-02) | L | **Won't Do** |
 | RD-01 | 30 | LabelIterator extracted; used by 5 functions in name.zig | M | **Resolved** |
 | CI-04 | 30 | 16 tests added for escapeJsonString and addressMatches | M | **Resolved** |
 | DOC-03 | 8 | Create module-level library user guide (docs/USAGE.md) | M | **Won't Do** |
@@ -331,12 +342,12 @@ Previously resolved or Won't Do medium-term items:
 
 ### Strategic (> 5 days) / Deferred
 
-| ID | PriorityScore | Finding | Reason |
-|----|---------------|---------|--------|
-| QH-05 | 64 | Fuzz testing | Requires fuzz infrastructure setup |
-| QM-03 | 36 | resolveIterative complexity (219 lines) | Bugs fixed; refactoring is lower risk but function keeps growing |
-| QL-03 | 16 | 12 files over 800 lines (was 9) | Risky refactor with low priority; trend is worsening |
-| QL-09 | 16 | 41 functions over 50 lines (was 30) | Large-scale refactoring effort; trend is worsening |
+| ID | PriorityScore | Finding | Reason | Status |
+|----|---------------|---------|--------|--------|
+| QH-05 | 64 | Fuzz testing | 7 fuzz targets added in `tests/fuzz_parsers.zig` | **Resolved** |
+| QM-03 | 36 | resolveIterative complexity (219 lines) | Large refactor risks critical path regressions | **Won't Do** |
+| QL-03 | 16 | 12 files over 800 lines (was 9) | High churn, low readability gain | **Won't Do** |
+| QL-09 | 16 | 41 functions over 50 lines (was 30) | Mechanical decomposition; needs lint gate | **Won't Do** |
 
 ## Related Issues (Pre-existing)
 
@@ -415,3 +426,14 @@ All Phase 2-3 findings tagged `confidence::confirmed` -- verified via direct cod
 | DOC-03 | 1 (onboarding friction) | 2 (library not yet widely distributed) | 8 | No getting-started guide for downstream consumers |
 
 All deep audit findings tagged `confidence::confirmed` -- verified via direct code inspection and source evidence.
+
+### Full Audit Score Breakdown (2026-03-25, second quality reviewer)
+
+| ID | Impact | Likelihood | PriorityScore | Rationale |
+|----|--------|------------|---------------|-----------|
+| QA-AUDIT-04 | 4 (fd leak on successful connection) | 3 (OOM during cache update is rare but possible under load) | 48 | Winning fd has state=.connected, so defer cleanup skips it; try propagates error before fd returned to caller |
+| QA-AUDIT-05 | 3 (dead config misleads users) | 2 (config is set but has no effect) | 24 | max_depth=32 is defined and tested but never read by resolution logic; users may believe they are configuring depth limits |
+| QA-AUDIT-06 | 3 (magic number, inconsistency) | 1.5 (CNAME chain limits rarely reviewed) | 18 | Magic `8` in recursive.zig vs named `max_cname_mappings=16` in client.zig; limits should be consistent and named |
+| QA-AUDIT-07 | 2 (code duplication) | 2 (EDNS options rarely change) | 16 | Six copies of identical 4-byte header + data serialization; any format change must be applied 6 times |
+
+All full audit findings tagged `confidence::confirmed` -- verified via direct code inspection.
