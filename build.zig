@@ -528,25 +528,30 @@ pub fn build(b: *std.Build) void {
     const is_windows = target_info.os.tag == .windows;
 
     // CLI Module (from external zig-cli library via dependency)
-    const cli_dep = b.dependency("cli", .{
-        .target = target,
-        .optimize = optimize,
-        .spice = false,
-    });
-    const cli_mod = cli_dep.module("cli");
+    const use_cli = b.option(bool, "cli", "Use internal cli dependency") orelse true;
+    const cli_mod: ?*std.Build.Module = if (use_cli) blk: {
+        const cli_dep = b.dependency("cli", .{
+            .target = target,
+            .optimize = optimize,
+            .spice = false,
+            .config = false,
+        });
+        break :blk cli_dep.module("cli");
+    } else null;
 
     if (!is_windows) {
+        const zdig_mod = b.createModule(.{
+            .root_source_file = b.path("cmd/zdig.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "dns", .module = dns_mod },
+            },
+        });
+        if (cli_mod) |m| zdig_mod.addImport("cli", m);
         const zdig_exe = b.addExecutable(.{
             .name = "zdig",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("cmd/zdig.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "dns", .module = dns_mod },
-                    .{ .name = "cli", .module = cli_mod },
-                },
-            }),
+            .root_module = zdig_mod,
         });
 
         // Install the executable
@@ -1243,16 +1248,17 @@ pub fn build(b: *std.Build) void {
     if (!is_windows) {
         const test_zdig_step = b.step("test-zdig", "Run zdig CLI unit tests");
 
+        const zdig_test_mod = b.createModule(.{
+            .root_source_file = b.path("cmd/zdig.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "dns", .module = dns_mod },
+            },
+        });
+        if (cli_mod) |m| zdig_test_mod.addImport("cli", m);
         const zdig_test = b.addTest(.{
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("cmd/zdig.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{
-                    .{ .name = "dns", .module = dns_mod },
-                    .{ .name = "cli", .module = cli_mod },
-                },
-            }),
+            .root_module = zdig_test_mod,
         });
         const run_zdig_test = b.addRunArtifact(zdig_test);
         test_zdig_step.dependOn(&run_zdig_test.step);
