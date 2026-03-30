@@ -18,7 +18,7 @@ pub const ChannelKind = channel.ChannelKind;
 pub const DoQOptions = channel.DoQOptions;
 
 // Feature gate
-const build_options = @import("build_options");
+const build_options = @import("dns_build_options");
 const feature_doq = if (@hasDecl(build_options, "feature_doq")) build_options.feature_doq else false;
 
 /// QUIC Backend Interface

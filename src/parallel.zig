@@ -48,7 +48,7 @@
 //! | Cache Prefetch      | 8 entries  | Yes              |
 
 const std = @import("std");
-const build_options = @import("build_options");
+const build_options = @import("dns_build_options");
 const record = @import("record");
 const message = @import("message");
 const ResourceRecord = record.ResourceRecord;

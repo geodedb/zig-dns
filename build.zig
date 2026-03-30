@@ -104,7 +104,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "build_options", .module = build_options_mod },
+            .{ .name = "dns_build_options", .module = build_options_mod },
             .{ .name = "record", .module = record_mod },
             .{ .name = "message", .module = message_mod },
         },
@@ -427,7 +427,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "channel", .module = channel_mod },
-            .{ .name = "build_options", .module = build_options_mod },
+            .{ .name = "dns_build_options", .module = build_options_mod },
         },
     });
 
@@ -1169,7 +1169,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "build_options", .module = build_options.createModule() },
+                .{ .name = "dns_build_options", .module = build_options.createModule() },
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "message", .module = message_mod },
             },
