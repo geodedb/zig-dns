@@ -16,9 +16,6 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "feature_doq", feature_doq);
-    build_options.addOption(bool, "enable_spice", enable_spice);
-
-    // Create a single shared build_options module to avoid duplication conflicts
     const build_options_mod = build_options.createModule();
 
     // Get spice dependency if enabled
@@ -99,19 +96,18 @@ pub fn build(b: *std.Build) void {
     });
 
     // Parallel module for spice-based parallelism (defined early for resolver deps)
-    const parallel_mod = b.addModule("parallel", .{
+    const parallel_mod: ?*std.Build.Module = if (enable_spice) blk: {
+        break :blk b.addModule("parallel", .{
         .root_source_file = b.path("src/parallel.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "dns_build_options", .module = build_options_mod },
             .{ .name = "record", .module = record_mod },
             .{ .name = "message", .module = message_mod },
         },
     });
-    if (spice_mod) |sm| {
-        parallel_mod.addImport("spice", sm);
-    }
+    } else null;
+    if (parallel_mod) |pm| { if (spice_mod) |sm| pm.addImport("spice", sm); }
 
     // Public API -- RFC 6891: Extension Mechanisms for DNS (EDNS0)
     // Extended DNS options and OPT record handling
@@ -278,7 +274,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/resolver/zone_transfer.zig"),
         .target = target,
         .imports = &.{
-            .{ .name = "parallel", .module = parallel_mod },
+            
         },
     });
 
@@ -289,7 +285,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "record", .module = record_mod },
             .{ .name = "name", .module = name_mod },
-            .{ .name = "parallel", .module = parallel_mod },
+            
             .{ .name = "types", .module = types_mod },
         },
     });
@@ -336,7 +332,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "types", .module = types_mod },
             .{ .name = "dns_cache", .module = dns_cache_mod },
             .{ .name = "clock", .module = clock_mod },
-            .{ .name = "parallel", .module = parallel_mod },
+            
         },
     });
 
@@ -473,7 +469,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "stub", .module = stub_mod },
             .{ .name = "recursive", .module = recursive_mod },
             .{ .name = "client", .module = client_mod },
-            .{ .name = "parallel", .module = parallel_mod },
+            
         },
     });
 
@@ -513,6 +509,7 @@ pub fn build(b: *std.Build) void {
     dns_mod.addImport("backoff", backoff_mod);
     // Other
     dns_mod.addImport("zone_file", zone_file_mod);
+    if (parallel_mod) |pm| dns_mod.addImport("parallel", pm);
 
     // ========================================================================
     // zdig CLI - dig-like DNS query tool
@@ -534,7 +531,6 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .spice = false,
-            .config = false,
         });
         break :blk cli_dep.module("cli");
     } else null;
@@ -1025,7 +1021,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "parallel", .module = parallel_mod },
+                
             },
         }),
     });
@@ -1042,7 +1038,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "name", .module = name_mod },
                 .{ .name = "types", .module = types_mod },
-                .{ .name = "parallel", .module = parallel_mod },
+                
             },
         }),
     });
@@ -1079,7 +1075,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "types", .module = types_mod },
                 .{ .name = "dns_cache", .module = dns_cache_mod },
                 .{ .name = "clock", .module = clock_mod },
-                .{ .name = "parallel", .module = parallel_mod },
+                
             },
         }),
     });
@@ -1169,7 +1165,6 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "dns_build_options", .module = build_options.createModule() },
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "message", .module = message_mod },
             },

@@ -48,7 +48,6 @@
 //! | Cache Prefetch      | 8 entries  | Yes              |
 
 const std = @import("std");
-const build_options = @import("dns_build_options");
 const record = @import("record");
 const message = @import("message");
 const ResourceRecord = record.ResourceRecord;
@@ -56,7 +55,7 @@ const Name = record.Name;
 const Type = record.Type;
 const Class = record.Class;
 
-const spice = if (build_options.enable_spice) @import("spice") else struct {
+const spice = if (true) @import("spice") else struct {
     pub const ThreadPool = void;
     pub const Task = void;
     pub fn Future(comptime I: type, comptime O: type) type {
@@ -70,11 +69,11 @@ const spice = if (build_options.enable_spice) @import("spice") else struct {
 // Global Thread Pool
 // ============================================================================
 
-var global_pool: if (build_options.enable_spice) ?spice.ThreadPool else void = if (build_options.enable_spice) null else {};
+var global_pool: if (true) ?spice.ThreadPool else void = if (true) null else {};
 var pool_mutex: std.Thread.Mutex = .{};
 
-pub fn getPool() if (build_options.enable_spice) *spice.ThreadPool else void {
-    if (!build_options.enable_spice) return;
+pub fn getPool() if (true) *spice.ThreadPool else void {
+    // spice always enabled when this module is compiled
 
     pool_mutex.lock();
     defer pool_mutex.unlock();
@@ -98,7 +97,7 @@ pub fn getPool() if (build_options.enable_spice) *spice.ThreadPool else void {
 /// // ... use parallel operations ...
 /// ```
 pub fn deinitPool() void {
-    if (!build_options.enable_spice) return;
+    // spice always enabled when this module is compiled
 
     pool_mutex.lock();
     defer pool_mutex.unlock();
@@ -111,7 +110,7 @@ pub fn deinitPool() void {
 
 /// Returns true if the global thread pool has been initialized.
 pub fn isPoolInitialized() bool {
-    if (!build_options.enable_spice) return false;
+    // spice always enabled when this module is compiled
 
     pool_mutex.lock();
     defer pool_mutex.unlock();
@@ -158,7 +157,7 @@ pub fn parallelZoneRecordParse(
 ) void {
     std.debug.assert(raw_records.len == results.len);
 
-    if (!build_options.enable_spice or raw_records.len < 64) {
+    if (!true or raw_records.len < 64) {
         for (raw_records, 0..) |raw, i| {
             results[i] = parseRecord(allocator, raw);
         }
@@ -279,7 +278,7 @@ pub fn parallelDnssecValidate(
 ) void {
     std.debug.assert(inputs.len == results.len);
 
-    if (!build_options.enable_spice or inputs.len < 2) {
+    if (!true or inputs.len < 2) {
         for (inputs, 0..) |input, i| {
             results[i] = validateDnssec(input);
         }
@@ -429,7 +428,7 @@ pub fn parallelBatchQuery(
 ) void {
     std.debug.assert(queries.len == results.len);
 
-    if (!build_options.enable_spice or queries.len < 4) {
+    if (!true or queries.len < 4) {
         for (queries, 0..) |query, i| {
             results[i] = executeQuery(query, server, timeout_ms);
         }
@@ -551,7 +550,7 @@ pub fn parallelCachePrefetch(
 ) void {
     std.debug.assert(entries.len == results.len);
 
-    if (!build_options.enable_spice or entries.len < 8) {
+    if (!true or entries.len < 8) {
         for (entries, 0..) |entry, i| {
             results[i] = prefetchEntry(entry, server);
         }
@@ -646,7 +645,7 @@ fn prefetchEntry(entry: PrefetchEntry, server: []const u8) PrefetchResult {
 // ============================================================================
 
 test "parallel zone record parse" {
-    if (!build_options.enable_spice) return error.SkipZigTest;
+    // spice always enabled when this module is compiled
 
     const allocator = std.testing.allocator;
     var raw_records: [100][]const u8 = undefined;
@@ -666,7 +665,7 @@ test "parallel zone record parse" {
 }
 
 test "parallel dnssec validate" {
-    if (!build_options.enable_spice) return error.SkipZigTest;
+    // spice always enabled when this module is compiled
 
     // Build valid RRSIG RDATA (>= 19 bytes): type_covered(2) + algorithm(1) +
     // labels(1) + original_ttl(4) + sig_expiration(4) + sig_inception(4) +
@@ -746,7 +745,7 @@ test "parallel zone record parse - invalid records" {
 }
 
 test "parallel dnssec validate - empty rrsig" {
-    if (!build_options.enable_spice) return error.SkipZigTest;
+    // spice always enabled when this module is compiled
 
     var inputs: [4]DnssecValidateInput = undefined;
     var results: [4]DnssecValidateResult = undefined;
@@ -768,7 +767,7 @@ test "parallel dnssec validate - empty rrsig" {
 }
 
 test "parallel dnssec validate - empty rrset" {
-    if (!build_options.enable_spice) return error.SkipZigTest;
+    // spice always enabled when this module is compiled
 
     var inputs: [4]DnssecValidateInput = undefined;
     var results: [4]DnssecValidateResult = undefined;
@@ -790,7 +789,7 @@ test "parallel dnssec validate - empty rrset" {
 }
 
 test "parallel batch query" {
-    if (!build_options.enable_spice) return error.SkipZigTest;
+    // spice always enabled when this module is compiled
 
     var queries: [8]QuerySpec = undefined;
     var results: [8]QueryResult = undefined;
@@ -820,7 +819,7 @@ test "parallel batch query" {
 }
 
 test "parallel batch query - empty domain" {
-    if (!build_options.enable_spice) return error.SkipZigTest;
+    // spice always enabled when this module is compiled
 
     var queries: [4]QuerySpec = undefined;
     var results: [4]QueryResult = undefined;
@@ -841,7 +840,7 @@ test "parallel batch query - empty domain" {
 }
 
 test "parallel cache prefetch - expired entries" {
-    if (!build_options.enable_spice) return error.SkipZigTest;
+    // spice always enabled when this module is compiled
 
     var entries: [16]PrefetchEntry = undefined;
     var results: [16]PrefetchResult = undefined;
@@ -865,7 +864,7 @@ test "parallel cache prefetch - expired entries" {
 }
 
 test "parallel cache prefetch - future entries not refreshed" {
-    if (!build_options.enable_spice) return error.SkipZigTest;
+    // spice always enabled when this module is compiled
 
     var entries: [16]PrefetchEntry = undefined;
     var results: [16]PrefetchResult = undefined;
@@ -911,7 +910,7 @@ test "parallel cache prefetch - below threshold" {
 }
 
 test "pool lifecycle - init and deinit" {
-    if (!build_options.enable_spice) return error.SkipZigTest;
+    // spice always enabled when this module is compiled
 
     // Exercise the init path via getPool()
     _ = getPool();
