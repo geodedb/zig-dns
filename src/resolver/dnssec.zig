@@ -48,6 +48,7 @@ const std = @import("std");
 const record = @import("record");
 const name_module = @import("name");
 const types = @import("types");
+const parallel = @import("parallel");
 
 const ResourceRecord = record.ResourceRecord;
 const DnskeyData = ResourceRecord.DnskeyData;
@@ -1189,6 +1190,26 @@ fn findRrsig(rrsigs: []const ResourceRecord, covered_type: Type, full_message: [
         }
     }
     return null;
+}
+
+// =========================================================================
+// Parallel DNSSEC Validation Integration
+// =========================================================================
+
+/// Validate multiple DNSSEC signatures in parallel using the spice thread pool.
+///
+/// For responses with multiple RRSIGs (2+), this dispatches structural
+/// validation across threads. Each input contains wire-format RRSIG RDATA,
+/// DNSKEY RDATA, and RRset members for cross-checking.
+///
+/// This performs structural validation (algorithm matching, protocol checks,
+/// wire format validation). Full cryptographic verification should still be
+/// done via `Validator.verifyRrsig()` for signatures that pass structural checks.
+pub fn parallelValidateSignatures(
+    inputs: []const parallel.DnssecValidateInput,
+    results: []parallel.DnssecValidateResult,
+) void {
+    parallel.parallelDnssecValidate(inputs, results);
 }
 
 // =========================================================================

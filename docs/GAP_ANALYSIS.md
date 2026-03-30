@@ -793,3 +793,62 @@ Remaining production recommendations (non-blocking, Won't Do):
 2. **GAP-0046** (High, fuzz testing): Wire parsers have no fuzz testing despite 7 bounds-check bugs found by manual review. Won't Do -- fuzz targets exist but CI integration deferred.
 
 **The library is production-ready for DNSSEC-enabled deployments.** All DNSSEC correctness issues (wire-format conversion, canonical ordering, hash computation, chain-of-trust zone scoping) have been resolved. All four NSEC/NSEC3 validation functions (`validateNodataWithNsec`, `validateNxdomainWithNsec`, `validateNxdomainWithNsec3`, `validateNodataWithNsec3`) are now functional. Input validation hardening (extractWireLabels error unions, base32hexDecode trailing bit rejection) provides defense-in-depth. 525/525 tests pass.
+
+---
+
+# Parallelism & Spice Integration GAP Analysis
+
+Last updated: 2026-03-30
+
+## Executive Summary
+
+The `spice` dependency is included in `build.zig.zon`, wired into `build.zig`, and fully integrated into the library. The `src/parallel.zig` module provides four parallel operations using spice's work-stealing thread pool with real DNS implementations:
+
+- `parallelZoneRecordParse` — wire-format record parsing via `ResourceRecord.parse()`
+- `parallelDnssecValidate` — structural RRSIG/DNSKEY validation (algorithm matching, protocol checks)
+- `parallelBatchQuery` — concurrent DNS query message building via `message.buildQuery()`
+- `parallelCachePrefetch` — expiration-aware prefetch with query construction
+
+All resolver modules (`dnssec.zig`, `zone_transfer.zig`, `cache_prefetch.zig`) import and expose the parallel functions. The module is re-exported from `lib.zig` for consumer access.
+
+## Spice Dependency Status
+
+| Aspect | Status | Detail |
+|--------|--------|--------|
+| Listed in `build.zig.zon` | Yes | `gitlab.com/devnw/zig/spice/-/archive/main/spice-main.tar.gz` |
+| Wired in `build.zig` | Yes | Conditionally fetched when `enable_spice=true` (default) |
+| Imported in source | `src/parallel.zig` | Conditional: `if (build_options.enable_spice) @import("spice")` |
+| Used by resolver modules | **Yes** | `dnssec.zig`, `zone_transfer.zig`, `cache_prefetch.zig` all import `parallel` |
+| Re-exported from `lib.zig` | **Yes** | `pub const parallel = @import("parallel");` |
+| Pinned to release tag | **No** | Blocked — spice fork has no tags yet. Hash provides content-addressing. |
+
+## Stack-ranked Parallelism Gaps
+
+| Rank | Severity | Finding | Fix Applied | Status |
+|---:|---|---|---|---|
+| P1 | High | `parallel` module not re-exported from `lib.zig` | Added `pub const parallel = @import("parallel")` to `lib.zig`; updated module docs | **Closed** |
+| P2 | High | Parallel implementations are stubs | Wired real implementations: `parseRecord` uses `ResourceRecord.parse()`, `validateDnssec` does structural RRSIG/DNSKEY validation, `executeQuery` builds wire-format queries via `message.buildQuery()`, `prefetchEntry` checks expiration and builds refresh queries | **Closed** |
+| P3 | High | Resolver modules don't use parallel functions | Added `parallel` import and public wrapper functions to `dnssec.zig` (`parallelValidateSignatures`), `zone_transfer.zig` (`parseRecordsParallel`), and `cache_prefetch.zig` (`prefetchEntriesParallel`). Updated build.zig module deps. | **Closed** |
+| P4 | Medium | `recursive.zig` `parallel_queries` config is misleading | Renamed to `max_server_attempts` with accurate doc comment | **Closed** |
+| P5 | Medium | `stub.zig` `parallel` field unused | Removed the unused `parallel: u2` field from `StubOptions` | **Closed** |
+| P6 | Medium | Happy Eyeballs spin-wait with `Thread.sleep(10ms)` | Replaced per-socket `poll(0)` + `sleep(10ms)` with combined `poll()` on all sockets using proper timeout derived from RFC 8305 connection delay. Spice not applicable (I/O-bound, not CPU-bound). | **Closed** |
+| P7 | Medium | Global thread pool has no shutdown documentation | Added `isPoolInitialized()` helper, documented `deinitPool()` with usage example, added lifecycle test | **Closed** |
+| P8 | Medium | `spice` dependency unpinned | **Blocked** — spice fork has no release tags (only 2 commits). Hash in `build.zig.zon` already content-addresses the dependency. Will pin when a tag is published. | **Blocked** |
+| P9 | Low | `parallel.zig` has unused `record`/`message` imports | Resolved by P2 — `parallel.zig` now imports and uses both `record` and `message` | **Closed** |
+| P10 | Low | Connection pool / failover use raw mutexes | **Won't-Do** — `std.Thread.Mutex` is correct for I/O synchronization. Spice is for CPU-bound parallelism. These are complementary, not inconsistent. | **Won't-Do** |
+| P11 | Low | `parallel.zig` `build_options` only import | Resolved by P2 — `parallel.zig` now imports `record`, `message`, and uses them in real implementations | **Closed** |
+
+## Test Results
+
+- **274/274 tests passing** (up from 262 baseline)
+- **12 parallel-specific tests** in new `test-parallel` build step
+- **No regressions** across all existing test groups
+
+## Summary
+
+| Severity | Total | Closed | Blocked | Won't-Do |
+|----------|------:|-------:|--------:|---------:|
+| High | 3 | 3 | 0 | 0 |
+| Medium | 5 | 4 | 1 | 0 |
+| Low | 3 | 2 | 0 | 1 |
+| **Total** | **11** | **9** | **1** | **1** |

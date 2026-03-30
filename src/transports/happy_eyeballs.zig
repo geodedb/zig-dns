@@ -174,26 +174,52 @@ pub const HappyEyeballs = struct {
                 next_attempt_index += 1;
             }
 
-            // Check for completed connections
-            for (attempts.items) |*attempt| {
+            // Build a combined pollfd array for all connecting sockets and
+            // block with a timeout instead of per-socket poll(0) + sleep.
+            // This avoids the spin-wait anti-pattern while still racing
+            // connections per RFC 8305.
+            var active_count: usize = 0;
+            var poll_fds_buf: [16]std.posix.pollfd = undefined;
+            var poll_index_map: [16]usize = undefined; // maps poll index -> attempts index
+
+            for (attempts.items, 0..) |*attempt, idx| {
                 if (attempt.state != .connecting) continue;
+                if (active_count >= poll_fds_buf.len) break;
 
-                // Poll the socket for writability (connection complete)
-                var poll_fds = [_]std.posix.pollfd{
-                    .{
-                        .fd = attempt.fd,
-                        .events = std.posix.POLL.OUT,
-                        .revents = 0,
-                    },
+                poll_fds_buf[active_count] = .{
+                    .fd = attempt.fd,
+                    .events = std.posix.POLL.OUT,
+                    .revents = 0,
                 };
+                poll_index_map[active_count] = idx;
+                active_count += 1;
+            }
 
-                const poll_result = std.posix.poll(&poll_fds, 0) catch 0;
-                if (poll_result > 0) {
-                    if (poll_fds[0].revents & std.posix.POLL.OUT != 0) {
-                        // Check for connection error
+            if (active_count == 0) break;
+
+            // Compute remaining time before overall timeout
+            const elapsed: u32 = @intCast(std.time.milliTimestamp() - start_time);
+            if (elapsed > self.config.connection_timeout_ms) break;
+
+            const remaining_ms = self.config.connection_timeout_ms - elapsed;
+            // Use the connection attempt delay or remaining time, whichever is less,
+            // as the poll timeout. This ensures we wake up to start the next
+            // connection attempt at the right RFC 8305 interval.
+            const poll_timeout: i32 = @intCast(@min(
+                remaining_ms,
+                self.config.connection_attempt_delay_ms,
+            ));
+
+            const poll_result = std.posix.poll(poll_fds_buf[0..active_count], poll_timeout) catch 0;
+
+            if (poll_result > 0) {
+                for (0..active_count) |pi| {
+                    const attempt = &attempts.items[poll_index_map[pi]];
+                    const revents = poll_fds_buf[pi].revents;
+
+                    if (revents & std.posix.POLL.OUT != 0) {
                         const err = getSocketError(attempt.fd);
                         if (err == 0) {
-                            // Connection successful!
                             attempt.state = .connected;
                             const now = std.time.milliTimestamp();
                             const conn_time: u32 = @intCast(@max(0, now - attempt.start_time));
@@ -216,7 +242,6 @@ pub const HappyEyeballs = struct {
                                 };
                             }
 
-                            // Update stats
                             self.stats.successful_connections += 1;
                             if (attempt.family == AF_INET6) {
                                 self.stats.ipv6_wins += 1;
@@ -227,28 +252,16 @@ pub const HappyEyeballs = struct {
 
                             break;
                         } else {
-                            // Connection failed
                             attempt.state = .failed;
                             std.posix.close(attempt.fd);
                             attempt.fd = -1;
                         }
-                    } else if (poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP) != 0) {
+                    } else if (revents & (std.posix.POLL.ERR | std.posix.POLL.HUP) != 0) {
                         attempt.state = .failed;
                         std.posix.close(attempt.fd);
                         attempt.fd = -1;
                     }
                 }
-            }
-
-            // Check for timeout
-            const elapsed: u32 = @intCast(@max(0, std.time.milliTimestamp() - start_time));
-            if (elapsed > self.config.connection_timeout_ms) {
-                break;
-            }
-
-            // Small sleep to avoid busy-waiting
-            if (winner == null) {
-                std.Thread.sleep(std.time.ns_per_ms * 10);
             }
         }
 

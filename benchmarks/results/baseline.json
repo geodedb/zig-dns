@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "timestamp": 1774893543,
+  "system": { "os": "linux", "arch": "x86_64" },
+  "git_commit": "unknown",
+  "tiers": [
+    {
+      "name": "100",
+      "message_count": 100,
+      "msg_parse_ops_sec": 126422250.3,
+      "msg_build_ops_sec": 17300.3,
+      "name_encode_ns": 14569.1,
+      "name_decode_ns": 32645.4,
+      "record_parse_ns": 17.3,
+      "cache_put_ns": 734.2,
+      "cache_get_ns": 640.4,
+      "parallel_parse_ms": 1.41,
+      "skipped": false
+    },
+    {
+      "name": "1K",
+      "message_count": 1000,
+      "msg_parse_ops_sec": 130650640.2,
+      "msg_build_ops_sec": 18262.5,
+      "name_encode_ns": 15365.2,
+      "name_decode_ns": 29809.3,
+      "record_parse_ns": 15.2,
+      "cache_put_ns": 3392.1,
+      "cache_get_ns": 4181.4,
+      "parallel_parse_ms": 0.03,
+      "skipped": false
+    },
+    {
+      "name": "10K",
+      "message_count": 10000,
+      "msg_parse_ops_sec": 153910085.7,
+      "msg_build_ops_sec": 16941.2,
+      "name_encode_ns": 16750.1,
+      "name_decode_ns": 31228.4,
+      "record_parse_ns": 11.1,
+      "cache_put_ns": 35120.4,
+      "cache_get_ns": 43329.7,
+      "parallel_parse_ms": 0.18,
+      "skipped": false
+    },
+    {
+      "name": "50K",
+      "message_count": 50000,
+      "msg_parse_ops_sec": 115212151.7,
+      "msg_build_ops_sec": 16751.9,
+      "name_encode_ns": 16746.3,
+      "name_decode_ns": 31393.8,
+      "record_parse_ns": 10.4,
+      "cache_put_ns": 73352.4,
+      "cache_get_ns": 126560.8,
+      "parallel_parse_ms": 0.32,
+      "skipped": false
+    },
+    {
+      "name": "100K",
+      "message_count": 100000,
+      "msg_parse_ops_sec": 151120635.1,
+      "msg_build_ops_sec": 16782.1,
+      "name_encode_ns": 16803.2,
+      "name_decode_ns": 31276.4,
+      "record_parse_ns": 10.3,
+      "cache_put_ns": 148782.1,
+      "cache_get_ns": 331954.1,
+      "parallel_parse_ms": 0.79,
+      "skipped": false
+    }
+  ]
+}

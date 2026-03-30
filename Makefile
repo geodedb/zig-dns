@@ -8,6 +8,7 @@
 #   make help         - Show this help message
 
 .PHONY: all build test test-unit test-vectors clean check fmt fmt-check help
+.PHONY: bench scale-bench bench-save bench-compare bench-baseline
 
 # Default target - build and run all tests
 all: build test-unit test-vectors
@@ -88,6 +89,34 @@ test-release-small:
 test-all-optimizations: test-unit test-release-safe test-release-fast test-release-small
 	@echo "All optimization level tests completed"
 
+# Run performance benchmarks (micro)
+bench:
+	@echo "Running micro-benchmarks..."
+	@zig build bench
+
+# Incremental scale benchmark
+scale-bench:
+	@echo "Running incremental scale benchmark..."
+	@zig build scale-bench 2>/dev/null
+
+# Run scale bench and save results per commit
+bench-save:
+	@echo "Running scale benchmark and saving results..."
+	@zig build scale-bench 2>/dev/null > benchmarks/results/$$(git rev-parse --short HEAD).json
+	@echo "Saved to benchmarks/results/$$(git rev-parse --short HEAD).json"
+
+# Compare current results against baseline
+bench-compare:
+	@echo "Running scale benchmark and comparing against baseline..."
+	@zig build scale-bench 2>/dev/null > /tmp/dns-current-bench.json
+	@zig build compare-bench -- benchmarks/results/baseline.json /tmp/dns-current-bench.json
+
+# Save current results as the baseline
+bench-baseline:
+	@echo "Running scale benchmark and saving as baseline..."
+	@zig build scale-bench 2>/dev/null > benchmarks/results/baseline.json
+	@echo "Saved to benchmarks/results/baseline.json"
+
 # Continuous integration target
 ci: clean build test
 	@echo ""
@@ -128,6 +157,13 @@ help:
 	@echo "  test-release-fast  - Run tests with ReleaseFast"
 	@echo "  test-release-small - Run tests with ReleaseSmall"
 	@echo "  test-all-optimizations - Run tests with all optimization levels"
+	@echo ""
+	@echo "Benchmarks:"
+	@echo "  bench              - Run micro-benchmarks"
+	@echo "  scale-bench        - Run incremental scale benchmark"
+	@echo "  bench-save         - Save results per commit SHA"
+	@echo "  bench-baseline     - Save current results as baseline"
+	@echo "  bench-compare      - Compare current against baseline"
 	@echo ""
 	@echo "CI/CD:"
 	@echo "  ci               - Full CI pipeline (clean + build + all tests)"

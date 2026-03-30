@@ -98,6 +98,21 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // Parallel module for spice-based parallelism (defined early for resolver deps)
+    const parallel_mod = b.addModule("parallel", .{
+        .root_source_file = b.path("src/parallel.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "build_options", .module = build_options_mod },
+            .{ .name = "record", .module = record_mod },
+            .{ .name = "message", .module = message_mod },
+        },
+    });
+    if (spice_mod) |sm| {
+        parallel_mod.addImport("spice", sm);
+    }
+
     // Public API -- RFC 6891: Extension Mechanisms for DNS (EDNS0)
     // Extended DNS options and OPT record handling
     const edns_mod = b.addModule("edns", .{
@@ -262,6 +277,9 @@ pub fn build(b: *std.Build) void {
     const zone_transfer_mod = b.addModule("zone_transfer", .{
         .root_source_file = b.path("src/resolver/zone_transfer.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "parallel", .module = parallel_mod },
+        },
     });
 
     // Public API -- DNSSEC Validation (RFC 4033/4034/4035)
@@ -271,6 +289,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "record", .module = record_mod },
             .{ .name = "name", .module = name_mod },
+            .{ .name = "parallel", .module = parallel_mod },
             .{ .name = "types", .module = types_mod },
         },
     });
@@ -317,6 +336,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "types", .module = types_mod },
             .{ .name = "dns_cache", .module = dns_cache_mod },
             .{ .name = "clock", .module = clock_mod },
+            .{ .name = "parallel", .module = parallel_mod },
         },
     });
 
@@ -438,21 +458,6 @@ pub fn build(b: *std.Build) void {
     //        const message = dns.message;
     //        const resolver = dns.client;
 
-    // Public API -- Parallel module for spice-based parallelism
-    const parallel_mod = b.addModule("parallel", .{
-        .root_source_file = b.path("src/parallel.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "build_options", .module = build_options_mod },
-            .{ .name = "record", .module = record_mod },
-            .{ .name = "message", .module = message_mod },
-        },
-    });
-    if (spice_mod) |sm| {
-        parallel_mod.addImport("spice", sm);
-    }
-
     const dns_mod = b.addModule("dns", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
@@ -562,6 +567,62 @@ pub fn build(b: *std.Build) void {
         const zdig_step = b.step("zdig", "Build the zdig DNS query tool");
         zdig_step.dependOn(&zdig_exe.step);
     }
+
+    // ========================================================================
+    // Benchmarks
+    // ========================================================================
+
+    // Micro-benchmark harness
+    const bench_step = b.step("bench", "Run performance benchmarks");
+    const bench_exe = b.addExecutable(.{
+        .name = "bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "dns", .module = dns_mod },
+            },
+        }),
+    });
+    const run_bench = b.addRunArtifact(bench_exe);
+    bench_step.dependOn(&run_bench.step);
+
+    // Incremental scale benchmark with JSON output
+    const scale_bench_step = b.step("scale-bench", "Run incremental scale benchmarks with JSON output");
+    const scale_bench_exe = b.addExecutable(.{
+        .name = "scale-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/scale_bench.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+            .imports = &.{
+                .{ .name = "dns", .module = dns_mod },
+            },
+        }),
+    });
+    b.installArtifact(scale_bench_exe);
+    const run_scale_bench = b.addRunArtifact(scale_bench_exe);
+    if (b.args) |args| {
+        run_scale_bench.addArgs(args);
+    }
+    scale_bench_step.dependOn(&run_scale_bench.step);
+
+    // Benchmark comparison tool
+    const compare_bench_step = b.step("compare-bench", "Compare benchmark results against a baseline");
+    const compare_bench_exe = b.addExecutable(.{
+        .name = "compare-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("benchmarks/compare.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    const run_compare_bench = b.addRunArtifact(compare_bench_exe);
+    if (b.args) |args| {
+        run_compare_bench.addArgs(args);
+    }
+    compare_bench_step.dependOn(&run_compare_bench.step);
 
     // ========================================================================
     // Unit Tests - Test each module independently
@@ -951,12 +1012,15 @@ pub fn build(b: *std.Build) void {
     const run_cache_protection_test = b.addRunArtifact(cache_protection_test);
     test_resolver_step.dependOn(&run_cache_protection_test.step);
 
-    // Zone transfer tests (standalone, no external imports)
+    // Zone transfer tests
     const zone_transfer_test = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/resolver/zone_transfer.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "parallel", .module = parallel_mod },
+            },
         }),
     });
     const run_zone_transfer_test = b.addRunArtifact(zone_transfer_test);
@@ -972,6 +1036,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "name", .module = name_mod },
                 .{ .name = "types", .module = types_mod },
+                .{ .name = "parallel", .module = parallel_mod },
             },
         }),
     });
@@ -1008,6 +1073,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "types", .module = types_mod },
                 .{ .name = "dns_cache", .module = dns_cache_mod },
                 .{ .name = "clock", .module = clock_mod },
+                .{ .name = "parallel", .module = parallel_mod },
             },
         }),
     });
@@ -1084,6 +1150,32 @@ pub fn build(b: *std.Build) void {
     test_resolver_step.dependOn(&run_convenience_test.step);
 
     test_step.dependOn(test_resolver_step);
+
+    // ========================================================================
+    // Parallel Module Tests (spice-based parallelism)
+    // ========================================================================
+
+    const test_parallel_step = b.step("test-parallel", "Run parallel operations tests");
+
+    const parallel_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/parallel.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "build_options", .module = build_options.createModule() },
+                .{ .name = "record", .module = record_mod },
+                .{ .name = "message", .module = message_mod },
+            },
+        }),
+    });
+    if (spice_mod) |sm| {
+        parallel_test.root_module.addImport("spice", sm);
+    }
+    const run_parallel_test = b.addRunArtifact(parallel_test);
+    test_parallel_step.dependOn(&run_parallel_test.step);
+
+    test_step.dependOn(test_parallel_step);
 
     // ========================================================================
     // Security Module Tests

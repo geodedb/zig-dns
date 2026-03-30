@@ -14,6 +14,7 @@ const std = @import("std");
 const types = @import("types");
 const dns_cache = @import("dns_cache");
 const clock_mod = @import("clock");
+const parallel = @import("parallel");
 
 pub const Type = types.Type;
 pub const Class = types.Class;
@@ -309,6 +310,23 @@ pub fn checkAndSchedulePrefetch(
             std.log.debug("schedulePrefetch failed: {}", .{err});
         };
     }
+}
+
+// ============================================================================
+// Parallel Cache Prefetch Integration
+// ============================================================================
+
+/// Prefetch multiple expiring cache entries in parallel using the spice thread pool.
+///
+/// For large prefetch batches (8+ entries), this dispatches prefetch evaluation
+/// across threads. Each entry is independently checked for expiration and
+/// query messages are built in parallel for expired entries.
+pub fn prefetchEntriesParallel(
+    entries: []const parallel.PrefetchEntry,
+    results: []parallel.PrefetchResult,
+    server: []const u8,
+) void {
+    parallel.parallelCachePrefetch(entries, results, server);
 }
 
 // ============================================================================

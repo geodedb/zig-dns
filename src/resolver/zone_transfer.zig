@@ -17,6 +17,7 @@
 //! - AXFR returns all records; IXFR returns differences
 
 const std = @import("std");
+const parallel = @import("parallel");
 
 /// SOA record type value (RFC 1035 Section 3.2.2)
 /// Used to identify SOA records in zone transfer boundary detection.
@@ -834,6 +835,25 @@ pub const IxfrResult = struct {
     /// Transfer duration in milliseconds
     duration_ms: u64,
 };
+
+// ============================================================================
+// Parallel Zone Record Parsing Integration
+// ============================================================================
+
+/// Parse raw wire-format zone records in parallel using the spice thread pool.
+///
+/// For large zone transfers (AXFR/IXFR) with 64+ records, this dispatches
+/// parsing work across multiple threads. Below the threshold, records are
+/// parsed sequentially.
+///
+/// Each raw_record slice should be a standalone wire-format resource record.
+pub fn parseRecordsParallel(
+    allocator: std.mem.Allocator,
+    raw_records: []const []const u8,
+    results: []parallel.ParsedRecord,
+) void {
+    parallel.parallelZoneRecordParse(allocator, raw_records, results);
+}
 
 test "Zone basic operations" {
     const allocator = std.testing.allocator;

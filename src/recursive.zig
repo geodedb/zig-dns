@@ -98,8 +98,8 @@ pub const RecursiveConfig = struct {
     /// Enable 0x20 case randomization for cache poisoning protection
     case_randomization: bool = true,
 
-    /// Number of servers to try in parallel
-    parallel_queries: u8 = 2,
+    /// Maximum number of servers to try per resolution step (sequential)
+    max_server_attempts: u8 = 2,
 };
 
 /// Referral information from a DNS response
@@ -547,7 +547,7 @@ pub const RecursiveResolver = struct {
         const query = try message_mod.buildQueryBuf(&query_buf, id, query_name, qtype, .in, self.config.dnssec);
 
         // Try servers in order
-        const max_tries = @min(servers.len, self.config.parallel_queries);
+        const max_tries = @min(servers.len, self.config.max_server_attempts);
         for (servers[0..max_tries]) |server| {
             const response = self.sendQuery(query, server) catch continue;
 

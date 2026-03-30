@@ -41,6 +41,7 @@
 //!
 //! ### Resolution
 //! - `cache`: DNS response caching
+//! - `parallel`: Parallel DNS operations (spice-based)
 //! - `stub`: Stub resolver (forwards to upstream)
 //! - `recursive`: Full recursive resolver
 //! - `client`: High-level resolution interface
@@ -85,6 +86,9 @@ pub const message = @import("message");
 // Extensions
 pub const edns = @import("edns");
 
+// Parallelism (requires -Dspice=true, default)
+pub const parallel = @import("parallel");
+
 // Resolution
 pub const cache = @import("cache");
 pub const stub = @import("stub");
@@ -119,9 +123,6 @@ pub const sig0 = @import("sig0");
 pub const enhanced_metrics = @import("enhanced_metrics");
 pub const backoff = @import("backoff");
 pub const zone_file = @import("zone_file");
-
-// Parallelism
-pub const parallel = @import("parallel");
 
 // Re-export commonly used types for convenience
 pub const Name = name.Name;
