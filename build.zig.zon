@@ -22,8 +22,8 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package.
     .dependencies = .{
         .cli = .{
-            .url = "git+https://gitlab.com/devnw/zig/cli.git?ref=main#ef4eb070f80236bc48ae07a6d2a11a755d406f80",
-            .hash = "cli-0.1.1-0aso9IulBgAsxfsZgWqb1macqTXw-yz9cVVgnsyDM7ca",
+            .url = "git+https://gitlab.com/devnw/zig/cli.git?ref=main#09a7caf6f46d0da13daf213008c1328f69932a7a",
+            .hash = "cli-0.1.1-0aso9IulBgAopCkKkuAMOffqXsM2LfuSnzftSU0b3LSs",
         },
         .spice = .{
             .url = "git+https://gitlab.com/devnw/zig/spice.git#79a291ee55789160f9aa4af2ddf526fa38e15dc2",
