@@ -12,19 +12,19 @@ pub fn build(b: *std.Build) void {
     // ========================================================================
 
     const feature_doq = b.option(bool, "feature_doq", "Enable DNS over QUIC support") orelse false;
-    const enable_spice = b.option(bool, "spice", "Enable spice-based parallelism") orelse true;
+    const enable_tp = b.option(bool, "thread-pool", "Enable thread-pool-based parallelism") orelse true;
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "feature_doq", feature_doq);
     const build_options_mod = build_options.createModule();
 
-    // Get spice dependency if enabled
-    const spice_mod: ?*std.Build.Module = if (enable_spice) blk: {
-        const spice_dep = b.dependency("spice", .{
+    // Get thread_pool dependency if enabled
+    const tp_mod: ?*std.Build.Module = if (enable_tp) blk: {
+        const tp_dep = b.dependency("thread_pool", .{
             .target = target,
             .optimize = optimize,
         });
-        break :blk spice_dep.module("spice");
+        break :blk tp_dep.module("thread_pool");
     } else null;
 
     // ========================================================================
@@ -95,19 +95,21 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Parallel module for spice-based parallelism (defined early for resolver deps)
-    const parallel_mod: ?*std.Build.Module = if (enable_spice) blk: {
+    // Parallel module for thread-pool-based parallelism (defined early for resolver deps)
+    const parallel_mod: ?*std.Build.Module = if (enable_tp) blk: {
         break :blk b.addModule("parallel", .{
-        .root_source_file = b.path("src/parallel.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "record", .module = record_mod },
-            .{ .name = "message", .module = message_mod },
-        },
-    });
+            .root_source_file = b.path("src/parallel.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "record", .module = record_mod },
+                .{ .name = "message", .module = message_mod },
+            },
+        });
     } else null;
-    if (parallel_mod) |pm| { if (spice_mod) |sm| pm.addImport("spice", sm); }
+    if (parallel_mod) |pm| {
+        if (tp_mod) |tm| pm.addImport("thread_pool", tm);
+    }
 
     // Public API -- RFC 6891: Extension Mechanisms for DNS (EDNS0)
     // Extended DNS options and OPT record handling
@@ -273,9 +275,7 @@ pub fn build(b: *std.Build) void {
     const zone_transfer_mod = b.addModule("zone_transfer", .{
         .root_source_file = b.path("src/resolver/zone_transfer.zig"),
         .target = target,
-        .imports = &.{
-            
-        },
+        .imports = &.{},
     });
 
     // Public API -- DNSSEC Validation (RFC 4033/4034/4035)
@@ -285,7 +285,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "record", .module = record_mod },
             .{ .name = "name", .module = name_mod },
-            
+
             .{ .name = "types", .module = types_mod },
         },
     });
@@ -332,7 +332,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "types", .module = types_mod },
             .{ .name = "dns_cache", .module = dns_cache_mod },
             .{ .name = "clock", .module = clock_mod },
-            
         },
     });
 
@@ -469,7 +468,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "stub", .module = stub_mod },
             .{ .name = "recursive", .module = recursive_mod },
             .{ .name = "client", .module = client_mod },
-            
         },
     });
 
@@ -1020,9 +1018,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/resolver/zone_transfer.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                
-            },
+            .imports = &.{},
         }),
     });
     const run_zone_transfer_test = b.addRunArtifact(zone_transfer_test);
@@ -1038,7 +1034,6 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "name", .module = name_mod },
                 .{ .name = "types", .module = types_mod },
-                
             },
         }),
     });
@@ -1075,7 +1070,6 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "types", .module = types_mod },
                 .{ .name = "dns_cache", .module = dns_cache_mod },
                 .{ .name = "clock", .module = clock_mod },
-                
             },
         }),
     });
@@ -1154,7 +1148,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(test_resolver_step);
 
     // ========================================================================
-    // Parallel Module Tests (spice-based parallelism)
+    // Parallel Module Tests (thread-pool-based parallelism)
     // ========================================================================
 
     const test_parallel_step = b.step("test-parallel", "Run parallel operations tests");
@@ -1170,8 +1164,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    if (spice_mod) |sm| {
-        parallel_test.root_module.addImport("spice", sm);
+    if (tp_mod) |tm| {
+        parallel_test.root_module.addImport("thread_pool", tm);
     }
     const run_parallel_test = b.addRunArtifact(parallel_test);
     test_parallel_step.dependOn(&run_parallel_test.step);

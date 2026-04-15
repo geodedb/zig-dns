@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024-2025 CodePros
 
-//! Parallel DNS operations using spice heartbeat scheduling.
+//! Parallel DNS operations using thread-pool scheduling.
 //!
 //! Provides high-performance parallel implementations of compute-intensive
 //! DNS operations including zone transfer parsing, DNSSEC validation,
@@ -10,13 +10,13 @@
 //! ## Overview
 //!
 //! This module enables parallel processing of DNS operations using the
-//! spice thread pool. Ideal for DNS servers, resolvers, and applications
+//! thread-pool library. Ideal for DNS servers, resolvers, and applications
 //! performing bulk DNS operations.
 //!
 //! ## Build Configuration
 //!
-//! Enable: `-Dspice=true` (default)
-//! Disable: `-Dspice=false`
+//! Enable: `-Dthread-pool=true` (default)
+//! Disable: `-Dthread-pool=false`
 //!
 //! ## Usage Example
 //!
@@ -55,32 +55,23 @@ const Name = record.Name;
 const Type = record.Type;
 const Class = record.Class;
 
-const spice = if (true) @import("spice") else struct {
-    pub const ThreadPool = void;
-    pub const Task = void;
-    pub fn Future(comptime I: type, comptime O: type) type {
-        _ = I;
-        _ = O;
-        return void;
-    }
-};
+const tp = @import("thread_pool");
+
+const MAX_CHUNKS = 64;
 
 // ============================================================================
 // Global Thread Pool
 // ============================================================================
 
-var global_pool: if (true) ?spice.ThreadPool else void = if (true) null else {};
+var global_pool: ?tp.ThreadPool = null;
 var pool_mutex: std.Thread.Mutex = .{};
 
-pub fn getPool() if (true) *spice.ThreadPool else void {
-    // spice always enabled when this module is compiled
-
+pub fn getPool() *tp.ThreadPool {
     pool_mutex.lock();
     defer pool_mutex.unlock();
 
     if (global_pool == null) {
-        global_pool = spice.ThreadPool.init(std.heap.page_allocator);
-        global_pool.?.start(.{});
+        global_pool = tp.ThreadPool.init(std.heap.page_allocator, .{}) catch @panic("thread-pool: init failed");
     }
     return &global_pool.?;
 }
@@ -97,8 +88,6 @@ pub fn getPool() if (true) *spice.ThreadPool else void {
 /// // ... use parallel operations ...
 /// ```
 pub fn deinitPool() void {
-    // spice always enabled when this module is compiled
-
     pool_mutex.lock();
     defer pool_mutex.unlock();
 
@@ -110,8 +99,6 @@ pub fn deinitPool() void {
 
 /// Returns true if the global thread pool has been initialized.
 pub fn isPoolInitialized() bool {
-    // spice always enabled when this module is compiled
-
     pool_mutex.lock();
     defer pool_mutex.unlock();
 
@@ -139,6 +126,20 @@ pub const ZoneParseContext = struct {
     allocator: std.mem.Allocator,
 };
 
+/// Chunk context for a single zone-parse chunk
+const ZoneParseChunk = struct {
+    raw_records: []const []const u8,
+    results: []ParsedRecord,
+    allocator: std.mem.Allocator,
+};
+
+fn zoneParseChunkFn(ctx_ptr: *anyopaque, _: *tp.TaskContext) void {
+    const chunk: *ZoneParseChunk = @ptrCast(@alignCast(ctx_ptr));
+    for (chunk.raw_records, 0..) |raw, i| {
+        chunk.results[i] = parseRecord(chunk.allocator, raw);
+    }
+}
+
 /// Parse zone transfer records in parallel.
 ///
 /// Ideal for processing large AXFR/IXFR responses with thousands
@@ -157,7 +158,7 @@ pub fn parallelZoneRecordParse(
 ) void {
     std.debug.assert(raw_records.len == results.len);
 
-    if (!true or raw_records.len < 64) {
+    if (raw_records.len < 64) {
         for (raw_records, 0..) |raw, i| {
             results[i] = parseRecord(allocator, raw);
         }
@@ -165,44 +166,34 @@ pub fn parallelZoneRecordParse(
     }
 
     const pool = getPool();
-    const ctx = ZoneParseContext{
-        .raw_records = raw_records,
-        .results = results,
-        .allocator = allocator,
-    };
-    _ = pool.call(void, parallelZoneParseTask, ctx);
-}
+    const n_chunks = @min(MAX_CHUNKS, raw_records.len);
+    const chunk_size = (raw_records.len + n_chunks - 1) / n_chunks;
 
-fn parallelZoneParseTask(t: *spice.Task, ctx: ZoneParseContext) void {
-    const raw_records = ctx.raw_records;
-    const results = ctx.results;
+    var chunks: [MAX_CHUNKS]ZoneParseChunk = undefined;
+    var tasks: [MAX_CHUNKS]tp.BatchTask = undefined;
+    var n: usize = 0;
 
-    if (raw_records.len < 32) {
+    var offset: usize = 0;
+    while (offset < raw_records.len) : (n += 1) {
+        const end = @min(offset + chunk_size, raw_records.len);
+        chunks[n] = .{
+            .raw_records = raw_records[offset..end],
+            .results = results[offset..end],
+            .allocator = allocator,
+        };
+        tasks[n] = .{ .task_fn = zoneParseChunkFn, .ctx = &chunks[n] };
+        offset = end;
+    }
+
+    var wg = pool.waitGroup();
+    _ = pool.submitBatch(tasks[0..n], .{ .wait_group = &wg }) catch {
+        // Fallback: process sequentially
         for (raw_records, 0..) |raw, i| {
-            results[i] = parseRecord(ctx.allocator, raw);
+            results[i] = parseRecord(allocator, raw);
         }
         return;
-    }
-
-    const mid = raw_records.len / 2;
-    const left_ctx = ZoneParseContext{
-        .raw_records = raw_records[0..mid],
-        .results = results[0..mid],
-        .allocator = ctx.allocator,
     };
-    const right_ctx = ZoneParseContext{
-        .raw_records = raw_records[mid..],
-        .results = results[mid..],
-        .allocator = ctx.allocator,
-    };
-
-    var fut = spice.Future(ZoneParseContext, void).init();
-    fut.fork(t, parallelZoneParseTask, right_ctx);
-
-    t.call(void, parallelZoneParseTask, left_ctx);
-    if (fut.join(t) == null) {
-        t.call(void, parallelZoneParseTask, right_ctx);
-    }
+    wg.wait();
 }
 
 fn parseRecord(allocator: std.mem.Allocator, raw: []const u8) ParsedRecord {
@@ -262,6 +253,19 @@ pub const DnssecValidateContext = struct {
     results: []DnssecValidateResult,
 };
 
+/// Chunk context for a single DNSSEC validation chunk
+const DnssecChunk = struct {
+    inputs: []const DnssecValidateInput,
+    results: []DnssecValidateResult,
+};
+
+fn dnssecChunkFn(ctx_ptr: *anyopaque, _: *tp.TaskContext) void {
+    const chunk: *DnssecChunk = @ptrCast(@alignCast(ctx_ptr));
+    for (chunk.inputs, 0..) |input, i| {
+        chunk.results[i] = validateDnssec(input);
+    }
+}
+
 /// Validate multiple DNSSEC signatures in parallel.
 ///
 /// Each RRSIG verification is independent, making this ideal
@@ -278,25 +282,6 @@ pub fn parallelDnssecValidate(
 ) void {
     std.debug.assert(inputs.len == results.len);
 
-    if (!true or inputs.len < 2) {
-        for (inputs, 0..) |input, i| {
-            results[i] = validateDnssec(input);
-        }
-        return;
-    }
-
-    const pool = getPool();
-    const ctx = DnssecValidateContext{
-        .inputs = inputs,
-        .results = results,
-    };
-    _ = pool.call(void, parallelDnssecTask, ctx);
-}
-
-fn parallelDnssecTask(t: *spice.Task, ctx: DnssecValidateContext) void {
-    const inputs = ctx.inputs;
-    const results = ctx.results;
-
     if (inputs.len < 2) {
         for (inputs, 0..) |input, i| {
             results[i] = validateDnssec(input);
@@ -304,23 +289,34 @@ fn parallelDnssecTask(t: *spice.Task, ctx: DnssecValidateContext) void {
         return;
     }
 
-    const mid = inputs.len / 2;
-    const left_ctx = DnssecValidateContext{
-        .inputs = inputs[0..mid],
-        .results = results[0..mid],
-    };
-    const right_ctx = DnssecValidateContext{
-        .inputs = inputs[mid..],
-        .results = results[mid..],
-    };
+    const pool = getPool();
+    const n_chunks = @min(MAX_CHUNKS, inputs.len);
+    const chunk_size = (inputs.len + n_chunks - 1) / n_chunks;
 
-    var fut = spice.Future(DnssecValidateContext, void).init();
-    fut.fork(t, parallelDnssecTask, right_ctx);
+    var chunks: [MAX_CHUNKS]DnssecChunk = undefined;
+    var tasks: [MAX_CHUNKS]tp.BatchTask = undefined;
+    var n: usize = 0;
 
-    t.call(void, parallelDnssecTask, left_ctx);
-    if (fut.join(t) == null) {
-        t.call(void, parallelDnssecTask, right_ctx);
+    var offset: usize = 0;
+    while (offset < inputs.len) : (n += 1) {
+        const end = @min(offset + chunk_size, inputs.len);
+        chunks[n] = .{
+            .inputs = inputs[offset..end],
+            .results = results[offset..end],
+        };
+        tasks[n] = .{ .task_fn = dnssecChunkFn, .ctx = &chunks[n] };
+        offset = end;
     }
+
+    var wg = pool.waitGroup();
+    _ = pool.submitBatch(tasks[0..n], .{ .wait_group = &wg }) catch {
+        // Fallback: process sequentially
+        for (inputs, 0..) |input, i| {
+            results[i] = validateDnssec(input);
+        }
+        return;
+    };
+    wg.wait();
 }
 
 fn validateDnssec(input: DnssecValidateInput) DnssecValidateResult {
@@ -408,6 +404,21 @@ pub const BatchQueryContext = struct {
     timeout_ms: u32,
 };
 
+/// Chunk context for a single batch-query chunk
+const BatchQueryChunk = struct {
+    queries: []const QuerySpec,
+    results: []QueryResult,
+    server: []const u8,
+    timeout_ms: u32,
+};
+
+fn batchQueryChunkFn(ctx_ptr: *anyopaque, _: *tp.TaskContext) void {
+    const chunk: *BatchQueryChunk = @ptrCast(@alignCast(ctx_ptr));
+    for (chunk.queries, 0..) |query, i| {
+        chunk.results[i] = executeQuery(query, chunk.server, chunk.timeout_ms);
+    }
+}
+
 /// Execute multiple DNS queries in parallel.
 ///
 /// Queries are sent to the same server but processed independently.
@@ -428,7 +439,7 @@ pub fn parallelBatchQuery(
 ) void {
     std.debug.assert(queries.len == results.len);
 
-    if (!true or queries.len < 4) {
+    if (queries.len < 4) {
         for (queries, 0..) |query, i| {
             results[i] = executeQuery(query, server, timeout_ms);
         }
@@ -436,47 +447,35 @@ pub fn parallelBatchQuery(
     }
 
     const pool = getPool();
-    const ctx = BatchQueryContext{
-        .queries = queries,
-        .results = results,
-        .server = server,
-        .timeout_ms = timeout_ms,
-    };
-    _ = pool.call(void, parallelBatchQueryTask, ctx);
-}
+    const n_chunks = @min(MAX_CHUNKS, queries.len);
+    const chunk_size = (queries.len + n_chunks - 1) / n_chunks;
 
-fn parallelBatchQueryTask(t: *spice.Task, ctx: BatchQueryContext) void {
-    const queries = ctx.queries;
-    const results = ctx.results;
+    var chunks: [MAX_CHUNKS]BatchQueryChunk = undefined;
+    var tasks: [MAX_CHUNKS]tp.BatchTask = undefined;
+    var n: usize = 0;
 
-    if (queries.len < 2) {
+    var offset: usize = 0;
+    while (offset < queries.len) : (n += 1) {
+        const end = @min(offset + chunk_size, queries.len);
+        chunks[n] = .{
+            .queries = queries[offset..end],
+            .results = results[offset..end],
+            .server = server,
+            .timeout_ms = timeout_ms,
+        };
+        tasks[n] = .{ .task_fn = batchQueryChunkFn, .ctx = &chunks[n] };
+        offset = end;
+    }
+
+    var wg = pool.waitGroup();
+    _ = pool.submitBatch(tasks[0..n], .{ .wait_group = &wg }) catch {
+        // Fallback: process sequentially
         for (queries, 0..) |query, i| {
-            results[i] = executeQuery(query, ctx.server, ctx.timeout_ms);
+            results[i] = executeQuery(query, server, timeout_ms);
         }
         return;
-    }
-
-    const mid = queries.len / 2;
-    const left_ctx = BatchQueryContext{
-        .queries = queries[0..mid],
-        .results = results[0..mid],
-        .server = ctx.server,
-        .timeout_ms = ctx.timeout_ms,
     };
-    const right_ctx = BatchQueryContext{
-        .queries = queries[mid..],
-        .results = results[mid..],
-        .server = ctx.server,
-        .timeout_ms = ctx.timeout_ms,
-    };
-
-    var fut = spice.Future(BatchQueryContext, void).init();
-    fut.fork(t, parallelBatchQueryTask, right_ctx);
-
-    t.call(void, parallelBatchQueryTask, left_ctx);
-    if (fut.join(t) == null) {
-        t.call(void, parallelBatchQueryTask, right_ctx);
-    }
+    wg.wait();
 }
 
 fn executeQuery(query: QuerySpec, server: []const u8, timeout_ms: u32) QueryResult {
@@ -532,6 +531,20 @@ pub const CachePrefetchContext = struct {
     server: []const u8,
 };
 
+/// Chunk context for a single cache-prefetch chunk
+const CachePrefetchChunk = struct {
+    entries: []const PrefetchEntry,
+    results: []PrefetchResult,
+    server: []const u8,
+};
+
+fn cachePrefetchChunkFn(ctx_ptr: *anyopaque, _: *tp.TaskContext) void {
+    const chunk: *CachePrefetchChunk = @ptrCast(@alignCast(ctx_ptr));
+    for (chunk.entries, 0..) |entry, i| {
+        chunk.results[i] = prefetchEntry(entry, chunk.server);
+    }
+}
+
 /// Prefetch multiple expiring cache entries in parallel.
 ///
 /// Proactively refreshes cache entries before they expire
@@ -550,7 +563,7 @@ pub fn parallelCachePrefetch(
 ) void {
     std.debug.assert(entries.len == results.len);
 
-    if (!true or entries.len < 8) {
+    if (entries.len < 8) {
         for (entries, 0..) |entry, i| {
             results[i] = prefetchEntry(entry, server);
         }
@@ -558,44 +571,34 @@ pub fn parallelCachePrefetch(
     }
 
     const pool = getPool();
-    const ctx = CachePrefetchContext{
-        .entries = entries,
-        .results = results,
-        .server = server,
-    };
-    _ = pool.call(void, parallelPrefetchTask, ctx);
-}
+    const n_chunks = @min(MAX_CHUNKS, entries.len);
+    const chunk_size = (entries.len + n_chunks - 1) / n_chunks;
 
-fn parallelPrefetchTask(t: *spice.Task, ctx: CachePrefetchContext) void {
-    const entries = ctx.entries;
-    const results = ctx.results;
+    var chunks: [MAX_CHUNKS]CachePrefetchChunk = undefined;
+    var tasks: [MAX_CHUNKS]tp.BatchTask = undefined;
+    var n: usize = 0;
 
-    if (entries.len < 4) {
+    var offset: usize = 0;
+    while (offset < entries.len) : (n += 1) {
+        const end = @min(offset + chunk_size, entries.len);
+        chunks[n] = .{
+            .entries = entries[offset..end],
+            .results = results[offset..end],
+            .server = server,
+        };
+        tasks[n] = .{ .task_fn = cachePrefetchChunkFn, .ctx = &chunks[n] };
+        offset = end;
+    }
+
+    var wg = pool.waitGroup();
+    _ = pool.submitBatch(tasks[0..n], .{ .wait_group = &wg }) catch {
+        // Fallback: process sequentially
         for (entries, 0..) |entry, i| {
-            results[i] = prefetchEntry(entry, ctx.server);
+            results[i] = prefetchEntry(entry, server);
         }
         return;
-    }
-
-    const mid = entries.len / 2;
-    const left_ctx = CachePrefetchContext{
-        .entries = entries[0..mid],
-        .results = results[0..mid],
-        .server = ctx.server,
     };
-    const right_ctx = CachePrefetchContext{
-        .entries = entries[mid..],
-        .results = results[mid..],
-        .server = ctx.server,
-    };
-
-    var fut = spice.Future(CachePrefetchContext, void).init();
-    fut.fork(t, parallelPrefetchTask, right_ctx);
-
-    t.call(void, parallelPrefetchTask, left_ctx);
-    if (fut.join(t) == null) {
-        t.call(void, parallelPrefetchTask, right_ctx);
-    }
+    wg.wait();
 }
 
 fn prefetchEntry(entry: PrefetchEntry, server: []const u8) PrefetchResult {
@@ -645,8 +648,6 @@ fn prefetchEntry(entry: PrefetchEntry, server: []const u8) PrefetchResult {
 // ============================================================================
 
 test "parallel zone record parse" {
-    // spice always enabled when this module is compiled
-
     const allocator = std.testing.allocator;
     var raw_records: [100][]const u8 = undefined;
     var results: [100]ParsedRecord = undefined;
@@ -665,8 +666,6 @@ test "parallel zone record parse" {
 }
 
 test "parallel dnssec validate" {
-    // spice always enabled when this module is compiled
-
     // Build valid RRSIG RDATA (>= 19 bytes): type_covered(2) + algorithm(1) +
     // labels(1) + original_ttl(4) + sig_expiration(4) + sig_inception(4) +
     // key_tag(2) + signer_name(1=root) + signature(1+)
@@ -745,8 +744,6 @@ test "parallel zone record parse - invalid records" {
 }
 
 test "parallel dnssec validate - empty rrsig" {
-    // spice always enabled when this module is compiled
-
     var inputs: [4]DnssecValidateInput = undefined;
     var results: [4]DnssecValidateResult = undefined;
 
@@ -767,8 +764,6 @@ test "parallel dnssec validate - empty rrsig" {
 }
 
 test "parallel dnssec validate - empty rrset" {
-    // spice always enabled when this module is compiled
-
     var inputs: [4]DnssecValidateInput = undefined;
     var results: [4]DnssecValidateResult = undefined;
 
@@ -789,8 +784,6 @@ test "parallel dnssec validate - empty rrset" {
 }
 
 test "parallel batch query" {
-    // spice always enabled when this module is compiled
-
     var queries: [8]QuerySpec = undefined;
     var results: [8]QueryResult = undefined;
 
@@ -819,8 +812,6 @@ test "parallel batch query" {
 }
 
 test "parallel batch query - empty domain" {
-    // spice always enabled when this module is compiled
-
     var queries: [4]QuerySpec = undefined;
     var results: [4]QueryResult = undefined;
 
@@ -840,8 +831,6 @@ test "parallel batch query - empty domain" {
 }
 
 test "parallel cache prefetch - expired entries" {
-    // spice always enabled when this module is compiled
-
     var entries: [16]PrefetchEntry = undefined;
     var results: [16]PrefetchResult = undefined;
 
@@ -864,8 +853,6 @@ test "parallel cache prefetch - expired entries" {
 }
 
 test "parallel cache prefetch - future entries not refreshed" {
-    // spice always enabled when this module is compiled
-
     var entries: [16]PrefetchEntry = undefined;
     var results: [16]PrefetchResult = undefined;
 
@@ -910,8 +897,6 @@ test "parallel cache prefetch - below threshold" {
 }
 
 test "pool lifecycle - init and deinit" {
-    // spice always enabled when this module is compiled
-
     // Exercise the init path via getPool()
     _ = getPool();
     try std.testing.expect(isPoolInitialized());
