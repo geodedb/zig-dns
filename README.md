@@ -13,6 +13,7 @@ A comprehensive pure Zig implementation of the Domain Name System (DNS) protocol
 ## Features
 
 ### Implemented
+
 - **RFC 1035 Compliant**: Full DNS message parsing and encoding
 - **Full Recursive Resolution**: Iterative resolution from root servers
 - **QNAME Minimization**: RFC 7816 privacy-preserving queries
@@ -30,7 +31,7 @@ A comprehensive pure Zig implementation of the Domain Name System (DNS) protocol
 - **EDNS Client Subnet**: Geo-aware DNS queries (RFC 7871)
 - **DNS Cookies**: Lightweight transaction security (RFC 7873)
 - **Cross-Platform**: Linux, macOS, Windows, and more
-- **Minimal Dependencies**: Pure Zig implementation using the standard library (optional `spice` dependency for parallelism)
+- **Minimal Dependencies**: Pure Zig implementation using the standard library (optional `thread-pool` dependency for parallelism)
 - **Record Types**: A, AAAA, CNAME, MX, NS, PTR, SOA, TXT, DNAME, SRV, CAA, TLSA, SVCB, HTTPS, DNSKEY, RRSIG, DS, NSEC, NSEC3
 
 ### Project Status
@@ -151,7 +152,7 @@ zig build test -Doptimize=ReleaseFast
 
 ## Project Structure
 
-```
+```text
 src/
 ├── lib.zig              # Public API entry point
 ├── types.zig            # DNS types, enums, constants
