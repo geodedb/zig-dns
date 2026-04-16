@@ -142,3 +142,15 @@ test {
     // Run all module tests
     std.testing.refAllDecls(@This());
 }
+
+test "parallel re-export is reachable" {
+    // Smoke test: verify parallel.zig is reachable through the public
+    // dns root module. Parallel DNS ops need wire-format records or
+    // live network state which are impractical in a unit test, so we
+    // assert the pool lifecycle entry points are exposed and call
+    // `deinitPool()` (always safe as a no-op when the pool was never
+    // initialized).
+    _ = @TypeOf(parallel.getPool);
+    _ = @TypeOf(parallel.parallelZoneRecordParse);
+    parallel.deinitPool();
+}
