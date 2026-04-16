@@ -19,8 +19,13 @@
 const std = @import("std");
 const dns = @import("dns");
 
+inline fn timeMilli() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+}
+
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -75,7 +80,7 @@ pub fn main() !void {
         defer client.deinit();
 
         std.debug.print("    Sending UDP query to 8.8.8.8:53...\n", .{});
-        const start = std.time.milliTimestamp();
+        const start = timeMilli();
 
         var result = client.resolveA("example.com") catch |err| {
             std.debug.print("    Error: {}\n", .{err});
@@ -83,7 +88,7 @@ pub fn main() !void {
         };
         defer result.deinit(allocator);
 
-        const elapsed = std.time.milliTimestamp() - start;
+        const elapsed = timeMilli() - start;
         std.debug.print("    Response in {d}ms\n", .{elapsed});
 
         for (result.addresses) |addr| {
@@ -180,14 +185,14 @@ pub fn main() !void {
         var successful: usize = 0;
 
         for (0..iterations) |i| {
-            const start = std.time.milliTimestamp();
+            const start = timeMilli();
             var result = client.resolveA(domain) catch |err| {
                 std.debug.print("    Query {d} failed: {}\n", .{ i + 1, err });
                 continue;
             };
             result.deinit(allocator);
 
-            const elapsed = std.time.milliTimestamp() - start;
+            const elapsed = timeMilli() - start;
             total_time += elapsed;
             successful += 1;
             std.debug.print("    Query {d}: {d}ms\n", .{ i + 1, elapsed });

@@ -9,6 +9,12 @@
 //! network traffic and improve resolution latency.
 
 const std = @import("std");
+
+inline fn timeSec() i64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io, .real).raw.toSeconds();
+}
+
 const name_mod = @import("name");
 const types_mod = @import("types");
 const record_mod = @import("record");
@@ -113,7 +119,7 @@ pub const Cache = struct {
             return;
         }
 
-        const now = std.time.timestamp();
+        const now = timeSec();
 
         // Check if we need to evict entries
         if (self.count >= self.max_entries) {
@@ -167,7 +173,7 @@ pub const Cache = struct {
     /// contains only records that match (domain, rtype, class) and are
     /// not expired. Returns null if no matching records exist.
     pub fn get(self: *Self, domain: []const u8, rtype: Type, class: Class) ?[]const CacheEntry {
-        const now = std.time.timestamp();
+        const now = timeSec();
 
         // Compact matching entries to the front of a contiguous run.
         // We swap each matching entry forward so all matches are adjacent.

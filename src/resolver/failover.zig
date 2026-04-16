@@ -14,6 +14,24 @@
 
 const std = @import("std");
 
+inline fn timeMilli() i64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
+}
+
+/// Zig 0.16.0-compatible mutex shim with 0.15.x-style lock/unlock API.
+const Mutex = struct {
+    inner: std.Io.Mutex = .init,
+
+    pub fn lock(self: *Mutex) void {
+        self.inner.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+    }
+
+    pub fn unlock(self: *Mutex) void {
+        self.inner.unlock(std.Io.Threaded.global_single_threaded.io());
+    }
+};
+
 /// Load balancing strategy
 pub const Strategy = enum {
     /// Simple round-robin across all healthy servers
@@ -159,7 +177,7 @@ pub const FailoverManager = struct {
     /// Statistics
     stats: Stats,
     /// Mutex for thread safety
-    mutex: std.Thread.Mutex,
+    mutex: Mutex,
 
     const Self = @This();
 
@@ -182,7 +200,8 @@ pub const FailoverManager = struct {
     pub fn init(allocator: std.mem.Allocator, config: FailoverConfig) InitError!Self {
         // Use secure random for server selection
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        std.Io.randomSecure(io, std.mem.asBytes(&seed)) catch {
             return error.EntropyUnavailable;
         };
         return Self{
@@ -230,7 +249,7 @@ pub const FailoverManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.milliTimestamp();
+        const now = timeMilli();
 
         // Get available servers
         var available: std.ArrayList(*ServerState) = .empty;
@@ -355,7 +374,7 @@ pub const FailoverManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.milliTimestamp();
+        const now = timeMilli();
         server.recordSuccess(latency_ms, now);
         self.stats.total_queries += 1;
         self.stats.successful_queries += 1;
@@ -366,7 +385,7 @@ pub const FailoverManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.milliTimestamp();
+        const now = timeMilli();
         const was_healthy = server.status != .unhealthy;
         server.recordFailure(now, self.config.circuit_timeout_ms);
 
@@ -390,7 +409,7 @@ pub const FailoverManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.milliTimestamp();
+        const now = timeMilli();
         var count: usize = 0;
         for (self.servers.items) |*server| {
             if (server.isAvailable(now) and server.status == .healthy) {
@@ -419,7 +438,7 @@ pub const FailoverManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.milliTimestamp();
+        const now = timeMilli();
 
         for (self.servers.items) |*server| {
             // Reset servers that have been in circuit breaker timeout
@@ -450,7 +469,7 @@ test "ServerState record success" {
         .config = .{ .address = "test" },
     };
 
-    const now = std.time.milliTimestamp();
+    const now = timeMilli();
     state.recordSuccess(100, now);
 
     try std.testing.expectEqual(@as(u64, 1), state.total_requests);
@@ -464,7 +483,7 @@ test "ServerState record failure and circuit breaker" {
         .config = .{ .address = "test" },
     };
 
-    const now = std.time.milliTimestamp();
+    const now = timeMilli();
 
     // First failure - degraded
     state.recordFailure(now, 30_000);

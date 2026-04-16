@@ -339,7 +339,7 @@ fn benchParallelZoneParse(allocator: std.mem.Allocator) BenchResult {
 // ---------------------------------------------------------------------------
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

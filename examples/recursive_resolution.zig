@@ -18,8 +18,13 @@
 const std = @import("std");
 const dns = @import("dns");
 
+inline fn timeMilli() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+}
+
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -75,14 +80,14 @@ pub fn main() !void {
         std.debug.print("    Starting resolution from root servers...\n", .{});
         std.debug.print("    Path: . -> com -> example.com\n", .{});
 
-        const start_time = std.time.milliTimestamp();
+        const start_time = timeMilli();
         var result = client.resolveA("example.com") catch |err| {
             std.debug.print("    Error: {}\n", .{err});
             std.debug.print("    (This may fail if you cannot send UDP to port 53)\n\n", .{});
             return;
         };
         defer result.deinit(allocator);
-        const elapsed = std.time.milliTimestamp() - start_time;
+        const elapsed = timeMilli() - start_time;
 
         std.debug.print("    Resolved in {d}ms:\n", .{elapsed});
         for (result.addresses) |addr| {

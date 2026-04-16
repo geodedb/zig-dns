@@ -45,6 +45,12 @@
 //! `error.UnsupportedAlgorithm`.
 
 const std = @import("std");
+
+inline fn timeSec() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toSeconds();
+}
+
 const record = @import("record");
 const name_module = @import("name");
 const types = @import("types");
@@ -126,7 +132,7 @@ pub const Validator = struct {
         return .{
             .allocator = allocator,
             .trust_anchors = .empty,
-            .current_time = @intCast(@divFloor(std.time.timestamp(), 1)),
+            .current_time = @intCast(@divFloor(timeSec(), 1)),
         };
     }
 

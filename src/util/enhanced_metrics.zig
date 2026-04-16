@@ -12,6 +12,11 @@
 
 const std = @import("std");
 
+inline fn timeSec() i64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io, .real).raw.toSeconds();
+}
+
 /// Histogram bucket boundaries (in microseconds for latency)
 pub const LatencyBuckets = struct {
     /// Default latency buckets in microseconds
@@ -565,7 +570,7 @@ pub const EnhancedMetrics = struct {
             .response_codes = ResponseCodeStats.init(),
             .server_stats = std.StringHashMap(ServerStats).init(allocator),
             .query_rate = RateCalculator.init(),
-            .start_time = std.time.timestamp(),
+            .start_time = timeSec(),
         };
     }
 
@@ -637,14 +642,14 @@ pub const EnhancedMetrics = struct {
 
     /// Get uptime in seconds
     pub fn getUptime(self: *const Self) i64 {
-        return std.time.timestamp() - self.start_time;
+        return timeSec() - self.start_time;
     }
 
     /// Render metrics in Prometheus text format
     pub fn renderPrometheus(self: *Self, allocator: std.mem.Allocator) ![]u8 {
-        var result: std.ArrayList(u8) = .empty;
-        errdefer result.deinit(allocator);
-        const writer = result.writer(allocator);
+        var aw: std.Io.Writer.Allocating = .init(allocator);
+        errdefer aw.deinit();
+        const writer = &aw.writer;
 
         // Counters
         try writer.print("# HELP zigdns_queries_total Total DNS queries\n", .{});
@@ -717,7 +722,7 @@ pub const EnhancedMetrics = struct {
         try writer.print("# TYPE zigdns_uptime_seconds gauge\n", .{});
         try writer.print("zigdns_uptime_seconds {d}\n", .{self.getUptime()});
 
-        return result.toOwnedSlice(allocator);
+        return aw.toOwnedSlice();
     }
 
     /// Transport type for metrics

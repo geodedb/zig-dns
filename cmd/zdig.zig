@@ -12,6 +12,7 @@
 const std = @import("std");
 const dns = @import("dns");
 const cli = @import("cli");
+const net_compat = @import("net_compat");
 
 const Allocator = std.mem.Allocator;
 
@@ -528,7 +529,7 @@ fn performQuery(allocator: Allocator, options: *const QueryOptions) !void {
 
 fn sendQuery(allocator: Allocator, options: *const QueryOptions, query_data: []const u8) ![]u8 {
     // Parse server address
-    const address = try std.net.Address.parseIp4(options.server, options.port);
+    const address = try net_compat.Address.parseIp4(options.server, options.port);
 
     if (options.use_tcp) {
         return sendTcp(allocator, address, query_data, options.timeout);
@@ -537,7 +538,7 @@ fn sendQuery(allocator: Allocator, options: *const QueryOptions, query_data: []c
     }
 }
 
-fn sendUdp(allocator: Allocator, address: std.net.Address, query_data: []const u8, timeout_secs: u32) ![]u8 {
+fn sendUdp(allocator: Allocator, address: net_compat.Address, query_data: []const u8, timeout_secs: u32) ![]u8 {
     const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
     defer std.posix.close(sock);
 
@@ -596,7 +597,7 @@ fn addressMatches(expected: *const std.posix.sockaddr, received: *const std.posi
     return false;
 }
 
-fn sendTcp(allocator: Allocator, address: std.net.Address, query_data: []const u8, timeout_secs: u32) ![]u8 {
+fn sendTcp(allocator: Allocator, address: net_compat.Address, query_data: []const u8, timeout_secs: u32) ![]u8 {
     const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
     defer std.posix.close(sock);
 
@@ -972,7 +973,7 @@ fn performTrace(allocator: Allocator, options: *const QueryOptions) !void {
         defer allocator.free(query_data);
 
         // Parse server address
-        const address = std.net.Address.parseIp4(current_server, 53) catch {
+        const address = net_compat.Address.parseIp4(current_server, 53) catch {
             try writer.print(";; Cannot parse server: {s}\n", .{current_server});
             return;
         };
@@ -1038,15 +1039,18 @@ fn performTrace(allocator: Allocator, options: *const QueryOptions) !void {
 // Main Entry Point
 // ============================================================================
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const argv0 = try init.minimal.args.toSlice(allocator);
+    defer allocator.free(argv0);
+    const argv = try allocator.alloc([]const u8, argv0.len);
+    defer allocator.free(argv);
+    for (argv0, 0..) |a, i| argv[i] = a;
 
-    const exit_code = try cli.run(&root_cmd, args, allocator);
+    const exit_code = try cli.run(&root_cmd, argv, allocator);
     std.process.exit(exit_code);
 }
 
@@ -1119,37 +1123,37 @@ test "escapeJsonString: mixed escapes" {
 }
 
 test "addressMatches: IPv4 same address and port matches" {
-    const addr1 = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
-    const addr2 = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
+    const addr1 = net_compat.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
+    const addr2 = net_compat.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
     try testing.expect(addressMatches(&addr1.any, &addr2.any));
 }
 
 test "addressMatches: IPv4 different address does not match" {
-    const addr1 = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
-    const addr2 = std.net.Address.initIp4(.{ 192, 168, 1, 2 }, 53);
+    const addr1 = net_compat.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
+    const addr2 = net_compat.Address.initIp4(.{ 192, 168, 1, 2 }, 53);
     try testing.expect(!addressMatches(&addr1.any, &addr2.any));
 }
 
 test "addressMatches: IPv4 different port does not match" {
-    const addr1 = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
-    const addr2 = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 5353);
+    const addr1 = net_compat.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
+    const addr2 = net_compat.Address.initIp4(.{ 192, 168, 1, 1 }, 5353);
     try testing.expect(!addressMatches(&addr1.any, &addr2.any));
 }
 
 test "addressMatches: IPv6 same address and port matches" {
-    const addr1 = std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01 }, 53, 0, 0);
-    const addr2 = std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01 }, 53, 0, 0);
+    const addr1 = net_compat.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01 }, 53, 0, 0);
+    const addr2 = net_compat.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01 }, 53, 0, 0);
     try testing.expect(addressMatches(&addr1.any, &addr2.any));
 }
 
 test "addressMatches: IPv6 different address does not match" {
-    const addr1 = std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01 }, 53, 0, 0);
-    const addr2 = std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02 }, 53, 0, 0);
+    const addr1 = net_compat.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01 }, 53, 0, 0);
+    const addr2 = net_compat.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02 }, 53, 0, 0);
     try testing.expect(!addressMatches(&addr1.any, &addr2.any));
 }
 
 test "addressMatches: IPv4 vs IPv6 family mismatch does not match" {
-    const addr_v4 = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
-    const addr_v6 = std.net.Address.initIp6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 1, 1 }, 53, 0, 0);
+    const addr_v4 = net_compat.Address.initIp4(.{ 192, 168, 1, 1 }, 53);
+    const addr_v6 = net_compat.Address.initIp6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 192, 168, 1, 1 }, 53, 0, 0);
     try testing.expect(!addressMatches(&addr_v4.any, &addr_v6.any));
 }

@@ -107,9 +107,11 @@ repos:
     args: [src/, build.zig]
 
       # Zig build check (compilation)
+      # -Dcli=false skips the zdig executable which depends on an external
+      # cli package; the cli package has its own independent 0.16.0 migration.
   - id: zig-build
     name: zig build (compilation check)
-    entry: zig build
+    entry: zig build -Dcli=false
     language: system
     files: \.(zig|zon)$
     exclude: ^(vendor/|dist/|zig-out/|\.zig-cache/)

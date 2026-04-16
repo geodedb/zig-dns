@@ -17,6 +17,11 @@
 
 const std = @import("std");
 
+inline fn timeSec() i64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io, .real).raw.toSeconds();
+}
+
 /// Match type for domain patterns
 pub const MatchType = enum {
     /// Exact domain match
@@ -310,7 +315,7 @@ pub const SplitDns = struct {
 
     /// Find the resolver for a query
     pub fn resolve(self: *Self, domain: []const u8, query_type: QueryTypeFilter) *const ResolverTarget {
-        const timestamp = std.time.timestamp();
+        const timestamp = timeSec();
 
         self.stats.total_queries += 1;
 

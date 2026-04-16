@@ -21,7 +21,7 @@ const dns = @import("dns");
 
 pub fn main() !void {
     // Use a general purpose allocator for this example
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

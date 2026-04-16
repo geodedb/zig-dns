@@ -59,12 +59,37 @@ const tp = @import("thread_pool");
 
 const MAX_CHUNKS = 64;
 
+inline fn timeSec() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toSeconds();
+}
+
+/// 0.16.0 shim: std.Thread.Mutex was moved.
+const Mutex = struct {
+    inner: std.Io.Mutex = std.Io.Mutex.init,
+    pub fn lock(self: *Mutex) void {
+        const io_inst = std.Io.Threaded.global_single_threaded.io();
+        self.inner.lockUncancelable(io_inst);
+    }
+    pub fn unlock(self: *Mutex) void {
+        const io_inst = std.Io.Threaded.global_single_threaded.io();
+        self.inner.unlock(io_inst);
+    }
+};
+
+fn systemRandomU16() u16 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    var buf: [2]u8 = undefined;
+    std.Io.randomSecure(io_inst, &buf) catch unreachable;
+    return std.mem.readInt(u16, &buf, .little);
+}
+
 // ============================================================================
 // Global Thread Pool
 // ============================================================================
 
 var global_pool: ?tp.ThreadPool = null;
-var pool_mutex: std.Thread.Mutex = .{};
+var pool_mutex: Mutex = .{};
 
 pub fn getPool() *tp.ThreadPool {
     pool_mutex.lock();
@@ -490,7 +515,7 @@ fn executeQuery(query: QuerySpec, server: []const u8, timeout_ms: u32) QueryResu
     }
 
     // Generate a random transaction ID for this query
-    const id = std.crypto.random.int(u16);
+    const id = systemRandomU16();
 
     // Build the wire-format query message
     const wire_msg = message.buildQuery(
@@ -613,7 +638,7 @@ fn prefetchEntry(entry: PrefetchEntry, server: []const u8) PrefetchResult {
     // In a full implementation, we'd send the query to the server here.
     // For the parallel module, we build the refresh query (CPU-bound work)
     // and mark the entry for refresh.
-    const now = std.time.timestamp();
+    const now = timeSec();
     if (entry.expires_at > now) {
         // Not yet expired — compute remaining TTL
         const remaining: u32 = @intCast(@min(
@@ -624,7 +649,7 @@ fn prefetchEntry(entry: PrefetchEntry, server: []const u8) PrefetchResult {
     }
 
     // Entry is expired — build a prefetch query message to refresh it
-    const id = std.crypto.random.int(u16);
+    const id = systemRandomU16();
     const wire_msg = message.buildQuery(
         std.heap.page_allocator,
         id,
@@ -857,7 +882,7 @@ test "parallel cache prefetch - future entries not refreshed" {
     var results: [16]PrefetchResult = undefined;
 
     // Use an expires_at far in the future — entries are not expired
-    const far_future = std.time.timestamp() + 300;
+    const far_future = timeSec() + 300;
     for (&entries) |*entry| {
         entry.* = .{
             .domain = "example.com",

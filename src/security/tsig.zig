@@ -16,6 +16,11 @@
 
 const std = @import("std");
 
+inline fn timeSec() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toSeconds();
+}
+
 /// TSIG Algorithm identifiers
 pub const Algorithm = enum {
     /// HMAC-MD5 (legacy, RFC 2845)
@@ -323,7 +328,7 @@ pub const TsigContext = struct {
     /// Sign a DNS message with TSIG
     /// Returns the message with TSIG record appended
     pub fn sign(self: *Self, message: []const u8) ![]u8 {
-        const now: u48 = @intCast(@as(u64, @bitCast(std.time.timestamp())));
+        const now: u48 = @intCast(@as(u64, @bitCast(timeSec())));
 
         // Build TSIG variables for MAC computation
         // When signing a new message, error is 0 and other_data is empty.
@@ -419,7 +424,7 @@ pub const TsigContext = struct {
         }
 
         // Verify time (now safe -- MAC is already verified above)
-        const now: u48 = @intCast(@as(u64, @bitCast(std.time.timestamp())));
+        const now: u48 = @intCast(@as(u64, @bitCast(timeSec())));
         const time_diff = if (now > tsig.time_signed)
             now - tsig.time_signed
         else

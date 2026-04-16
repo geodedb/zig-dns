@@ -14,6 +14,17 @@ const std = @import("std");
 const builtin = @import("builtin");
 const dns = @import("dns");
 
+inline fn nowNs() u64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    const ts = std.Io.Clock.Timestamp.now(io_inst, .awake);
+    return @intCast(ts.raw.toNanoseconds());
+}
+
+inline fn timeSec() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toSeconds();
+}
+
 const Message = dns.message.Message;
 const Name = dns.name.Name;
 const ResourceRecord = dns.record.ResourceRecord;
@@ -161,12 +172,12 @@ fn makeTestRecord() [27]u8 {
 fn benchMsgParse(count: usize) f64 {
     const data = makeTestResponse();
 
-    var timer = std.time.Timer.start() catch return 0;
+    const timer_start: u64 = nowNs();
     for (0..count) |_| {
         const msg = Message.parse(&data) catch continue;
         std.mem.doNotOptimizeAway(&msg);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - timer_start;
 
     const count_f: f64 = @floatFromInt(count);
     const ns_f: f64 = @floatFromInt(elapsed);
@@ -174,14 +185,14 @@ fn benchMsgParse(count: usize) f64 {
 }
 
 fn benchMsgBuild(allocator: std.mem.Allocator, count: usize) f64 {
-    var timer = std.time.Timer.start() catch return 0;
+    const timer_start: u64 = nowNs();
     for (0..count) |i| {
         const id: u16 = @truncate(i);
         const query = dns.message.buildQuery(allocator, id, "example.com", .a, .in, true) catch continue;
         std.mem.doNotOptimizeAway(query.ptr);
         allocator.free(query);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - timer_start;
 
     const count_f: f64 = @floatFromInt(count);
     const ns_f: f64 = @floatFromInt(elapsed);
@@ -189,13 +200,13 @@ fn benchMsgBuild(allocator: std.mem.Allocator, count: usize) f64 {
 }
 
 fn benchNameEncode(allocator: std.mem.Allocator, count: usize) f64 {
-    var timer = std.time.Timer.start() catch return 0;
+    const timer_start: u64 = nowNs();
     for (0..count) |_| {
         const encoded = Name.encode(allocator, "sub.example.com") catch continue;
         std.mem.doNotOptimizeAway(encoded.ptr);
         allocator.free(encoded);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - timer_start;
 
     const ns_f: f64 = @floatFromInt(elapsed);
     const count_f: f64 = @floatFromInt(count);
@@ -205,14 +216,14 @@ fn benchNameEncode(allocator: std.mem.Allocator, count: usize) f64 {
 fn benchNameDecode(allocator: std.mem.Allocator, count: usize) f64 {
     const data = makeTestResponse();
 
-    var timer = std.time.Timer.start() catch return 0;
+    const timer_start: u64 = nowNs();
     for (0..count) |_| {
         const parsed = Name.parse(&data, 12) catch continue;
         const str = parsed.toString(allocator, &data) catch continue;
         std.mem.doNotOptimizeAway(str.ptr);
         allocator.free(str);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - timer_start;
 
     const ns_f: f64 = @floatFromInt(elapsed);
     const count_f: f64 = @floatFromInt(count);
@@ -222,12 +233,12 @@ fn benchNameDecode(allocator: std.mem.Allocator, count: usize) f64 {
 fn benchRecordParse(count: usize) f64 {
     const data = makeTestRecord();
 
-    var timer = std.time.Timer.start() catch return 0;
+    const timer_start: u64 = nowNs();
     for (0..count) |_| {
         const rr = ResourceRecord.parse(&data, 0) catch continue;
         std.mem.doNotOptimizeAway(&rr);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - timer_start;
 
     const ns_f: f64 = @floatFromInt(elapsed);
     const count_f: f64 = @floatFromInt(count);
@@ -264,11 +275,11 @@ fn benchCachePut(allocator: std.mem.Allocator, count: usize, cache_size: usize) 
         domains.append(allocator, d) catch break;
     }
 
-    var timer = std.time.Timer.start() catch return 0;
+    const timer_start: u64 = nowNs();
     for (domains.items) |domain| {
         cache.put(domain, rr) catch continue;
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - timer_start;
 
     const ns_f: f64 = @floatFromInt(elapsed);
     const count_f: f64 = @floatFromInt(domains.items.len);
@@ -298,13 +309,13 @@ fn benchCacheGet(allocator: std.mem.Allocator, count: usize, cache_size: usize) 
 
     if (domains.items.len == 0) return 0;
 
-    var timer = std.time.Timer.start() catch return 0;
+    const timer_start: u64 = nowNs();
     for (0..count) |i| {
         const idx = i % domains.items.len;
         const result = cache.get(domains.items[idx], .a, .in);
         std.mem.doNotOptimizeAway(&result);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - timer_start;
 
     const ns_f: f64 = @floatFromInt(elapsed);
     const count_f: f64 = @floatFromInt(count);
@@ -321,9 +332,9 @@ fn benchParallelParse(allocator: std.mem.Allocator, count: usize) f64 {
     const results = allocator.alloc(dns.parallel.ParsedRecord, count) catch return 0;
     defer allocator.free(results);
 
-    var timer = std.time.Timer.start() catch return 0;
+    const timer_start: u64 = nowNs();
     dns.parallel.parallelZoneRecordParse(allocator, raw_records, results);
-    const elapsed = timer.read();
+    const elapsed = nowNs() - timer_start;
 
     const ns_f: f64 = @floatFromInt(elapsed);
     return ns_f / 1_000_000.0; // return ms
@@ -334,25 +345,11 @@ fn benchParallelParse(allocator: std.mem.Allocator, count: usize) f64 {
 // ---------------------------------------------------------------------------
 
 fn runTier(allocator: std.mem.Allocator, tier: Tier) TierResult {
-    var tier_start = std.time.Timer.start() catch
-        return TierResult{
-        .name = tier.name,
-        .message_count = tier.message_count,
-        .msg_parse_ops_sec = 0,
-        .msg_build_ops_sec = 0,
-        .name_encode_ns = 0,
-        .name_decode_ns = 0,
-        .record_parse_ns = 0,
-        .cache_put_ns = 0,
-        .cache_get_ns = 0,
-        .parallel_parse_ms = 0,
-        .skipped = true,
-        .skip_reason = "timer failed",
-    };
+    const tier_start: u64 = nowNs();
 
     const msg_parse = benchMsgParse(tier.message_count);
 
-    if (tier_start.read() > TIER_TIMEOUT_NS)
+    if ((nowNs() -% tier_start) > TIER_TIMEOUT_NS)
         return .{
             .name = tier.name,
             .message_count = tier.message_count,
@@ -398,60 +395,63 @@ fn writeJson(allocator: std.mem.Allocator, results: []const TierResult) !void {
     var json: std.ArrayListUnmanaged(u8) = .empty;
     defer json.deinit(allocator);
 
-    const w = json.writer(allocator);
-
-    try w.writeAll("{\n");
-    try w.writeAll("  \"version\": 1,\n");
-    try w.print("  \"timestamp\": {d},\n", .{std.time.timestamp()});
-    try w.print("  \"system\": {{ \"os\": \"{s}\", \"arch\": \"{s}\" }},\n", .{
+    try json.appendSlice(allocator, "{\n");
+    try json.appendSlice(allocator, "  \"version\": 1,\n");
+    try json.print(allocator, "  \"timestamp\": {d},\n", .{timeSec()});
+    try json.print(allocator, "  \"system\": {{ \"os\": \"{s}\", \"arch\": \"{s}\" }},\n", .{
         @tagName(builtin.os.tag),
         @tagName(builtin.cpu.arch),
     });
-    try w.writeAll("  \"git_commit\": \"unknown\",\n");
-    try w.writeAll("  \"tiers\": [\n");
+    try json.appendSlice(allocator, "  \"git_commit\": \"unknown\",\n");
+    try json.appendSlice(allocator, "  \"tiers\": [\n");
 
     for (results, 0..) |r, i| {
-        try w.writeAll("    {\n");
-        try w.print("      \"name\": \"{s}\",\n", .{r.name});
-        try w.print("      \"message_count\": {d},\n", .{r.message_count});
-        try w.print("      \"msg_parse_ops_sec\": {d:.1},\n", .{r.msg_parse_ops_sec});
-        try w.print("      \"msg_build_ops_sec\": {d:.1},\n", .{r.msg_build_ops_sec});
-        try w.print("      \"name_encode_ns\": {d:.1},\n", .{r.name_encode_ns});
-        try w.print("      \"name_decode_ns\": {d:.1},\n", .{r.name_decode_ns});
-        try w.print("      \"record_parse_ns\": {d:.1},\n", .{r.record_parse_ns});
-        try w.print("      \"cache_put_ns\": {d:.1},\n", .{r.cache_put_ns});
-        try w.print("      \"cache_get_ns\": {d:.1},\n", .{r.cache_get_ns});
-        try w.print("      \"parallel_parse_ms\": {d:.2},\n", .{r.parallel_parse_ms});
-        try w.print("      \"skipped\": {}\n", .{r.skipped});
+        try json.appendSlice(allocator, "    {\n");
+        try json.print(allocator, "      \"name\": \"{s}\",\n", .{r.name});
+        try json.print(allocator, "      \"message_count\": {d},\n", .{r.message_count});
+        try json.print(allocator, "      \"msg_parse_ops_sec\": {d:.1},\n", .{r.msg_parse_ops_sec});
+        try json.print(allocator, "      \"msg_build_ops_sec\": {d:.1},\n", .{r.msg_build_ops_sec});
+        try json.print(allocator, "      \"name_encode_ns\": {d:.1},\n", .{r.name_encode_ns});
+        try json.print(allocator, "      \"name_decode_ns\": {d:.1},\n", .{r.name_decode_ns});
+        try json.print(allocator, "      \"record_parse_ns\": {d:.1},\n", .{r.record_parse_ns});
+        try json.print(allocator, "      \"cache_put_ns\": {d:.1},\n", .{r.cache_put_ns});
+        try json.print(allocator, "      \"cache_get_ns\": {d:.1},\n", .{r.cache_get_ns});
+        try json.print(allocator, "      \"parallel_parse_ms\": {d:.2},\n", .{r.parallel_parse_ms});
+        try json.print(allocator, "      \"skipped\": {}\n", .{r.skipped});
 
         if (i < results.len - 1) {
-            try w.writeAll("    },\n");
+            try json.appendSlice(allocator, "    },\n");
         } else {
-            try w.writeAll("    }\n");
+            try json.appendSlice(allocator, "    }\n");
         }
     }
-    try w.writeAll("  ]\n");
-    try w.writeAll("}\n");
+    try json.appendSlice(allocator, "  ]\n");
+    try json.appendSlice(allocator, "}\n");
 
     // Write the JSON to stdout (fd 1)
-    const stdout_file = std.fs.File{ .handle = 1 };
-    try stdout_file.writeAll(json.items);
+    var written: usize = 0;
+    while (written < json.items.len) {
+        const rc = std.os.linux.write(1, json.items[written..].ptr, json.items.len - written);
+        const r: isize = @bitCast(rc);
+        if (r <= 0) break;
+        written += @intCast(r);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     // Determine max tier from args
     var max_tier: usize = tiers.len;
-    var args = std.process.args();
-    _ = args.next(); // skip program name
-    if (args.next()) |arg| {
+    var args_it = init.minimal.args.iterate();
+    _ = args_it.next(); // skip program name
+    if (args_it.next()) |arg| {
         max_tier = std.fmt.parseInt(usize, arg, 10) catch tiers.len;
         max_tier = @min(max_tier, tiers.len);
     }

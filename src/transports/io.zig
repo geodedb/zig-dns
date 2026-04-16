@@ -8,6 +8,12 @@
 //! connection pool to avoid duplicating the same logic.
 
 const std = @import("std");
+const net = @import("net_compat");
+
+inline fn timeMilli() i64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
+}
 
 /// Connect a non-blocking socket with a timeout.
 ///
@@ -15,8 +21,8 @@ const std = @import("std");
 ///   - EINPROGRESS (mapped to WouldBlock by Zig) = connection initiated, poll for completion
 ///   - EALREADY (mapped to ConnectionPending) = previous connect still in progress
 /// Both are expected for non-blocking connect and should fall through to poll().
-pub fn connectWithTimeout(sock: std.posix.socket_t, address: std.net.Address, timeout_ms: u32) !void {
-    std.posix.connect(sock, &address.any, address.getOsSockLen()) catch |err| switch (err) {
+pub fn connectWithTimeout(sock: std.posix.socket_t, address: net.Address, timeout_ms: u32) !void {
+    net.connect(sock, &address.any, address.getOsSockLen()) catch |err| switch (err) {
         error.WouldBlock, error.ConnectionPending => {},
         else => return err,
     };
@@ -31,7 +37,7 @@ pub fn connectWithTimeout(sock: std.posix.socket_t, address: std.net.Address, ti
     if ((poll_fds[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP)) != 0) {
         return error.ConnectionClosed;
     }
-    try std.posix.getsockoptError(sock);
+    try net.getsockoptError(sock);
 }
 
 /// Write all data to a non-blocking socket with a deadline-based timeout.
@@ -40,9 +46,9 @@ pub fn connectWithTimeout(sock: std.posix.socket_t, address: std.net.Address, ti
 /// or the deadline is exceeded.
 pub fn writeAllWithTimeout(sock: std.posix.socket_t, data: []const u8, timeout_ms: u32) !void {
     var sent: usize = 0;
-    const deadline = std.time.milliTimestamp() + timeout_ms;
+    const deadline = timeMilli() + timeout_ms;
     while (sent < data.len) {
-        const now = std.time.milliTimestamp();
+        const now = timeMilli();
         if (now >= deadline) return error.Timeout;
         const remaining: i32 = @intCast(@max(@as(i64, 0), deadline - now));
 
@@ -57,7 +63,7 @@ pub fn writeAllWithTimeout(sock: std.posix.socket_t, data: []const u8, timeout_m
             return error.ConnectionClosed;
         }
 
-        const n = std.posix.write(sock, data[sent..]) catch |err| switch (err) {
+        const n = net.write(sock, data[sent..]) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };
@@ -70,9 +76,9 @@ pub fn writeAllWithTimeout(sock: std.posix.socket_t, data: []const u8, timeout_m
 /// Polls for readability and returns the number of bytes read (may be less
 /// than the buffer size). Returns 0 only if the peer closed the connection.
 pub fn readWithTimeout(sock: std.posix.socket_t, buffer: []u8, timeout_ms: u32) !usize {
-    const deadline = std.time.milliTimestamp() + timeout_ms;
+    const deadline = timeMilli() + timeout_ms;
     while (true) {
-        const now = std.time.milliTimestamp();
+        const now = timeMilli();
         if (now >= deadline) return error.Timeout;
         const remaining: i32 = @intCast(@max(@as(i64, 0), deadline - now));
 
@@ -128,8 +134,8 @@ pub fn testSocketPair() ![2]std.posix.fd_t {
 
 test "writeAllWithTimeout writes full buffer through socketpair" {
     const pair = try testSocketPair();
-    defer std.posix.close(pair[0]);
-    defer std.posix.close(pair[1]);
+    defer _ = std.os.linux.close(pair[0]);
+    defer _ = std.os.linux.close(pair[1]);
 
     const data = "Hello, DNS transport!";
     try writeAllWithTimeout(pair[0], data, 5000);
@@ -141,8 +147,8 @@ test "writeAllWithTimeout writes full buffer through socketpair" {
 
 test "readExactWithTimeout reads exact number of bytes" {
     const pair = try testSocketPair();
-    defer std.posix.close(pair[0]);
-    defer std.posix.close(pair[1]);
+    defer _ = std.os.linux.close(pair[0]);
+    defer _ = std.os.linux.close(pair[1]);
 
     const data = "exact-read-test";
     try writeAllWithTimeout(pair[0], data, 5000);
@@ -154,11 +160,11 @@ test "readExactWithTimeout reads exact number of bytes" {
 
 test "readExactWithTimeout returns ConnectionClosed on early EOF" {
     const pair = try testSocketPair();
-    defer std.posix.close(pair[1]);
+    defer _ = std.os.linux.close(pair[1]);
 
     // Write partial data then close the write end
     try writeAllWithTimeout(pair[0], "short", 5000);
-    std.posix.close(pair[0]);
+    _ = std.os.linux.close(pair[0]);
 
     // Try to read more than was written
     var buf: [20]u8 = undefined;
@@ -168,8 +174,8 @@ test "readExactWithTimeout returns ConnectionClosed on early EOF" {
 
 test "writeAllWithTimeout handles partial writes" {
     const pair = try testSocketPair();
-    defer std.posix.close(pair[0]);
-    defer std.posix.close(pair[1]);
+    defer _ = std.os.linux.close(pair[0]);
+    defer _ = std.os.linux.close(pair[1]);
 
     // Write a larger buffer to exercise partial-write path
     var data: [8192]u8 = undefined;

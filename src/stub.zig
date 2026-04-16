@@ -17,6 +17,19 @@ const header_mod = @import("header");
 const question_mod = @import("question");
 const record_mod = @import("record");
 const io = @import("transport_io");
+const net = @import("net_compat");
+
+inline fn timeMilli() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+}
+
+fn systemRandomU16() u16 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    var buf: [2]u8 = undefined;
+    std.Io.randomSecure(io_inst, &buf) catch unreachable;
+    return std.mem.readInt(u16, &buf, .little);
+}
 
 pub const Message = message_mod.Message;
 pub const Name = name_mod.Name;
@@ -29,19 +42,19 @@ pub const ResourceRecord = record_mod.ResourceRecord;
 /// DNS server address
 pub const ServerAddress = struct {
     /// IP address (IPv4 or IPv6)
-    address: std.net.Address,
+    address: net.Address,
 
     /// Create from IPv4 address string
     pub fn fromIpv4(ip: []const u8, port: u16) !ServerAddress {
         return ServerAddress{
-            .address = try std.net.Address.parseIp4(ip, port),
+            .address = try net.Address.parseIp4(ip, port),
         };
     }
 
     /// Create from IPv6 address string
     pub fn fromIpv6(ip: []const u8, port: u16) !ServerAddress {
         return ServerAddress{
-            .address = try std.net.Address.parseIp6(ip, port),
+            .address = try net.Address.parseIp6(ip, port),
         };
     }
 };
@@ -100,7 +113,8 @@ pub const StubResolver = struct {
     pub fn init(allocator: std.mem.Allocator, config: StubConfig) InitError!Self {
         // Ensure cryptographically secure entropy is available
         var probe: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&probe)) catch {
+        const io_inst = std.Io.Threaded.global_single_threaded.io();
+        std.Io.randomSecure(io_inst, std.mem.asBytes(&probe)) catch {
             return error.EntropyUnavailable;
         };
         return Self{
@@ -137,7 +151,7 @@ pub const StubResolver = struct {
     fn nextId(self: *Self) u16 {
         _ = self;
         // Use OS CSPRNG for each ID to avoid predictability
-        return std.crypto.random.int(u16);
+        return systemRandomU16();
     }
 
     pub fn responseMatchesQuery(
@@ -234,30 +248,30 @@ pub const StubResolver = struct {
     /// embedded systems should verify that the OS provides adequate port entropy
     /// to mitigate DNS cache poisoning attacks (RFC 5452 Section 3).
     fn sendQuery(self: *Self, query: []const u8, server: ServerAddress) ![]u8 {
-        const sock = try std.posix.socket(
+        const sock = try net.socket(
             server.address.any.family,
             std.posix.SOCK.DGRAM,
-            std.posix.IPPROTO.UDP,
+            std.os.linux.IPPROTO.UDP,
         );
-        defer std.posix.close(sock);
+        defer net.close(sock);
 
         // Set timeout
         const timeout_sec = self.config.timeout_ms / 1000;
         const timeout_usec = (self.config.timeout_ms % 1000) * 1000;
-        const timeout = std.posix.timeval{
+        const timeout = std.os.linux.timeval{
             .sec = @intCast(timeout_sec),
             .usec = @intCast(timeout_usec),
         };
-        try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+        try std.posix.setsockopt(sock, std.os.linux.SOL.SOCKET, std.os.linux.SO.RCVTIMEO, std.mem.asBytes(&timeout));
 
         // Send query
-        _ = try std.posix.sendto(sock, query, 0, &server.address.any, server.address.getOsSockLen());
+        _ = try net.sendto(sock, query, 0, &server.address.any, server.address.getOsSockLen());
 
-        const start_ms = std.time.milliTimestamp();
+        const start_ms = timeMilli();
         // SEC-AUDIT-02: Limit discarded packets to prevent CPU pinning from flood attacks.
         var discards = types_mod.SpuriousDiscardCounter{};
         while (true) {
-            if (std.time.milliTimestamp() - start_ms >= self.config.timeout_ms) {
+            if (timeMilli() - start_ms >= self.config.timeout_ms) {
                 return error.Timeout;
             }
 
@@ -265,14 +279,14 @@ pub const StubResolver = struct {
             // 4096 bytes matches EDNS default max payload (RFC 6891).
             // Responses exceeding this are truncated and fall back to TCP.
             var buffer: [4096]u8 = undefined;
-            var src_addr: std.net.Address = undefined;
-            var src_len: std.posix.socklen_t = @sizeOf(std.net.Address);
-            const recv_len = std.posix.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len) catch |err| switch (err) {
+            var src_addr: net.Address = undefined;
+            var src_len: std.posix.socklen_t = @sizeOf(net.Address);
+            const recv_len = net.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len) catch |err| switch (err) {
                 error.WouldBlock, error.ConnectionTimedOut => return error.Timeout,
                 else => return err,
             };
 
-            if (!std.net.Address.eql(src_addr, server.address)) {
+            if (!net.Address.eql(src_addr, server.address)) {
                 discards.increment() catch return error.TooManySpuriousPackets;
                 continue;
             }
@@ -287,12 +301,12 @@ pub const StubResolver = struct {
 
     /// Send a query over TCP
     fn sendQueryTcp(self: *Self, query: []const u8, server: ServerAddress) ![]u8 {
-        const sock = try std.posix.socket(
+        const sock = try net.socket(
             server.address.any.family,
             std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
-            std.posix.IPPROTO.TCP,
+            std.os.linux.IPPROTO.TCP,
         );
-        defer std.posix.close(sock);
+        defer net.close(sock);
 
         try io.connectWithTimeout(sock, server.address, self.config.timeout_ms);
 
@@ -340,21 +354,23 @@ pub fn getSystemServers(allocator: std.mem.Allocator) ![]ServerAddress {
         // For now, return Google DNS as fallback
         try servers.append(allocator, try ServerAddress.fromIpv4(PublicServers.google_primary, types_mod.dns_port));
     } else {
-        // Unix-like systems: parse /etc/resolv.conf
-        const file = std.fs.openFileAbsolute("/etc/resolv.conf", .{}) catch {
-            // Fallback to Google DNS
-            try servers.append(allocator, try ServerAddress.fromIpv4(PublicServers.google_primary, types_mod.dns_port));
-            return servers.toOwnedSlice(allocator);
-        };
-        defer file.close();
-
-        // Read the entire file content
+        // Unix-like systems: parse /etc/resolv.conf via raw posix openat/read.
         var content_buf: [4096]u8 = undefined;
-        const content_len = file.readAll(&content_buf) catch {
+        const content_len_opt: ?usize = blk: {
+            const fd = std.posix.openat(
+                std.posix.AT.FDCWD,
+                "/etc/resolv.conf",
+                .{ .ACCMODE = .RDONLY, .CLOEXEC = true },
+                0,
+            ) catch break :blk null;
+            defer _ = std.os.linux.close(fd);
+            break :blk std.posix.read(fd, &content_buf) catch null;
+        };
+        if (content_len_opt == null) {
             try servers.append(allocator, try ServerAddress.fromIpv4(PublicServers.google_primary, types_mod.dns_port));
             return servers.toOwnedSlice(allocator);
-        };
-        const content = content_buf[0..content_len];
+        }
+        const content = content_buf[0..content_len_opt.?];
 
         // Parse line by line
         var lines = std.mem.splitScalar(u8, content, '\n');

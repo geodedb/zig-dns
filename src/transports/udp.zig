@@ -8,6 +8,12 @@
 const std = @import("std");
 const channel = @import("channel");
 const types_mod = @import("types");
+const net = @import("net_compat");
+
+inline fn timeMilli() i64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
+}
 
 pub const Channel = channel.Channel;
 pub const ChannelKind = channel.ChannelKind;
@@ -18,14 +24,14 @@ const max_spurious_discards = types_mod.max_spurious_discards;
 /// UDP Transport
 pub const UdpTransport = struct {
     allocator: std.mem.Allocator,
-    address: std.net.Address,
+    address: net.Address,
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, host: []const u8, port: u16) !Self {
         return Self{
             .allocator = allocator,
-            .address = try std.net.Address.parseIp4(host, port),
+            .address = try net.Address.parseIp4(host, port),
         };
     }
 
@@ -40,30 +46,30 @@ pub const UdpTransport = struct {
     fn queryImpl(ctx: *anyopaque, wire_req: []const u8, timeout_ms: u32) anyerror![]u8 {
         const self: *Self = @ptrCast(@alignCast(ctx));
 
-        const sock = try std.posix.socket(
+        const sock = try net.socket(
             self.address.any.family,
             std.posix.SOCK.DGRAM,
-            std.posix.IPPROTO.UDP,
+            std.os.linux.IPPROTO.UDP,
         );
-        defer std.posix.close(sock);
+        defer net.close(sock);
 
         // Set timeout
         const timeout_sec = timeout_ms / 1000;
         const timeout_usec = (timeout_ms % 1000) * 1000;
-        const timeout = std.posix.timeval{
+        const timeout = std.os.linux.timeval{
             .sec = @intCast(timeout_sec),
             .usec = @intCast(timeout_usec),
         };
-        try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+        try std.posix.setsockopt(sock, std.os.linux.SOL.SOCKET, std.os.linux.SO.RCVTIMEO, std.mem.asBytes(&timeout));
 
         // Send query
-        _ = try std.posix.sendto(sock, wire_req, 0, &self.address.any, self.address.getOsSockLen());
+        _ = try net.sendto(sock, wire_req, 0, &self.address.any, self.address.getOsSockLen());
 
-        const start_ms = std.time.milliTimestamp();
+        const start_ms = timeMilli();
         // SEC-AUDIT-02: Limit discarded packets to prevent CPU pinning from flood attacks.
         var discards = types_mod.SpuriousDiscardCounter{};
         while (true) {
-            if (std.time.milliTimestamp() - start_ms >= timeout_ms) {
+            if (timeMilli() - start_ms >= timeout_ms) {
                 return error.Timeout;
             }
 
@@ -71,14 +77,14 @@ pub const UdpTransport = struct {
             // 4096 bytes matches EDNS default max payload (RFC 6891).
             // Responses exceeding this are truncated and fall back to TCP.
             var buffer: [4096]u8 = undefined;
-            var src_addr: std.net.Address = undefined;
-            var src_len: std.posix.socklen_t = @sizeOf(std.net.Address);
-            const recv_len = std.posix.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len) catch |err| switch (err) {
+            var src_addr: net.Address = undefined;
+            var src_len: std.posix.socklen_t = @sizeOf(net.Address);
+            const recv_len = net.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len) catch |err| switch (err) {
                 error.WouldBlock, error.ConnectionTimedOut => return error.Timeout,
                 else => return err,
             };
 
-            if (!std.net.Address.eql(src_addr, self.address)) {
+            if (!net.Address.eql(src_addr, self.address)) {
                 discards.increment() catch return error.TooManySpuriousPackets;
                 continue;
             }

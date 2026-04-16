@@ -15,6 +15,11 @@
 
 const std = @import("std");
 
+inline fn timeSec() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toSeconds();
+}
+
 /// DNSSEC Algorithm numbers (subset relevant for SIG(0))
 /// Non-exhaustive to safely handle unknown algorithm values from wire data
 /// without panicking (SEC-C20, CWE-704).
@@ -82,7 +87,8 @@ pub const Sig0KeyPair = struct {
     pub fn generate(allocator: std.mem.Allocator, name: []const u8, algorithm: Algorithm) !Self {
         switch (algorithm) {
             .ed25519 => {
-                const key_pair = std.crypto.sign.Ed25519.KeyPair.generate();
+                const io_inst = std.Io.Threaded.global_single_threaded.io();
+                const key_pair = std.crypto.sign.Ed25519.KeyPair.generate(io_inst);
                 const public_key = try allocator.dupe(u8, &key_pair.public_key.bytes);
                 return Self{
                     .name = name,
@@ -93,7 +99,8 @@ pub const Sig0KeyPair = struct {
                 };
             },
             .ecdsa_p256_sha256 => {
-                const key_pair = std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair.generate();
+                const io_inst = std.Io.Threaded.global_single_threaded.io();
+                const key_pair = std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair.generate(io_inst);
                 const public_key = try allocator.dupe(u8, &key_pair.public_key.toUncompressedSec1());
                 return Self{
                     .name = name,
@@ -104,7 +111,8 @@ pub const Sig0KeyPair = struct {
                 };
             },
             .ecdsa_p384_sha384 => {
-                const key_pair = std.crypto.sign.ecdsa.EcdsaP384Sha384.KeyPair.generate();
+                const io_inst = std.Io.Threaded.global_single_threaded.io();
+                const key_pair = std.crypto.sign.ecdsa.EcdsaP384Sha384.KeyPair.generate(io_inst);
                 const public_key = try allocator.dupe(u8, &key_pair.public_key.toUncompressedSec1());
                 return Self{
                     .name = name,
@@ -303,7 +311,7 @@ pub const Sig0Context = struct {
 
     /// Sign a DNS message with SIG(0)
     pub fn sign(self: *Self, message: []const u8, key_pair: *const Sig0KeyPair) ![]u8 {
-        const now: u32 = @intCast(@as(u64, @bitCast(std.time.timestamp())));
+        const now: u32 = @intCast(@as(u64, @bitCast(timeSec())));
         // SECURITY (SEC-AUDIT-04): Checked addition prevents u32 overflow (CWE-190).
         const expiration = std.math.add(u32, now, self.validity_seconds) catch
             return error.TimestampOverflow;
@@ -400,7 +408,7 @@ pub const Sig0Context = struct {
         }
 
         // Verify time validity
-        const now: u32 = @intCast(@as(u64, @bitCast(std.time.timestamp())));
+        const now: u32 = @intCast(@as(u64, @bitCast(timeSec())));
         if (now < sig0.sig_inception or now > sig0.sig_expiration) {
             return VerifyResult{ .valid = false, .error_reason = "Signature expired or not yet valid" };
         }

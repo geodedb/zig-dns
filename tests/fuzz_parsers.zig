@@ -23,60 +23,74 @@ const question_mod = @import("question");
 
 test "fuzz Header.parse" {
     try std.testing.fuzz({}, struct {
-        pub fn testOne(_: void, input: []const u8) anyerror!void {
-            _ = header_mod.Header.parse(input) catch return;
+        pub fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [512]u8 = undefined;
+            const len = smith.slice(&buf);
+            _ = header_mod.Header.parse(buf[0..len]) catch return;
         }
     }.testOne, .{});
 }
 
 test "fuzz Message.parse" {
     try std.testing.fuzz({}, struct {
-        pub fn testOne(_: void, input: []const u8) anyerror!void {
-            _ = message_mod.Message.parse(input) catch return;
+        pub fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [4096]u8 = undefined;
+            const len = smith.slice(&buf);
+            _ = message_mod.Message.parse(buf[0..len]) catch return;
         }
     }.testOne, .{});
 }
 
 test "fuzz Name.parse" {
     try std.testing.fuzz({}, struct {
-        pub fn testOne(_: void, input: []const u8) anyerror!void {
-            if (input.len == 0) return;
-            _ = name_mod.Name.parse(input, 0) catch return;
+        pub fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [512]u8 = undefined;
+            const len = smith.slice(&buf);
+            if (len == 0) return;
+            _ = name_mod.Name.parse(buf[0..len], 0) catch return;
         }
     }.testOne, .{});
 }
 
 test "fuzz ResourceRecord.parse" {
     try std.testing.fuzz({}, struct {
-        pub fn testOne(_: void, input: []const u8) anyerror!void {
-            if (input.len == 0) return;
-            _ = record_mod.ResourceRecord.parse(input, 0) catch return;
+        pub fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [1024]u8 = undefined;
+            const len = smith.slice(&buf);
+            if (len == 0) return;
+            _ = record_mod.ResourceRecord.parse(buf[0..len], 0) catch return;
         }
     }.testOne, .{});
 }
 
 test "fuzz Question.parse" {
     try std.testing.fuzz({}, struct {
-        pub fn testOne(_: void, input: []const u8) anyerror!void {
-            if (input.len == 0) return;
-            _ = question_mod.Question.parse(input, 0) catch return;
+        pub fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [512]u8 = undefined;
+            const len = smith.slice(&buf);
+            if (len == 0) return;
+            _ = question_mod.Question.parse(buf[0..len], 0) catch return;
         }
     }.testOne, .{});
 }
 
 test "fuzz Name.encodeBuf" {
     try std.testing.fuzz({}, struct {
-        pub fn testOne(_: void, input: []const u8) anyerror!void {
+        pub fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var input_buf: [512]u8 = undefined;
+            const len = smith.slice(&input_buf);
             var buf: [256]u8 = undefined;
-            _ = name_mod.Name.encodeBuf(input, &buf) catch return;
+            _ = name_mod.Name.encodeBuf(input_buf[0..len], &buf) catch return;
         }
     }.testOne, .{});
 }
 
 test "fuzz Message.parse with iteration" {
     try std.testing.fuzz({}, struct {
-        pub fn testOne(_: void, input: []const u8) anyerror!void {
-            const msg = message_mod.Message.parse(input) catch return;
+        pub fn testOne(_: void, smith: *std.testing.Smith) anyerror!void {
+            var buf: [4096]u8 = undefined;
+            const len = smith.slice(&buf);
+            const msg = message_mod.Message.parse(buf[0..len]) catch return;
 
             // Exercise question iteration
             var q_iter = msg.questions();

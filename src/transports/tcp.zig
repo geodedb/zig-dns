@@ -8,6 +8,7 @@
 const std = @import("std");
 const channel = @import("channel");
 const io = @import("transport_io");
+const net = @import("net_compat");
 
 pub const Channel = channel.Channel;
 pub const ChannelKind = channel.ChannelKind;
@@ -15,14 +16,14 @@ pub const ChannelKind = channel.ChannelKind;
 /// TCP Transport
 pub const TcpTransport = struct {
     allocator: std.mem.Allocator,
-    address: std.net.Address,
+    address: net.Address,
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, host: []const u8, port: u16) !Self {
         return Self{
             .allocator = allocator,
-            .address = try std.net.Address.parseIp4(host, port),
+            .address = try net.Address.parseIp4(host, port),
         };
     }
 
@@ -37,12 +38,12 @@ pub const TcpTransport = struct {
     fn queryImpl(ctx: *anyopaque, wire_req: []const u8, timeout_ms: u32) anyerror![]u8 {
         const self: *Self = @ptrCast(@alignCast(ctx));
 
-        const sock = try std.posix.socket(
+        const sock = try net.socket(
             self.address.any.family,
             std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
-            std.posix.IPPROTO.TCP,
+            std.os.linux.IPPROTO.TCP,
         );
-        defer std.posix.close(sock);
+        defer net.close(sock);
 
         // Connect
         try io.connectWithTimeout(sock, self.address, timeout_ms);

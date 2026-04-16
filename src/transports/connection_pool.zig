@@ -16,6 +16,28 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const io = @import("transport_io");
+const net = @import("net_compat");
+
+inline fn timeMilli() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+}
+
+/// 0.16.0 shim: Mutex was moved. Use std.Io.Mutex via wrapper.
+const Mutex = struct {
+    inner: std.Io.Mutex = std.Io.Mutex.init,
+    pub fn lock(self: *Mutex) void {
+        const io_inst = std.Io.Threaded.global_single_threaded.io();
+        self.inner.lockUncancelable(io_inst);
+    }
+    pub fn unlock(self: *Mutex) void {
+        const io_inst = std.Io.Threaded.global_single_threaded.io();
+        self.inner.unlock(io_inst);
+    }
+    pub fn tryLock(self: *Mutex) bool {
+        return self.inner.tryLock();
+    }
+};
 
 /// Cross-platform dummy fd for testing (not a real connection)
 /// On Windows fd_t is *anyopaque, on POSIX it's an integer
@@ -166,7 +188,7 @@ pub const PooledConnection = struct {
     /// Close the connection
     pub fn close(self: *Self) void {
         if (self.state != .closed) {
-            std.posix.close(self.fd);
+            net.close(self.fd);
             self.state = .closed;
         }
     }
@@ -208,7 +230,7 @@ pub const ConnectionPool = struct {
     /// All pooled connections
     connections: std.ArrayList(PooledConnection),
     /// Mutex for thread safety
-    mutex: std.Thread.Mutex,
+    mutex: Mutex,
     /// Pool statistics
     stats: PoolStats,
     /// Monotonically increasing generation counter.
@@ -289,7 +311,7 @@ pub const ConnectionPool = struct {
     pub fn acquire(self: *Self, server: ServerKey, timeout_ms: u32) !ConnectionHandle {
         self.mutex.lock();
 
-        const now = std.time.milliTimestamp();
+        const now = timeMilli();
 
         // First, try to reuse an existing connection
         for (self.connections.items) |*conn| {
@@ -322,7 +344,7 @@ pub const ConnectionPool = struct {
         var fd = self.createConnection(server, timeout_ms) catch |err| {
             return err;
         };
-        errdefer if (fd != -1) std.posix.close(fd);
+        errdefer if (fd != -1) net.close(fd);
 
         // Re-lock to mutate pool state
         self.mutex.lock();
@@ -335,7 +357,7 @@ pub const ConnectionPool = struct {
         if (recheck_count >= self.config.max_connections_per_server) {
             // Limit exceeded -- close the fd we just created and try to
             // reuse an existing connection that may have become available.
-            std.posix.close(fd);
+            net.close(fd);
             fd = -1; // Prevent errdefer double-close
 
             for (self.connections.items) |*conn| {
@@ -381,7 +403,7 @@ pub const ConnectionPool = struct {
         defer self.mutex.unlock();
 
         const conn = self.findByGeneration(handle.generation) orelse return;
-        const now = std.time.milliTimestamp();
+        const now = timeMilli();
 
         if (success) {
             conn.markQueryComplete(now, bytes_sent, bytes_recv);
@@ -416,7 +438,7 @@ pub const ConnectionPool = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = std.time.milliTimestamp();
+        const now = timeMilli();
         var i: usize = 0;
 
         while (i < self.connections.items.len) {
@@ -477,12 +499,12 @@ pub const ConnectionPool = struct {
         _ = self;
 
         // Create socket
-        const fd = try std.posix.socket(
+        const fd = try net.socket(
             std.posix.AF.INET,
             std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
             std.posix.IPPROTO.TCP,
         );
-        errdefer std.posix.close(fd);
+        errdefer net.close(fd);
 
         // Set TCP_NODELAY to reduce latency (best-effort, non-fatal)
         const one: c_int = 1;
@@ -637,7 +659,7 @@ pub const PipelinedBatch = struct {
 pub const PooledTcpTransport = struct {
     allocator: std.mem.Allocator,
     pool: *ConnectionPool,
-    address: std.net.Address,
+    address: net.Address,
     server_key: ServerKey,
 
     const Self = @This();
@@ -646,7 +668,7 @@ pub const PooledTcpTransport = struct {
         return Self{
             .allocator = allocator,
             .pool = pool,
-            .address = try std.net.Address.parseIp4(host, port),
+            .address = try net.Address.parseIp4(host, port),
             .server_key = ServerKey.init(host, port, .tcp),
         };
     }
@@ -904,8 +926,8 @@ test "PipelinedBatch execute with socketpair completes all queries" {
     const fds = try testSocketPair();
     const client_fd = fds[0];
     const server_fd = fds[1];
-    defer std.posix.close(client_fd);
-    defer std.posix.close(server_fd);
+    defer net.close(client_fd);
+    defer net.close(server_fd);
 
     // Build a batch with one query
     var batch = PipelinedBatch.init(allocator);
@@ -963,7 +985,7 @@ test "PipelinedBatch execute with socketpair completes all queries" {
                     .revents = 0,
                 }};
                 _ = std.posix.poll(&poll_fds, 5000) catch return;
-                const n = std.posix.write(fd, full_resp[sent..]) catch return;
+                const n = net.write(fd, full_resp[sent..]) catch return;
                 sent += n;
             }
         }
@@ -998,7 +1020,7 @@ test "PipelinedBatch execute handles connection closed gracefully" {
     const fds = try testSocketPair();
     const client_fd = fds[0];
     const server_fd = fds[1];
-    defer std.posix.close(client_fd);
+    defer net.close(client_fd);
 
     // Build a batch with two queries
     var batch = PipelinedBatch.init(allocator);
@@ -1021,7 +1043,7 @@ test "PipelinedBatch execute handles connection closed gracefully" {
             _ = std.posix.poll(&poll_fds, 2000) catch {};
             _ = std.posix.read(fd, &buf) catch {};
             // Close immediately - no response sent
-            std.posix.close(fd);
+            net.close(fd);
         }
     };
 

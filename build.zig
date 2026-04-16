@@ -18,6 +18,14 @@ pub fn build(b: *std.Build) void {
     build_options.addOption(bool, "feature_doq", feature_doq);
     const build_options_mod = build_options.createModule();
 
+    // Internal -- `std.net` compatibility shim for Zig 0.16.0. Provides the
+    // pre-0.16 `Address` / `Ip4Address` / `Ip6Address` surface on top of
+    // `std.posix.sockaddr` until the transport layer migrates to `std.Io.net`.
+    const net_compat_mod = b.addModule("net_compat", .{
+        .root_source_file = b.path("src/util/net_compat.zig"),
+        .target = target,
+    });
+
     // Get thread_pool dependency if enabled
     const tp_mod: ?*std.Build.Module = if (enable_tp) blk: {
         const tp_dep = b.dependency("thread_pool", .{
@@ -146,6 +154,9 @@ pub fn build(b: *std.Build) void {
     const transport_io_mod = b.addModule("transport_io", .{
         .root_source_file = b.path("src/transports/io.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "net_compat", .module = net_compat_mod },
+        },
     });
 
     // Public API -- RFC 1034 Section 5.3.3: Stub Resolver
@@ -161,6 +172,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "question", .module = question_mod },
             .{ .name = "record", .module = record_mod },
             .{ .name = "transport_io", .module = transport_io_mod },
+            .{ .name = "net_compat", .module = net_compat_mod },
         },
     });
 
@@ -178,6 +190,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "record", .module = record_mod },
             .{ .name = "cache", .module = cache_mod },
             .{ .name = "stub", .module = stub_mod },
+            .{ .name = "net_compat", .module = net_compat_mod },
         },
     });
 
@@ -275,7 +288,9 @@ pub fn build(b: *std.Build) void {
     const zone_transfer_mod = b.addModule("zone_transfer", .{
         .root_source_file = b.path("src/resolver/zone_transfer.zig"),
         .target = target,
-        .imports = &.{},
+        .imports = &.{
+            .{ .name = "net_compat", .module = net_compat_mod },
+        },
     });
 
     // Public API -- DNSSEC Validation (RFC 4033/4034/4035)
@@ -385,6 +400,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "channel", .module = channel_mod },
             .{ .name = "types", .module = types_mod },
+            .{ .name = "net_compat", .module = net_compat_mod },
         },
     });
 
@@ -395,6 +411,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "channel", .module = channel_mod },
             .{ .name = "transport_io", .module = transport_io_mod },
+            .{ .name = "net_compat", .module = net_compat_mod },
         },
     });
 
@@ -432,6 +449,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "transport_io", .module = transport_io_mod },
+            .{ .name = "net_compat", .module = net_compat_mod },
         },
     });
 
@@ -439,6 +457,9 @@ pub fn build(b: *std.Build) void {
     const happy_eyeballs_mod = b.addModule("happy_eyeballs", .{
         .root_source_file = b.path("src/transports/happy_eyeballs.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "net_compat", .module = net_compat_mod },
+        },
     });
 
     // ========================================================================
@@ -533,13 +554,14 @@ pub fn build(b: *std.Build) void {
         break :blk cli_dep.module("cli");
     } else null;
 
-    if (!is_windows) {
+    if (!is_windows and cli_mod != null) {
         const zdig_mod = b.createModule(.{
             .root_source_file = b.path("cmd/zdig.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "dns", .module = dns_mod },
+                .{ .name = "net_compat", .module = net_compat_mod },
             },
         });
         if (cli_mod) |m| zdig_mod.addImport("cli", m);
@@ -696,6 +718,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "question", .module = question_mod },
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "transport_io", .module = transport_io_mod },
+                .{ .name = "net_compat", .module = net_compat_mod },
             },
         },
         .{
@@ -713,6 +736,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "dns_cache", .module = dns_cache_mod },
                 .{ .name = "clock", .module = clock_mod },
                 .{ .name = "cache_protection", .module = cache_protection_mod },
+                .{ .name = "net_compat", .module = net_compat_mod },
             },
         },
         .{
@@ -948,6 +972,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/transports/io.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "net_compat", .module = net_compat_mod },
+            },
         }),
     });
     const run_transport_io_test = b.addRunArtifact(transport_io_test);
@@ -961,6 +988,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "transport_io", .module = transport_io_mod },
+                .{ .name = "net_compat", .module = net_compat_mod },
             },
         }),
     });
@@ -973,6 +1001,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/transports/happy_eyeballs.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "net_compat", .module = net_compat_mod },
+            },
         }),
     });
     const run_happy_eyeballs_test = b.addRunArtifact(happy_eyeballs_test);
@@ -1018,7 +1049,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/resolver/zone_transfer.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{},
+            .imports = &.{
+                .{ .name = "net_compat", .module = net_compat_mod },
+            },
         }),
     });
     const run_zone_transfer_test = b.addRunArtifact(zone_transfer_test);
@@ -1234,7 +1267,7 @@ pub fn build(b: *std.Build) void {
     // zdig CLI Tests - Unit tests for security-sensitive functions
     // ========================================================================
 
-    if (!is_windows) {
+    if (!is_windows and cli_mod != null) {
         const test_zdig_step = b.step("test-zdig", "Run zdig CLI unit tests");
 
         const zdig_test_mod = b.createModule(.{
@@ -1243,6 +1276,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "dns", .module = dns_mod },
+                .{ .name = "net_compat", .module = net_compat_mod },
             },
         });
         if (cli_mod) |m| zdig_test_mod.addImport("cli", m);

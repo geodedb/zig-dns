@@ -12,6 +12,11 @@
 
 const std = @import("std");
 
+inline fn timeMilli() i64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
+}
+
 /// Log level
 pub const LogLevel = enum(u8) {
     /// Debug information
@@ -150,7 +155,8 @@ pub const DnsLogger = struct {
     pub fn init(allocator: std.mem.Allocator, config: LogConfig) InitError!Self {
         // Use secure random for sampling decisions
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        std.Io.randomSecure(io, std.mem.asBytes(&seed)) catch {
             return error.EntropyUnavailable;
         };
         return Self{
@@ -159,7 +165,7 @@ pub const DnsLogger = struct {
             .buffer = .empty,
             .stats = .{},
             .rng = std.Random.DefaultPrng.init(seed),
-            .last_flush_ms = std.time.milliTimestamp(),
+            .last_flush_ms = timeMilli(),
         };
     }
 
@@ -210,26 +216,26 @@ pub const DnsLogger = struct {
         // Check buffer bounds and flush if needed (SEC-GAP-055: CWE-400)
         try self.checkAndFlush();
 
-        const timestamp = std.time.milliTimestamp();
+        const timestamp = timeMilli();
 
         switch (self.config.format) {
             .text => {
                 if (self.config.include_timestamp) {
-                    try self.buffer.writer(self.allocator).print("{d} ", .{timestamp});
+                    try self.buffer.print(self.allocator, "{d} ", .{timestamp});
                 }
-                try self.buffer.writer(self.allocator).print("[{s}] ", .{level.toString()});
-                try self.buffer.writer(self.allocator).print(fmt, args);
+                try self.buffer.print(self.allocator, "[{s}] ", .{level.toString()});
+                try self.buffer.print(self.allocator, fmt, args);
                 try self.buffer.append(self.allocator, '\n');
             },
             .json => {
-                try self.buffer.writer(self.allocator).print(
+                try self.buffer.print(self.allocator,
                     \\{{"timestamp":{d},"level":"{s}","message":"
                 , .{ timestamp, level.toString() });
-                try self.buffer.writer(self.allocator).print(fmt, args);
+                try self.buffer.print(self.allocator, fmt, args);
                 try self.buffer.appendSlice(self.allocator, "\"}\n");
             },
             else => {
-                try self.buffer.writer(self.allocator).print(fmt, args);
+                try self.buffer.print(self.allocator, fmt, args);
                 try self.buffer.append(self.allocator, '\n');
             },
         }
@@ -238,7 +244,8 @@ pub const DnsLogger = struct {
     }
 
     fn formatQueryEntry(self: *Self, entry: QueryLogEntry, level: LogLevel) !void {
-        const writer = self.buffer.writer(self.allocator);
+        const buf = &self.buffer;
+        const a = self.allocator;
 
         switch (self.config.format) {
             .text => {
@@ -247,23 +254,23 @@ pub const DnsLogger = struct {
                 defer self.allocator.free(qname_safe);
 
                 if (self.config.include_timestamp) {
-                    try writer.print("{d} ", .{entry.timestamp});
+                    try buf.print(a, "{d} ", .{entry.timestamp});
                 }
-                try writer.print("[{s}] QUERY ", .{level.toString()});
+                try buf.print(a, "[{s}] QUERY ", .{level.toString()});
                 if (self.config.include_query_id) {
-                    try writer.print("id={d} ", .{entry.query_id});
+                    try buf.print(a, "id={d} ", .{entry.query_id});
                 }
-                try writer.print("qname={s} qtype={s} ", .{ qname_safe, entry.qtype });
+                try buf.print(a, "qname={s} qtype={s} ", .{ qname_safe, entry.qtype });
                 if (entry.client_ip) |ip| {
                     const display_ip = if (self.config.anonymize_ips) anonymizeIp(ip) else ip;
-                    try writer.print("client={s} ", .{display_ip});
+                    try buf.print(a, "client={s} ", .{display_ip});
                 }
                 if (entry.server) |server| {
-                    try writer.print("server={s} ", .{server});
+                    try buf.print(a, "server={s} ", .{server});
                 }
-                try writer.print("proto={s}", .{entry.protocol});
-                if (entry.edns) try writer.writeAll(" edns=true");
-                if (entry.dnssec) try writer.writeAll(" dnssec=true");
+                try buf.print(a, "proto={s}", .{entry.protocol});
+                if (entry.edns) try buf.appendSlice(a, " edns=true");
+                if (entry.dnssec) try buf.appendSlice(a, " dnssec=true");
                 try self.buffer.append(self.allocator, '\n');
             },
             .json => {
@@ -271,7 +278,7 @@ pub const DnsLogger = struct {
                 const qname_escaped = try escapeJsonString(self.allocator, entry.qname);
                 defer self.allocator.free(qname_escaped);
 
-                try writer.print(
+                try buf.print(a,
                     \\{{"type":"query","timestamp":{d},"level":"{s}","query_id":{d},"qname":"{s}","qtype":"{s}","qclass":"{s}","protocol":"{s}"
                 , .{
                     entry.timestamp,
@@ -284,25 +291,26 @@ pub const DnsLogger = struct {
                 });
                 if (entry.client_ip) |ip| {
                     const display_ip = if (self.config.anonymize_ips) anonymizeIp(ip) else ip;
-                    try writer.print(",\"client_ip\":\"{s}\"", .{display_ip});
+                    try buf.print(a, ",\"client_ip\":\"{s}\"", .{display_ip});
                 }
                 if (entry.server) |server| {
                     const server_escaped = try escapeJsonString(self.allocator, server);
                     defer self.allocator.free(server_escaped);
-                    try writer.print(",\"server\":\"{s}\"", .{server_escaped});
+                    try buf.print(a, ",\"server\":\"{s}\"", .{server_escaped});
                 }
-                try writer.print(",\"edns\":{},\"dnssec\":{}}}\n", .{ entry.edns, entry.dnssec });
+                try buf.print(a, ",\"edns\":{},\"dnssec\":{}}}\n", .{ entry.edns, entry.dnssec });
             },
             else => {
                 const qname_safe = try sanitizeLogString(self.allocator, entry.qname);
                 defer self.allocator.free(qname_safe);
-                try writer.print("QUERY {s} {s}\n", .{ qname_safe, entry.qtype });
+                try buf.print(a, "QUERY {s} {s}\n", .{ qname_safe, entry.qtype });
             },
         }
     }
 
     fn formatResponseEntry(self: *Self, entry: ResponseLogEntry, level: LogLevel) !void {
-        const writer = self.buffer.writer(self.allocator);
+        const buf = &self.buffer;
+        const a = self.allocator;
 
         switch (self.config.format) {
             .text => {
@@ -311,23 +319,23 @@ pub const DnsLogger = struct {
                 defer self.allocator.free(qname_safe);
 
                 if (self.config.include_timestamp) {
-                    try writer.print("{d} ", .{entry.query.timestamp});
+                    try buf.print(a, "{d} ", .{entry.query.timestamp});
                 }
-                try writer.print("[{s}] RESPONSE ", .{level.toString()});
+                try buf.print(a, "[{s}] RESPONSE ", .{level.toString()});
                 if (self.config.include_query_id) {
-                    try writer.print("id={d} ", .{entry.query.query_id});
+                    try buf.print(a, "id={d} ", .{entry.query.query_id});
                 }
-                try writer.print("qname={s} rcode={s} time={d}ms ", .{
+                try buf.print(a, "qname={s} rcode={s} time={d}ms ", .{
                     qname_safe,
                     entry.rcode,
                     entry.response_time_ms,
                 });
-                try writer.print("answers={d} ", .{entry.answer_count});
-                if (entry.cache_hit) try writer.writeAll("cached=true ");
+                try buf.print(a, "answers={d} ", .{entry.answer_count});
+                if (entry.cache_hit) try buf.appendSlice(a, "cached=true ");
                 if (entry.error_msg) |msg| {
                     const msg_safe = try sanitizeLogString(self.allocator, msg);
                     defer self.allocator.free(msg_safe);
-                    try writer.print("error=\"{s}\"", .{msg_safe});
+                    try buf.print(a, "error=\"{s}\"", .{msg_safe});
                 }
                 try self.buffer.append(self.allocator, '\n');
             },
@@ -336,7 +344,7 @@ pub const DnsLogger = struct {
                 const qname_escaped = try escapeJsonString(self.allocator, entry.query.qname);
                 defer self.allocator.free(qname_escaped);
 
-                try writer.print(
+                try buf.print(a,
                     \\{{"type":"response","timestamp":{d},"level":"{s}","query_id":{d},"qname":"{s}","qtype":"{s}","rcode":"{s}","response_time_ms":{d},"answer_count":{d},"authority_count":{d},"additional_count":{d},"truncated":{},"authenticated":{},"cache_hit":{}
                 , .{
                     entry.query.timestamp,
@@ -356,14 +364,14 @@ pub const DnsLogger = struct {
                 if (entry.error_msg) |msg| {
                     const msg_escaped = try escapeJsonString(self.allocator, msg);
                     defer self.allocator.free(msg_escaped);
-                    try writer.print(",\"error\":\"{s}\"", .{msg_escaped});
+                    try buf.print(a, ",\"error\":\"{s}\"", .{msg_escaped});
                 }
-                try writer.writeAll("}\n");
+                try buf.appendSlice(a, "}\n");
             },
             else => {
                 const qname_safe = try sanitizeLogString(self.allocator, entry.query.qname);
                 defer self.allocator.free(qname_safe);
-                try writer.print("RESPONSE {s} {s} {d}ms\n", .{ qname_safe, entry.rcode, entry.response_time_ms });
+                try buf.print(a, "RESPONSE {s} {s} {d}ms\n", .{ qname_safe, entry.rcode, entry.response_time_ms });
             },
         }
     }
@@ -378,7 +386,7 @@ pub const DnsLogger = struct {
 
     /// Check buffer size and flush if needed (SEC-GAP-055: CWE-400)
     fn checkAndFlush(self: *Self) !void {
-        const now = std.time.milliTimestamp();
+        const now = timeMilli();
 
         // Check if buffer exceeds configured size
         if (self.buffer.items.len >= self.config.buffer_size) {
@@ -501,7 +509,7 @@ pub fn sanitizeLogString(allocator: std.mem.Allocator, input: []const u8) ![]u8 
 /// Create a query log entry
 pub fn queryEntry(query_id: u16, qname: []const u8, qtype: []const u8) QueryLogEntry {
     return QueryLogEntry{
-        .timestamp = std.time.milliTimestamp(),
+        .timestamp = timeMilli(),
         .query_id = query_id,
         .qname = qname,
         .qtype = qtype,

@@ -52,7 +52,8 @@ pub const SystemRandom = struct {
     /// DNS cache poisoning attacks through transaction ID prediction.
     pub fn init() RandomError!Self {
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        std.Io.randomSecure(io, std.mem.asBytes(&seed)) catch {
             // SECURITY: Do NOT fall back to timestamp-based seeding.
             // Predictable seeds enable transaction ID prediction attacks.
             // See: RFC 5452, CWE-330

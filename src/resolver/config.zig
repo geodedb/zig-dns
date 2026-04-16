@@ -12,6 +12,11 @@
 
 const std = @import("std");
 
+inline fn timeMilli() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+}
+
 /// Configuration value types
 pub const Value = union(enum) {
     string: []const u8,
@@ -146,13 +151,13 @@ pub const Config = struct {
         try self.parseIni(content);
 
         self.file_path = path;
-        self.last_load_time = std.time.milliTimestamp();
+        self.last_load_time = timeMilli();
     }
 
     /// Load configuration from string
     pub fn loadString(self: *Self, content: []const u8) !void {
         try self.parseIni(content);
-        self.last_load_time = std.time.milliTimestamp();
+        self.last_load_time = timeMilli();
     }
 
     /// Parse INI-style configuration

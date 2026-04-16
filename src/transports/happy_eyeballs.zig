@@ -16,6 +16,12 @@
 //! - RFC 6555: Happy Eyeballs - Success with Dual-Stack Hosts
 
 const std = @import("std");
+const net = @import("net_compat");
+
+inline fn timeMilli() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+}
 
 /// Happy Eyeballs configuration
 pub const Config = struct {
@@ -47,7 +53,7 @@ pub const AttemptResult = struct {
     /// Socket file descriptor (valid if success)
     fd: std.posix.fd_t,
     /// Address that succeeded
-    address: std.net.Address,
+    address: net.Address,
     /// Address family (AF_INET or AF_INET6)
     family: AddressFamily,
     /// Attempt index
@@ -67,7 +73,7 @@ const AttemptState = enum {
 
 /// Single connection attempt
 const ConnectionAttempt = struct {
-    address: std.net.Address,
+    address: net.Address,
     family: AddressFamily,
     fd: std.posix.fd_t,
     state: AttemptState,
@@ -127,7 +133,7 @@ pub const HappyEyeballs = struct {
     }
 
     /// Connect to one of the given addresses using Happy Eyeballs algorithm
-    pub fn connect(self: *Self, addresses: []const std.net.Address, hostname: []const u8) !AttemptResult {
+    pub fn connect(self: *Self, addresses: []const net.Address, hostname: []const u8) !AttemptResult {
         if (addresses.len == 0) return error.NoAddresses;
 
         const hostname_hash = std.hash.Wyhash.hash(0, hostname);
@@ -143,13 +149,13 @@ pub const HappyEyeballs = struct {
                 // Close any fd that wasn't the winning connection
                 // All attempts in this list have valid fds since socket() succeeded before adding
                 if (attempt.state != .connected) {
-                    std.posix.close(attempt.fd);
+                    net.close(attempt.fd);
                 }
             }
             attempts.deinit(self.allocator);
         }
 
-        const start_time = std.time.milliTimestamp();
+        const start_time = timeMilli();
         var next_attempt_index: usize = 0;
         var winner: ?AttemptResult = null;
 
@@ -168,7 +174,7 @@ pub const HappyEyeballs = struct {
                     .family = addr.any.family,
                     .fd = fd,
                     .state = .connecting,
-                    .start_time = std.time.milliTimestamp(),
+                    .start_time = timeMilli(),
                     .index = next_attempt_index,
                 });
                 next_attempt_index += 1;
@@ -198,7 +204,7 @@ pub const HappyEyeballs = struct {
             if (active_count == 0) break;
 
             // Compute remaining time before overall timeout
-            const elapsed: u32 = @intCast(std.time.milliTimestamp() - start_time);
+            const elapsed: u32 = @intCast(timeMilli() - start_time);
             if (elapsed > self.config.connection_timeout_ms) break;
 
             const remaining_ms = self.config.connection_timeout_ms - elapsed;
@@ -221,7 +227,7 @@ pub const HappyEyeballs = struct {
                         const err = getSocketError(attempt.fd);
                         if (err == 0) {
                             attempt.state = .connected;
-                            const now = std.time.milliTimestamp();
+                            const now = timeMilli();
                             const conn_time: u32 = @intCast(@max(0, now - attempt.start_time));
 
                             winner = AttemptResult{
@@ -253,12 +259,12 @@ pub const HappyEyeballs = struct {
                             break;
                         } else {
                             attempt.state = .failed;
-                            std.posix.close(attempt.fd);
+                            net.close(attempt.fd);
                             attempt.fd = -1;
                         }
                     } else if (revents & (std.posix.POLL.ERR | std.posix.POLL.HUP) != 0) {
                         attempt.state = .failed;
-                        std.posix.close(attempt.fd);
+                        net.close(attempt.fd);
                         attempt.fd = -1;
                     }
                 }
@@ -269,7 +275,7 @@ pub const HappyEyeballs = struct {
         for (attempts.items) |*attempt| {
             if (attempt.state == .connecting) {
                 attempt.state = .cancelled;
-                std.posix.close(attempt.fd);
+                net.close(attempt.fd);
                 attempt.fd = -1;
             }
         }
@@ -282,8 +288,8 @@ pub const HappyEyeballs = struct {
     }
 
     /// Sort addresses according to RFC 8305
-    fn sortAddresses(self: *Self, addresses: []const std.net.Address, hostname_hash: u64) ![]std.net.Address {
-        const sorted = try self.allocator.alloc(std.net.Address, addresses.len);
+    fn sortAddresses(self: *Self, addresses: []const net.Address, hostname_hash: u64) ![]net.Address {
+        const sorted = try self.allocator.alloc(net.Address, addresses.len);
         errdefer self.allocator.free(sorted);
 
         @memcpy(sorted, addresses);
@@ -292,7 +298,7 @@ pub const HappyEyeballs = struct {
         var preferred_family: ?u16 = null;
         if (self.config.enable_family_cache) {
             if (self.family_cache.get(hostname_hash)) |entry| {
-                const now = std.time.milliTimestamp();
+                const now = timeMilli();
                 if (now - entry.timestamp < self.config.family_cache_ttl_ms) {
                     preferred_family = entry.family;
                     self.stats.cache_hits += 1;
@@ -309,8 +315,8 @@ pub const HappyEyeballs = struct {
             .preferred_family = preferred_family,
         };
 
-        std.mem.sort(std.net.Address, sorted, sort_context, struct {
-            fn lessThan(ctx: @TypeOf(sort_context), a: std.net.Address, b: std.net.Address) bool {
+        std.mem.sort(net.Address, sorted, sort_context, struct {
+            fn lessThan(ctx: @TypeOf(sort_context), a: net.Address, b: net.Address) bool {
                 const a_is_v6 = a.any.family == AF_INET6;
                 const b_is_v6 = b.any.family == AF_INET6;
 
@@ -336,14 +342,14 @@ pub const HappyEyeballs = struct {
     }
 
     /// Start a non-blocking connection attempt
-    fn startConnection(self: *Self, address: std.net.Address) !std.posix.fd_t {
+    fn startConnection(self: *Self, address: net.Address) !std.posix.fd_t {
         _ = self;
-        const fd = try std.posix.socket(
+        const fd = try net.socket(
             address.any.family,
             std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
             std.posix.IPPROTO.TCP,
         );
-        errdefer std.posix.close(fd);
+        errdefer net.close(fd);
 
         // Set TCP_NODELAY
         const one: c_int = 1;
@@ -351,7 +357,7 @@ pub const HappyEyeballs = struct {
         std.posix.setsockopt(fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {};
 
         // Start connection (will return WouldBlock for non-blocking)
-        std.posix.connect(fd, &address.any, address.getOsSockLen()) catch |err| {
+        net.connect(fd, &address.any, address.getOsSockLen()) catch |err| {
             if (err != error.WouldBlock) {
                 return err;
             }
@@ -362,14 +368,22 @@ pub const HappyEyeballs = struct {
 
     /// Get socket error (0 means success)
     fn getSocketError(fd: std.posix.fd_t) c_int {
-        var err_buf: [@sizeOf(c_int)]u8 = undefined;
-        std.posix.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.ERROR, &err_buf) catch return -1;
-        return std.mem.bytesToValue(c_int, &err_buf);
+        var err_code: i32 = 0;
+        var optlen: std.posix.socklen_t = @sizeOf(i32);
+        const rc = std.os.linux.getsockopt(
+            fd,
+            std.os.linux.SOL.SOCKET,
+            std.os.linux.SO.ERROR,
+            @ptrCast(&err_code),
+            &optlen,
+        );
+        if (std.posix.errno(rc) != .SUCCESS) return -1;
+        return err_code;
     }
 
     /// Update the family preference cache
     fn updateFamilyCache(self: *Self, hostname_hash: u64, family: AddressFamily) !void {
-        const now = std.time.milliTimestamp();
+        const now = timeMilli();
 
         if (self.family_cache.getPtr(hostname_hash)) |entry| {
             if (entry.family == family) {
@@ -422,10 +436,10 @@ pub const HappyEyeballs = struct {
 pub const AddressSorter = struct {
     /// Sort addresses for Happy Eyeballs
     /// Returns interleaved IPv6/IPv4 addresses
-    pub fn interleave(allocator: std.mem.Allocator, addresses: []const std.net.Address) ![]std.net.Address {
-        var ipv6: std.ArrayList(std.net.Address) = .empty;
+    pub fn interleave(allocator: std.mem.Allocator, addresses: []const net.Address) ![]net.Address {
+        var ipv6: std.ArrayList(net.Address) = .empty;
         defer ipv6.deinit(allocator);
-        var ipv4: std.ArrayList(std.net.Address) = .empty;
+        var ipv4: std.ArrayList(net.Address) = .empty;
         defer ipv4.deinit(allocator);
 
         for (addresses) |addr| {
@@ -436,7 +450,7 @@ pub const AddressSorter = struct {
             }
         }
 
-        var result = try allocator.alloc(std.net.Address, addresses.len);
+        var result = try allocator.alloc(net.Address, addresses.len);
         errdefer allocator.free(result);
 
         var i: usize = 0;
@@ -461,14 +475,14 @@ pub const AddressSorter = struct {
     }
 
     /// Sort addresses with IPv6 first
-    pub fn preferIPv6(allocator: std.mem.Allocator, addresses: []const std.net.Address) ![]std.net.Address {
-        const result = try allocator.alloc(std.net.Address, addresses.len);
+    pub fn preferIPv6(allocator: std.mem.Allocator, addresses: []const net.Address) ![]net.Address {
+        const result = try allocator.alloc(net.Address, addresses.len);
         errdefer allocator.free(result);
 
         @memcpy(result, addresses);
 
-        std.mem.sort(std.net.Address, result, {}, struct {
-            fn lessThan(_: void, a: std.net.Address, b: std.net.Address) bool {
+        std.mem.sort(net.Address, result, {}, struct {
+            fn lessThan(_: void, a: net.Address, b: net.Address) bool {
                 const a_is_v6 = a.any.family == AF_INET6;
                 const b_is_v6 = b.any.family == AF_INET6;
                 if (a_is_v6 and !b_is_v6) return true;
@@ -480,14 +494,14 @@ pub const AddressSorter = struct {
     }
 
     /// Sort addresses with IPv4 first
-    pub fn preferIPv4(allocator: std.mem.Allocator, addresses: []const std.net.Address) ![]std.net.Address {
-        const result = try allocator.alloc(std.net.Address, addresses.len);
+    pub fn preferIPv4(allocator: std.mem.Allocator, addresses: []const net.Address) ![]net.Address {
+        const result = try allocator.alloc(net.Address, addresses.len);
         errdefer allocator.free(result);
 
         @memcpy(result, addresses);
 
-        std.mem.sort(std.net.Address, result, {}, struct {
-            fn lessThan(_: void, a: std.net.Address, b: std.net.Address) bool {
+        std.mem.sort(net.Address, result, {}, struct {
+            fn lessThan(_: void, a: net.Address, b: net.Address) bool {
                 const a_is_v4 = a.any.family == AF_INET;
                 const b_is_v4 = b.any.family == AF_INET;
                 if (a_is_v4 and !b_is_v4) return true;
@@ -524,11 +538,11 @@ test "HappyEyeballs init/deinit" {
 test "AddressSorter interleave" {
     const allocator = std.testing.allocator;
 
-    var addresses = [_]std.net.Address{
-        std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 80),
-        std.net.Address.initIp4(.{ 192, 168, 1, 2 }, 80),
-        std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 80, 0, 0),
-        std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 }, 80, 0, 0),
+    var addresses = [_]net.Address{
+        net.Address.initIp4(.{ 192, 168, 1, 1 }, 80),
+        net.Address.initIp4(.{ 192, 168, 1, 2 }, 80),
+        net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 80, 0, 0),
+        net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 }, 80, 0, 0),
     };
 
     const sorted = try AddressSorter.interleave(allocator, &addresses);
@@ -544,10 +558,10 @@ test "AddressSorter interleave" {
 test "AddressSorter preferIPv6" {
     const allocator = std.testing.allocator;
 
-    var addresses = [_]std.net.Address{
-        std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 80),
-        std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 80, 0, 0),
-        std.net.Address.initIp4(.{ 192, 168, 1, 2 }, 80),
+    var addresses = [_]net.Address{
+        net.Address.initIp4(.{ 192, 168, 1, 1 }, 80),
+        net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 80, 0, 0),
+        net.Address.initIp4(.{ 192, 168, 1, 2 }, 80),
     };
 
     const sorted = try AddressSorter.preferIPv6(allocator, &addresses);
@@ -562,10 +576,10 @@ test "AddressSorter preferIPv6" {
 test "AddressSorter preferIPv4" {
     const allocator = std.testing.allocator;
 
-    var addresses = [_]std.net.Address{
-        std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 80, 0, 0),
-        std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 80),
-        std.net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 }, 80, 0, 0),
+    var addresses = [_]net.Address{
+        net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 80, 0, 0),
+        net.Address.initIp4(.{ 192, 168, 1, 1 }, 80),
+        net.Address.initIp6(.{ 0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2 }, 80, 0, 0),
     };
 
     const sorted = try AddressSorter.preferIPv4(allocator, &addresses);
@@ -580,7 +594,7 @@ test "AddressSorter preferIPv4" {
 test "FamilyCacheEntry" {
     const entry = FamilyCacheEntry{
         .family = AF_INET6,
-        .timestamp = std.time.milliTimestamp(),
+        .timestamp = timeMilli(),
         .success_count = 5,
         .failure_count = 1,
     };
@@ -594,7 +608,7 @@ test "HappyEyeballs no addresses error" {
     var he = HappyEyeballs.init(allocator, .{});
     defer he.deinit();
 
-    const empty: []const std.net.Address = &.{};
+    const empty: []const net.Address = &.{};
     const result = he.connect(empty, "test.example.com");
     try std.testing.expectError(error.NoAddresses, result);
 }

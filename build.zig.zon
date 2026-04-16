@@ -26,8 +26,8 @@
             .hash = "cli-0.1.1-0aso9IulBgAopCkKkuAMOffqXsM2LfuSnzftSU0b3LSs",
         },
         .thread_pool = .{
-            .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#7275ae20b51c86278fdb7b4df526715fdf24eeb6",
-            .hash = "thread_pool-0.2.0-11B1Bjc9OQCpsTlU23uENRGidyB6DoKgKTODN2-LpFGU",
+            .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#e9b6b2a7a98c2724e8bf11a5c22f3c47bb7879c5",
+            .hash = "thread_pool-0.2.0-11B1BuVVOwDZ8LWKIdFwgn9drtSSFh6yI21KYA64PqIJ",
         },
     },
 

@@ -7,6 +7,18 @@
 
 const std = @import("std");
 
+/// Shim for `std.time.timestamp` (seconds since epoch) removed in Zig 0.16.0.
+pub fn timestamp() i64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io, .real).raw.toSeconds();
+}
+
+/// Shim for `std.time.milliTimestamp` (ms since epoch) removed in Zig 0.16.0.
+pub fn milliTimestamp() i64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
+}
+
 /// Clock interface for time operations
 pub const Clock = struct {
     ptr: *anyopaque,
@@ -40,11 +52,11 @@ pub const SystemClock = struct {
     }
 
     fn nowImpl(_: *anyopaque) i64 {
-        return std.time.timestamp();
+        return timestamp();
     }
 
     fn nowMsImpl(_: *anyopaque) i64 {
-        return std.time.milliTimestamp();
+        return milliTimestamp();
     }
 
     const vtable = Clock.VTable{

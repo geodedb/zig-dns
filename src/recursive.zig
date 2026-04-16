@@ -20,6 +20,19 @@ const record_mod = @import("record");
 const dns_cache_mod = @import("dns_cache");
 const clock_mod = @import("clock");
 const stub_mod = @import("stub");
+const net = @import("net_compat");
+
+inline fn timeMilli() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+}
+
+fn systemRandomU16() u16 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    var buf: [2]u8 = undefined;
+    std.Io.randomSecure(io_inst, &buf) catch unreachable;
+    return std.mem.readInt(u16, &buf, .little);
+}
 
 pub const Message = message_mod.Message;
 pub const Name = name_mod.Name;
@@ -152,7 +165,25 @@ pub const RecursiveResolver = struct {
     /// CSPRNG for security-sensitive operations (transaction IDs, 0x20 randomization).
     /// Uses the OS cryptographic random source directly instead of a seeded PRNG.
     /// This prevents transaction ID prediction attacks (RFC 5452, CWE-330, SEC-C24).
-    const csprng = std.crypto.random;
+    fn csprngBytes(buf: []u8) void {
+        const io_inst = std.Io.Threaded.global_single_threaded.io();
+        std.Io.randomSecure(io_inst, buf) catch unreachable;
+    }
+
+    fn csprngInt(comptime T: type) T {
+        var buf: [@sizeOf(T)]u8 = undefined;
+        csprngBytes(&buf);
+        return std.mem.readInt(T, &buf, .little);
+    }
+
+    /// 0.16.0 compat: produce a std.Random seeded from OS entropy.
+    /// Used where APIs require a std.Random (e.g. applyCase0x20).
+    fn csprngRandom(prng: *std.Random.DefaultPrng) std.Random {
+        var seed: u64 = undefined;
+        csprngBytes(std.mem.asBytes(&seed));
+        prng.* = std.Random.DefaultPrng.init(seed);
+        return prng.random();
+    }
 
     /// Error type for resolver initialization failures
     pub const InitError = error{
@@ -201,7 +232,7 @@ pub const RecursiveResolver = struct {
             .depth = 0,
             .query_count = 0,
             .current_zone = ".",
-            .cname_chain = .{},
+            .cname_chain = .empty,
         };
         defer state.deinit(self.allocator);
 
@@ -365,7 +396,7 @@ pub const RecursiveResolver = struct {
                             defer ref.deinit(self.allocator);
 
                             // Collect addresses for referred NS servers
-                            var new_servers: std.ArrayList(ServerAddress) = .{};
+                            var new_servers: std.ArrayList(ServerAddress) = .empty;
                             errdefer new_servers.deinit(self.allocator);
                             // PF-NEW-23: Pre-allocate to match referral size
                             // (avoids reallocations when resolving NS addresses).
@@ -516,11 +547,12 @@ pub const RecursiveResolver = struct {
         state: *ResolutionState,
     ) !QueryResult {
         // Generate query ID using OS CSPRNG (SEC-C24: prevents cache poisoning)
-        const id = csprng.int(u16);
+        const id = csprngInt(u16);
 
         // Apply 0x20 case randomization if enabled (using CSPRNG for unpredictability)
+        var local_prng: std.Random.DefaultPrng = undefined;
         const query_name = if (self.config.case_randomization)
-            try name_mod.applyCase0x20(self.allocator, domain, csprng)
+            try name_mod.applyCase0x20(self.allocator, domain, csprngRandom(&local_prng))
         else
             try self.allocator.dupe(u8, domain);
         defer self.allocator.free(query_name);
@@ -580,30 +612,30 @@ pub const RecursiveResolver = struct {
     /// embedded systems should verify that the OS provides adequate port entropy
     /// to mitigate DNS cache poisoning attacks (RFC 5452 Section 3).
     fn sendQuery(self: *Self, query: []const u8, server: ServerAddress) ![]u8 {
-        const sock = try std.posix.socket(
+        const sock = try net.socket(
             server.address.any.family,
             std.posix.SOCK.DGRAM,
-            std.posix.IPPROTO.UDP,
+            std.os.linux.IPPROTO.UDP,
         );
-        defer std.posix.close(sock);
+        defer net.close(sock);
 
         // Set timeout
         const timeout_sec = self.config.timeout_ms / 1000;
         const timeout_usec = (self.config.timeout_ms % 1000) * 1000;
-        const timeout = std.posix.timeval{
+        const timeout = std.os.linux.timeval{
             .sec = @intCast(timeout_sec),
             .usec = @intCast(timeout_usec),
         };
-        try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+        try std.posix.setsockopt(sock, std.os.linux.SOL.SOCKET, std.os.linux.SO.RCVTIMEO, std.mem.asBytes(&timeout));
 
         // Send query
-        _ = try std.posix.sendto(sock, query, 0, &server.address.any, server.address.getOsSockLen());
+        _ = try net.sendto(sock, query, 0, &server.address.any, server.address.getOsSockLen());
 
-        const start_ms = std.time.milliTimestamp();
+        const start_ms = timeMilli();
         // SEC-AUDIT-02: Limit discarded packets to prevent CPU pinning from flood attacks.
         var discards = types_mod.SpuriousDiscardCounter{};
         while (true) {
-            if (std.time.milliTimestamp() - start_ms >= self.config.timeout_ms) {
+            if (timeMilli() - start_ms >= self.config.timeout_ms) {
                 return error.Timeout;
             }
 
@@ -611,14 +643,14 @@ pub const RecursiveResolver = struct {
             // 4096 bytes matches EDNS default max payload (RFC 6891).
             // Responses exceeding this are truncated and fall back to TCP.
             var buffer: [4096]u8 = undefined;
-            var src_addr: std.net.Address = undefined;
-            var src_len: std.posix.socklen_t = @sizeOf(std.net.Address);
-            const recv_len = std.posix.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len) catch |err| switch (err) {
+            var src_addr: net.Address = undefined;
+            var src_len: std.posix.socklen_t = @sizeOf(net.Address);
+            const recv_len = net.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len) catch |err| switch (err) {
                 error.WouldBlock, error.ConnectionTimedOut => return error.Timeout,
                 else => return err,
             };
 
-            if (!std.net.Address.eql(src_addr, server.address)) {
+            if (!net.Address.eql(src_addr, server.address)) {
                 discards.increment() catch return error.TooManySpuriousPackets;
                 continue;
             }
@@ -639,7 +671,7 @@ pub const RecursiveResolver = struct {
     /// Iterates the additional section exactly once (O(authority + additional))
     /// rather than once per NS record (O(authority * additional)).
     fn extractReferral(self: *Self, response: []const u8, msg: Message) !?Referral {
-        var ns_names: std.ArrayList([]const u8) = .{};
+        var ns_names: std.ArrayList([]const u8) = .empty;
         defer ns_names.deinit(self.allocator);
         // PF-NEW-23: Pre-allocate for typical NS delegation (2-6 records)
         // to avoid 1-2 reallocations per referral.
@@ -757,7 +789,7 @@ pub const RecursiveResolver = struct {
             .depth = parent_state.depth + 1,
             .query_count = parent_state.query_count,
             .current_zone = ".",
-            .cname_chain = .{},
+            .cname_chain = .empty,
         };
         defer child_state.deinit(self.allocator);
 
@@ -971,7 +1003,7 @@ test "GAP-0020: owned_servers memory lifecycle" {
 
     // Simulate first referral: create new_servers and transfer ownership
     {
-        var new_servers: std.ArrayList(ServerAddress) = .{};
+        var new_servers: std.ArrayList(ServerAddress) = .empty;
         const addr1 = ServerAddress.fromIpv4("192.0.2.1", 53) catch unreachable;
         const addr2 = ServerAddress.fromIpv4("192.0.2.2", 53) catch unreachable;
         try new_servers.append(allocator, addr1);
@@ -989,7 +1021,7 @@ test "GAP-0020: owned_servers memory lifecycle" {
 
     // Simulate second referral: replace with different servers
     {
-        var new_servers2: std.ArrayList(ServerAddress) = .{};
+        var new_servers2: std.ArrayList(ServerAddress) = .empty;
         const addr3 = ServerAddress.fromIpv4("198.51.100.1", 53) catch unreachable;
         try new_servers2.append(allocator, addr3);
 
@@ -1091,7 +1123,7 @@ test "GAP-0019: CNAME chain limit enforcement" {
     // Uses the same ArrayList pattern as ResolutionState.cname_chain.
     const allocator = std.testing.allocator;
 
-    var cname_chain: std.ArrayList([]const u8) = .{};
+    var cname_chain: std.ArrayList([]const u8) = .empty;
     defer {
         for (cname_chain.items) |item| allocator.free(item);
         cname_chain.deinit(allocator);
@@ -1225,7 +1257,7 @@ test "PF-11: ResolutionState.deinit frees last_query_name" {
         .depth = 0,
         .query_count = 0,
         .current_zone = ".",
-        .cname_chain = .{},
+        .cname_chain = .empty,
     };
 
     // Simulate what queryWithRetry does: allocate and set last_query_name
@@ -1256,7 +1288,7 @@ test "PF-11: ResolutionState.deinit handles null last_query_name" {
         .depth = 0,
         .query_count = 0,
         .current_zone = ".",
-        .cname_chain = .{},
+        .cname_chain = .empty,
     };
 
     // last_query_name is null by default; deinit must not crash.
@@ -1275,7 +1307,7 @@ test "PF-04: GlueRecord matching pattern (single-pass additional)" {
 
     // Simulate glue records collected from a single pass of additional section
     const GlueRecord = RecursiveResolver.GlueRecord;
-    var glue_records: std.ArrayList(GlueRecord) = .{};
+    var glue_records: std.ArrayList(GlueRecord) = .empty;
     defer {
         for (glue_records.items) |gr| {
             allocator.free(gr.name);
@@ -1370,7 +1402,7 @@ test "PF-31: resolveNsAddress respects depth guard" {
         .depth = RecursiveResolver.max_ns_resolve_depth, // at max
         .query_count = 0,
         .current_zone = ".",
-        .cname_chain = .{},
+        .cname_chain = .empty,
     };
     defer parent_state.deinit(allocator);
 
@@ -1393,7 +1425,7 @@ test "PF-31: resolveNsAddress respects query budget" {
         .depth = 0,
         .query_count = resolver.config.max_queries, // exhausted
         .current_zone = ".",
-        .cname_chain = .{},
+        .cname_chain = .empty,
     };
     defer parent_state.deinit(allocator);
 
@@ -1407,11 +1439,9 @@ test "SEC-C24: transaction IDs use CSPRNG" {
     // Generate multiple IDs and check basic properties:
     // 1. They don't all return the same value (basic randomness sanity)
     // 2. They don't panic or fail
-    const csprng_rand = RecursiveResolver.csprng;
-
     var ids: [16]u16 = undefined;
     for (&ids) |*id| {
-        id.* = csprng_rand.int(u16);
+        id.* = RecursiveResolver.csprngInt(u16);
     }
 
     // At least 2 different values among 16 samples (probability of all-same: 1/65535^15)
