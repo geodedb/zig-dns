@@ -328,7 +328,7 @@ fn benchParallelZoneParse(allocator: std.mem.Allocator) BenchResult {
     dns.parallel.parallelZoneRecordParse(allocator, &raw_records, &results);
     const elapsed = timer.read();
 
-    // Cleanup spice pool
+    // Cleanup thread pool
     defer dns.parallel.deinitPool();
 
     return .{ .name = "parallel zone parse", .count = PARALLEL_ZONE_COUNT, .total_ns = elapsed };

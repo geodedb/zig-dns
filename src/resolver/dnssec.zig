@@ -1202,7 +1202,7 @@ fn findRrsig(rrsigs: []const ResourceRecord, covered_type: Type, full_message: [
 // Parallel DNSSEC Validation Integration
 // =========================================================================
 
-/// Validate multiple DNSSEC signatures in parallel using the spice thread pool.
+/// Validate multiple DNSSEC signatures in parallel using the thread pool.
 ///
 /// For responses with multiple RRSIGs (2+), this dispatches structural
 /// validation across threads. Each input contains wire-format RRSIG RDATA,

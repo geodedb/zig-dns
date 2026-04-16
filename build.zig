@@ -549,7 +549,6 @@ pub fn build(b: *std.Build) void {
         const cli_dep = b.dependency("cli", .{
             .target = target,
             .optimize = optimize,
-            .spice = false,
         });
         break :blk cli_dep.module("cli");
     } else null;

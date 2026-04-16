@@ -316,7 +316,7 @@ pub fn checkAndSchedulePrefetch(
 // Parallel Cache Prefetch Integration
 // ============================================================================
 
-/// Prefetch multiple expiring cache entries in parallel using the spice thread pool.
+/// Prefetch multiple expiring cache entries in parallel using the thread pool.
 ///
 /// For large prefetch batches (8+ entries), this dispatches prefetch evaluation
 /// across threads. Each entry is independently checked for expiration and

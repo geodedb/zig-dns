@@ -13,7 +13,7 @@
 //! - Full recursive resolver for complete name resolution
 //! - EDNS0 support (RFC 6891)
 //! - Cross-platform: Linux, macOS, Windows
-//! - Minimal dependencies (optional spice for parallelism)
+//! - Minimal dependencies (optional thread pool for parallelism)
 //!
 //! ## Quick Start
 //!
@@ -41,7 +41,7 @@
 //!
 //! ### Resolution
 //! - `cache`: DNS response caching
-//! - `parallel`: Parallel DNS operations (spice-based)
+//! - `parallel`: Parallel DNS operations (thread-pool-based)
 //! - `stub`: Stub resolver (forwards to upstream)
 //! - `recursive`: Full recursive resolver
 //! - `client`: High-level resolution interface
@@ -86,7 +86,7 @@ pub const message = @import("message");
 // Extensions
 pub const edns = @import("edns");
 
-// Parallelism (requires -Dspice=true, default)
+// Parallelism
 pub const parallel = @import("parallel");
 
 // Resolution

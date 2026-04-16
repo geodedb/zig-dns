@@ -492,7 +492,7 @@ pub fn main(init: std.process.Init) !void {
 
     print("\n{s}\n\n", .{"=" ** 90});
 
-    // Cleanup spice pool if initialized
+    // Cleanup thread pool if initialized
     dns.parallel.deinitPool();
 
     // Write JSON to stdout

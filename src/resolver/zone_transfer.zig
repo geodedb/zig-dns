@@ -840,7 +840,7 @@ pub const IxfrResult = struct {
 // Parallel Zone Record Parsing Integration
 // ============================================================================
 
-/// Parse raw wire-format zone records in parallel using the spice thread pool.
+/// Parse raw wire-format zone records in parallel using the thread pool.
 ///
 /// For large zone transfers (AXFR/IXFR) with 64+ records, this dispatches
 /// parsing work across multiple threads. Below the threshold, records are
