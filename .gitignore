@@ -17,3 +17,4 @@ Thumbs.db
 # Test outputs
 *.log
 test_error
+zig-pkg/
