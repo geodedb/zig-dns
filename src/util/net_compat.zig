@@ -633,3 +633,72 @@ pub fn recvfrom(
         else => |err| return posix.unexpectedErrno(err),
     }
 }
+
+pub const SendError = error{
+    AccessDenied,
+    WouldBlock,
+    FastOpenAlreadyInProgress,
+    ConnectionResetByPeer,
+    MessageTooBig,
+    SystemResources,
+    SocketNotConnected,
+    BrokenPipe,
+    FileDescriptorNotASocket,
+    Unexpected,
+};
+
+/// std.posix.send removed in 0.16.0 — wrap sendto with null dest.
+pub fn send(sock: posix.socket_t, buf: []const u8, flags: u32) SendError!usize {
+    const rc = std.os.linux.sendto(sock, buf.ptr, buf.len, flags, null, 0);
+    switch (posix.errno(rc)) {
+        .SUCCESS => return @intCast(rc),
+        .ACCES => return error.AccessDenied,
+        .AGAIN => return error.WouldBlock,
+        .ALREADY => return error.FastOpenAlreadyInProgress,
+        .BADF => unreachable,
+        .CONNRESET => return error.ConnectionResetByPeer,
+        .DESTADDRREQ => unreachable,
+        .FAULT => unreachable,
+        .INTR => return error.WouldBlock,
+        .INVAL => unreachable,
+        .ISCONN => unreachable,
+        .MSGSIZE => return error.MessageTooBig,
+        .NOBUFS => return error.SystemResources,
+        .NOMEM => return error.SystemResources,
+        .NOTCONN => return error.SocketNotConnected,
+        .NOTSOCK => return error.FileDescriptorNotASocket,
+        .OPNOTSUPP => unreachable,
+        .PIPE => return error.BrokenPipe,
+        else => |err| return posix.unexpectedErrno(err),
+    }
+}
+
+pub const RecvError = error{
+    WouldBlock,
+    SystemResources,
+    ConnectionRefused,
+    SocketNotConnected,
+    ConnectionResetByPeer,
+    ConnectionTimedOut,
+    Unexpected,
+};
+
+/// std.posix.recv removed in 0.16.0 — wrap recvfrom with null src.
+pub fn recv(sock: posix.socket_t, buf: []u8, flags: u32) RecvError!usize {
+    const rc = std.os.linux.recvfrom(sock, buf.ptr, buf.len, flags, null, null);
+    switch (posix.errno(rc)) {
+        .SUCCESS => return @intCast(rc),
+        .AGAIN => return error.WouldBlock,
+        .BADF => unreachable,
+        .CONNREFUSED => return error.ConnectionRefused,
+        .FAULT => unreachable,
+        .INVAL => unreachable,
+        .NOTCONN => return error.SocketNotConnected,
+        .NOTSOCK => unreachable,
+        .INTR => return error.WouldBlock,
+        .NOMEM => return error.SystemResources,
+        .CONNRESET => return error.ConnectionResetByPeer,
+        .TIMEDOUT => return error.ConnectionTimedOut,
+        else => |err| return posix.unexpectedErrno(err),
+    }
+}

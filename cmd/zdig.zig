@@ -16,6 +16,21 @@ const net_compat = @import("net_compat");
 
 const Allocator = std.mem.Allocator;
 
+/// 0.16.0 compat: CSPRNG via Io (std.crypto.random was removed).
+fn csprngInt(comptime T: type) T {
+    var buf: [@sizeOf(T)]u8 = undefined;
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    std.Io.randomSecure(io_inst, &buf) catch unreachable;
+    return std.mem.readInt(T, &buf, .little);
+}
+
+/// 0.16.0 compat: monotonic millisecond timestamp via Io Clock.
+fn milliTimestamp() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    const ts = std.Io.Clock.awake.now(io_inst);
+    return ts.toMilliseconds();
+}
+
 /// Query options
 const QueryOptions = struct {
     /// DNS server to query (default: 8.8.8.8)
@@ -62,14 +77,15 @@ const QueryOptions = struct {
 
 /// Buffered stdout writer context
 const StdoutContext = struct {
-    file_writer: ?std.fs.File.Writer = null,
+    file_writer: ?std.Io.File.Writer = null,
     buffer: [4096]u8 = [_]u8{0} ** 4096,
 
     const Self = @This();
 
     pub fn writer(self: *Self) *std.Io.Writer {
         if (self.file_writer == null) {
-            self.file_writer = std.fs.File.Writer.init(std.fs.File.stdout(), &self.buffer);
+            const io = std.Io.Threaded.global_single_threaded.io();
+            self.file_writer = std.Io.File.stdout().writer(io, &self.buffer);
         }
         return &self.file_writer.?.interface;
     }
@@ -460,10 +476,10 @@ fn performQuery(allocator: Allocator, options: *const QueryOptions) !void {
     const writer = stdout.writer();
 
     // Record start time
-    const query_start = std.time.milliTimestamp();
+    const query_start = milliTimestamp();
 
     // Generate cryptographically secure query ID (SEC-GAP-035: CWE-330)
-    const id: u16 = std.crypto.random.int(u16);
+    const id: u16 = csprngInt(u16);
 
     // Build the query message using the library's buildQuery function
     const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, options.qclass, !options.no_recurse);
@@ -473,7 +489,7 @@ fn performQuery(allocator: Allocator, options: *const QueryOptions) !void {
     const response_data = try sendQuery(allocator, options, query_data);
     defer allocator.free(response_data);
 
-    const query_time = std.time.milliTimestamp() - query_start;
+    const query_time = milliTimestamp() - query_start;
 
     // Parse response
     const response = try dns.message.Message.parse(response_data);
@@ -539,8 +555,8 @@ fn sendQuery(allocator: Allocator, options: *const QueryOptions, query_data: []c
 }
 
 fn sendUdp(allocator: Allocator, address: net_compat.Address, query_data: []const u8, timeout_secs: u32) ![]u8 {
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net_compat.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net_compat.close(sock);
 
     // Set timeout
     const timeout_us: i64 = @as(i64, timeout_secs) * 1_000_000;
@@ -551,7 +567,7 @@ fn sendUdp(allocator: Allocator, address: net_compat.Address, query_data: []cons
     try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
 
     // Send query
-    _ = try std.posix.sendto(sock, query_data, 0, &address.any, address.getOsSockLen());
+    _ = try net_compat.sendto(sock, query_data, 0, &address.any, address.getOsSockLen());
 
     // Receive response with source validation (SEC-GAP-042)
     const response_buf = try allocator.alloc(u8, 65535);
@@ -561,7 +577,7 @@ fn sendUdp(allocator: Allocator, address: net_compat.Address, query_data: []cons
     var source_addr: std.posix.sockaddr = undefined;
     var source_addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(source_addr));
 
-    const recv_len = std.posix.recvfrom(sock, response_buf, 0, &source_addr, &source_addr_len) catch |err| {
+    const recv_len = net_compat.recvfrom(sock, response_buf, 0, &source_addr, &source_addr_len) catch |err| {
         allocator.free(response_buf);
         return err;
     };
@@ -598,8 +614,8 @@ fn addressMatches(expected: *const std.posix.sockaddr, received: *const std.posi
 }
 
 fn sendTcp(allocator: Allocator, address: net_compat.Address, query_data: []const u8, timeout_secs: u32) ![]u8 {
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net_compat.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+    defer net_compat.close(sock);
 
     // Set timeouts (SEC-GAP-047: CWE-400)
     const timeout_us: i64 = @as(i64, timeout_secs) * 1_000_000;
@@ -615,19 +631,19 @@ fn sendTcp(allocator: Allocator, address: net_compat.Address, query_data: []cons
 
     // Connect (timeout controlled by OS, typically ~75 seconds)
     // For finer control, would need non-blocking socket + select/poll
-    try std.posix.connect(sock, &address.any, address.getOsSockLen());
+    try net_compat.connect(sock, &address.any, address.getOsSockLen());
 
     // TCP DNS uses 2-byte length prefix
     var len_buf: [2]u8 = undefined;
     std.mem.writeInt(u16, &len_buf, @intCast(query_data.len), .big);
-    _ = try std.posix.send(sock, &len_buf, 0);
-    _ = try std.posix.send(sock, query_data, 0);
+    _ = try net_compat.send(sock, &len_buf, 0);
+    _ = try net_compat.send(sock, query_data, 0);
 
     // Read response length with exact-read loop (SEC-GAP-046: CWE-400)
     var recv_len_buf: [2]u8 = undefined;
     var len_bytes_read: usize = 0;
     while (len_bytes_read < 2) {
-        const n = try std.posix.recv(sock, recv_len_buf[len_bytes_read..], 0);
+        const n = try net_compat.recv(sock, recv_len_buf[len_bytes_read..], 0);
         if (n == 0) return error.ConnectionClosed;
         len_bytes_read += n;
     }
@@ -639,7 +655,7 @@ fn sendTcp(allocator: Allocator, address: net_compat.Address, query_data: []cons
 
     var total_read: usize = 0;
     while (total_read < response_len) {
-        const n = try std.posix.recv(sock, response_buf[total_read..], 0);
+        const n = try net_compat.recv(sock, response_buf[total_read..], 0);
         if (n == 0) return error.ConnectionClosed;
         total_read += n;
     }
@@ -828,8 +844,9 @@ fn outputDigStyle(allocator: Allocator, writer: anytype, response: dns.message.M
         try writer.print(";; SERVER: {s}#{d}({s})\n", .{ options.server, options.port, options.server });
 
         // Current time
-        const now = std.time.timestamp();
-        const epoch_secs: u64 = @intCast(now);
+        const io_inst = std.Io.Threaded.global_single_threaded.io();
+        const now = std.Io.Clock.real.now(io_inst);
+        const epoch_secs: u64 = @intCast(now.toSeconds());
         const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
         const day = epoch.getEpochDay();
         const year_day = day.calculateYearDay();
@@ -966,7 +983,7 @@ fn performTrace(allocator: Allocator, options: *const QueryOptions) !void {
 
     while (depth < max_depth) {
         // Generate cryptographically secure query ID (SEC-GAP-035: CWE-330)
-        const id: u16 = std.crypto.random.int(u16);
+        const id: u16 = csprngInt(u16);
 
         // Build non-recursive query
         const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, options.qclass, false);
