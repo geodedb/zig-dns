@@ -13,6 +13,7 @@ paths = [
   '''testdata''',
   '''tests/''',
   '''\.zig-cache''',
+  '''zig-pkg''',
   '''zig-out''',
   '''vendor''',
 ]
