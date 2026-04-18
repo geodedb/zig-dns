@@ -22,12 +22,12 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package.
     .dependencies = .{
         .cli = .{
-            .url = "git+https://gitlab.com/devnw/zig/cli.git#90a482c76933be4be841b5608a34cc5a15d571f7",
-            .hash = "cli-0.1.1-0aso9FDBBgCND4GMSm54VsUi9FqElonjQkvM13WShph6",
+            .url = "git+https://gitlab.com/devnw/zig/cli.git#92fbd1564c91a7a8f4e1070be74e4446388dae6d",
+            .hash = "cli-0.1.1-0aso9FDBBgCjoNwbDxf1zhaYyiTdtudzyAFDNVDWEGiS",
         },
         .config = .{
-            .url = "git+https://gitlab.com/devnw/zig/config.git#0db9d25dc71545b5a460bfc96faf6310c4f99220",
-            .hash = "config-0.1.0-TiLumu9gCgCsQVScKIE05YQEg05Fr7Cdbpspwf73_Jml",
+            .url = "git+https://gitlab.com/devnw/zig/config.git#7eda77bda98f5bf48570f43ec292ec9219f71480",
+            .hash = "config-0.1.0-TiLumu9gCgAHypciAx8sv9vlgG6b-BjAAjdtL47r3raM",
         },
         .thread_pool = .{
             .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#ee8440f69012cad49fa1d5f22fe18c68f944d9ab",
