@@ -568,7 +568,13 @@ pub fn sendto(
     dest_addr: ?*const posix.sockaddr,
     addrlen: posix.socklen_t,
 ) SendToError!usize {
-    const rc = std.os.linux.sendto(sock, buf.ptr, buf.len, flags, dest_addr, addrlen);
+    // `std.os.linux.sendto` takes `?*const std.os.linux.sockaddr`. On Linux
+    // that's the same type as `posix.sockaddr`, but on non-Linux targets
+    // (macOS cross-compile) `posix.sockaddr == c.sockaddr`, so we have to
+    // @ptrCast to bridge. These helpers only actually execute on Linux; the
+    // cast only exists to make the call compile under cross-builds.
+    const linux_dest: ?*const std.os.linux.sockaddr = @ptrCast(@alignCast(dest_addr));
+    const rc = std.os.linux.sendto(sock, buf.ptr, buf.len, flags, linux_dest, addrlen);
     switch (posix.errno(rc)) {
         .SUCCESS => return @intCast(rc),
         .ACCES => return error.AccessDenied,
@@ -616,7 +622,10 @@ pub fn recvfrom(
     src_addr: ?*posix.sockaddr,
     addrlen: ?*posix.socklen_t,
 ) RecvFromError!usize {
-    const rc = std.os.linux.recvfrom(sock, buf.ptr, buf.len, flags, src_addr, addrlen);
+    // See sendto above: bridge `posix.sockaddr` → `std.os.linux.sockaddr` for
+    // non-Linux cross-compile targets. Runtime path is Linux-only.
+    const linux_src: ?*std.os.linux.sockaddr = @ptrCast(@alignCast(src_addr));
+    const rc = std.os.linux.recvfrom(sock, buf.ptr, buf.len, flags, linux_src, addrlen);
     switch (posix.errno(rc)) {
         .SUCCESS => return @intCast(rc),
         .AGAIN => return error.WouldBlock,
