@@ -246,6 +246,55 @@ See [GitLab Issues](https://gitlab.com/devnw/zig/dns/-/issues) for open tasks.
 
 \*\*\* DoT transport interface exists with pluggable TLS backend; a TLS implementation must be provided by the consumer
 
+## Observability
+
+This library ships an optional OpenTelemetry seam, gated behind
+`-Dwith_otel=<bool>` (default `false`).
+
+When `-Dwith_otel=false` (the default) the seam collapses to a
+comptime-known no-op: every public helper in `dns.observability`
+returns a zero-sized `Span{}`, the otel dependency is never resolved,
+and the produced artifact contains zero otel symbols (verified by
+`otel/scripts/verify-consumer-noop.sh`).
+
+When `-Dwith_otel=true`, the resolver emits **one client-kind span per
+DNS query** at every public entry point — `Client.resolve`,
+`Client.lookupMX`, `StubResolver.resolveClass`, and
+`RecursiveResolver.resolve`. Each span is named `"DNS {qtype} {qname}"`
+and carries the standard semantic-convention attributes:
+
+- `dns.question.name`
+- `dns.question.type`
+- `network.protocol.name = "dns"`
+
+Bootstrap from your application entry point:
+
+```zig
+const std = @import("std");
+const dns = @import("dns");
+
+pub fn main() !void {
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    defer _ = gpa.deinit();
+
+    var otel = try dns.observability_init.Otel.init(gpa.allocator(), "my-app");
+    otel.installGlobals();
+    defer otel.deinit();
+
+    var client = try dns.Client.init(gpa.allocator());
+    defer client.deinit();
+    _ = try client.resolve("example.com", .a); // emits a span
+}
+```
+
+Configuration follows the OpenTelemetry environment-variable contract
+(`OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
+etc). Defaults: `parentbased_traceidratio` @ 5%, OTLP/HTTP to
+`http://localhost:4318`.
+
+See [otel/docs/integration/RECIPE.md](https://gitlab.com/devnw/zig/otel/-/blob/main/docs/integration/RECIPE.md)
+for the full recipe.
+
 ## License
 
 Apache-2.0 License - see [LICENSE](LICENSE) for details.
