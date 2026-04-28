@@ -14,8 +14,23 @@ pub fn build(b: *std.Build) void {
     const feature_doq = b.option(bool, "feature_doq", "Enable DNS over QUIC support") orelse false;
     const enable_tp = b.option(bool, "thread-pool", "Enable thread-pool-based parallelism") orelse true;
 
+    // -Dwith_otel: compile in otel instrumentation. OFF by default;
+    // when off the otel dependency is never resolved and the seam
+    // collapses to a comptime-known no-op (verified by
+    // otel/scripts/verify-consumer-noop.sh).
+    const with_otel = b.option(
+        bool,
+        "with_otel",
+        "Compile in otel instrumentation (off by default; zero overhead when off)",
+    ) orelse false;
+
     const build_options = b.addOptions();
     build_options.addOption(bool, "feature_doq", feature_doq);
+    build_options.addOption(bool, "with_otel", with_otel);
+    // Materialize ONE shared `build_options` module. Each consumer module
+    // imports the SAME module instance via `addImport` to avoid Zig 0.16's
+    // "file exists in modules X and X0" error when two independent
+    // `addOptions` modules end up sharing a transitive file path.
     const build_options_mod = build_options.createModule();
 
     // Internal -- `std.net` compatibility shim for Zig 0.16.0. Provides the
@@ -529,6 +544,34 @@ pub fn build(b: *std.Build) void {
     // Other
     dns_mod.addImport("zone_file", zone_file_mod);
     if (parallel_mod) |pm| dns_mod.addImport("parallel", pm);
+
+    // ========================================================================
+    // Observability seam (otel)
+    // ========================================================================
+    //
+    // The seam at src/observability.zig is always compiled (it's just a
+    // file in the dns module's source tree), but its `enabled` flag tracks
+    // `build_options.with_otel`. When the flag is OFF the seam collapses
+    // to a comptime-known no-op and the otel dependency is never fetched.
+    //
+    // Every module that pulls observability.zig in transitively needs the
+    // SAME `build_options` module instance. The dns root re-exports
+    // observability via `pub const observability = @import("observability.zig")`
+    // so wiring the import here propagates to every downstream module.
+    dns_mod.addImport("build_options", build_options_mod);
+
+    // Gated otel dependency. The `lazy = true` entry in build.zig.zon
+    // means Zig only fetches the package when this branch executes; with
+    // the flag off the dependency is never resolved and the produced
+    // artifacts contain zero otel symbols (verified by
+    // otel/scripts/verify-consumer-noop.sh).
+    if (with_otel) {
+        const otel_dep = b.lazyDependency("otel", .{
+            .target = target,
+            .optimize = optimize,
+        }) orelse return;
+        dns_mod.addImport("otel", otel_dep.module("otel"));
+    }
 
     // ========================================================================
     // zdig CLI - dig-like DNS query tool
@@ -1312,6 +1355,58 @@ pub fn build(b: *std.Build) void {
     test_fuzz_step.dependOn(&run_fuzz_test.step);
 
     test_step.dependOn(test_fuzz_step);
+
+    // ========================================================================
+    // Observability seam tests
+    // ========================================================================
+
+    // Disabled-mode no-op tests. Verifies `build_options.with_otel == false`
+    // is the default and that the seam's public surface returns a
+    // comptime-known no-op when otel is off. The test is skip-guarded for
+    // the enabled build so it passes under both flag values.
+    const observability_disabled_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/observability_disabled_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "dns", .module = dns_mod },
+                .{ .name = "build_options", .module = build_options_mod },
+            },
+        }),
+    });
+    const run_observability_disabled_tests = b.addRunArtifact(observability_disabled_tests);
+    test_step.dependOn(&run_observability_disabled_tests.step);
+
+    // Enabled-mode smoke test. Skips under -Dwith_otel=false; under
+    // -Dwith_otel=true it installs an in-memory recorder, drives one
+    // query span through the seam, and asserts the recorder captured it.
+    // Compiles cleanly under both flag values because the otel-namespace
+    // identifiers sit behind `comptime if (enabled)` short-circuits.
+    const observability_enabled_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/observability_enabled_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "dns", .module = dns_mod },
+                .{ .name = "build_options", .module = build_options_mod },
+            },
+        }),
+    });
+    if (with_otel) {
+        // Re-resolve the otel module under the same `with_otel` guard
+        // so the smoke test reaches `@import("otel")`. The earlier
+        // `lazyDependency` call handles `dns_mod`; the test root needs
+        // its own import wire.
+        const otel_dep = b.lazyDependency("otel", .{
+            .target = target,
+            .optimize = optimize,
+        }) orelse return;
+        observability_enabled_tests.root_module.addImport("otel", otel_dep.module("otel"));
+    }
+    const run_observability_enabled_tests = b.addRunArtifact(observability_enabled_tests);
+    test_step.dependOn(&run_observability_enabled_tests.step);
 
     // ========================================================================
     // Examples

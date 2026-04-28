@@ -124,6 +124,12 @@ pub const enhanced_metrics = @import("enhanced_metrics");
 pub const backoff = @import("backoff");
 pub const zone_file = @import("zone_file");
 
+// Observability seam (otel). The seam is always compiled, but its
+// `enabled` flag tracks `-Dwith_otel`; when off, every call collapses
+// to a comptime-known no-op (verified by the disabled-mode test under
+// tests/observability_disabled_test.zig).
+pub const observability = @import("observability.zig");
+
 // Re-export commonly used types for convenience
 pub const Name = name.Name;
 pub const Header = header.Header;
