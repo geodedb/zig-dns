@@ -18,3 +18,6 @@ Thumbs.db
 *.log
 test_error
 zig-pkg/
+
+# Local git worktrees (per-feature isolated checkouts)
+.worktrees/
