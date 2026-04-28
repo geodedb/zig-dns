@@ -21,6 +21,10 @@ const dns_cache_mod = @import("dns_cache");
 const clock_mod = @import("clock");
 const stub_mod = @import("stub");
 const net = @import("net_compat");
+// Observability seam (otel). When `-Dwith_otel=false` the seam's
+// helpers collapse to comptime-known no-ops and the optimizer drops
+// every span site below.
+const observability = @import("observability");
 
 inline fn timeMilli() i64 {
     const io_inst = std.Io.Threaded.global_single_threaded.io();
@@ -226,6 +230,15 @@ pub const RecursiveResolver = struct {
 
     /// Resolve a domain name recursively
     pub fn resolve(self: *Self, domain: []const u8, qtype: Type) !ResolveResult {
+        // Open a DNS query span. When `-Dwith_otel=false` the entire
+        // block below compiles out (no-op `Span{}`); when on, this is
+        // the canonical client-kind span for one full recursive
+        // resolution from root downward. Internal sub-queries (one per
+        // referral hop) share this single span.
+        var __obs_span = observability.startQuerySpan(self.allocator, @tagName(qtype), domain);
+        defer __obs_span.end(null);
+        errdefer observability.endQuerySpan(__obs_span, false, "query failed");
+
         var state = ResolutionState{
             .original_qname = domain,
             .qtype = qtype,
@@ -236,7 +249,9 @@ pub const RecursiveResolver = struct {
         };
         defer state.deinit(self.allocator);
 
-        return self.resolveIterative(&state);
+        const out = try self.resolveIterative(&state);
+        observability.endQuerySpan(__obs_span, true, "");
+        return out;
     }
 
     /// Iteratively resolves a DNS query starting from the root servers,

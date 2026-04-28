@@ -18,6 +18,10 @@ const question_mod = @import("question");
 const record_mod = @import("record");
 const io = @import("transport_io");
 const net = @import("net_compat");
+// Observability seam (otel). When `-Dwith_otel=false` the seam's
+// helpers collapse to comptime-known no-ops and the optimizer drops
+// every span site below.
+const observability = @import("observability");
 
 inline fn timeMilli() i64 {
     const io_inst = std.Io.Threaded.global_single_threaded.io();
@@ -182,6 +186,13 @@ pub const StubResolver = struct {
 
     /// Resolve with specific class
     pub fn resolveClass(self: *Self, domain: []const u8, qtype: Type, qclass: Class) !Message {
+        // Open a DNS query span. When `-Dwith_otel=false` the entire
+        // block below compiles out (no-op `Span{}`); when on, this is
+        // the canonical client-kind span for a stub-resolver query.
+        var __obs_span = observability.startQuerySpan(self.allocator, @tagName(qtype), domain);
+        defer __obs_span.end(null);
+        errdefer observability.endQuerySpan(__obs_span, false, "query failed");
+
         const id = self.nextId();
 
         // Build query on the stack (max 271 bytes, no heap allocation)
@@ -228,13 +239,16 @@ pub const StubResolver = struct {
                         self.allocator.free(tcp_response);
                         continue;
                     }
+                    observability.endQuerySpan(__obs_span, true, "");
                     return tcp_msg;
                 }
 
+                observability.endQuerySpan(__obs_span, true, "");
                 return msg;
             }
         }
 
+        observability.endQuerySpan(__obs_span, false, "no response");
         return error.NoResponse;
     }
 

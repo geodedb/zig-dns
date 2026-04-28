@@ -19,6 +19,10 @@ const dns_cache_mod = @import("dns_cache");
 const clock_mod = @import("clock");
 const cache_prefetch_mod = @import("cache_prefetch");
 const edns_mod = @import("edns");
+// Observability seam (otel). When `-Dwith_otel=false` the seam's
+// helpers collapse to comptime-known no-ops and the optimizer drops
+// every span site below.
+const observability = @import("observability");
 
 pub const Message = message_mod.Message;
 pub const Type = types_mod.Type;
@@ -170,6 +174,16 @@ pub const Client = struct {
             return error.UnsupportedRecordType;
         }
 
+        // Open a DNS query span. The seam returns a no-op `Span{}` when
+        // `-Dwith_otel=false` (entire block compiles out). On the success
+        // paths below we call `endQuerySpan(..., true, "")`; on error
+        // paths the `errdefer` records `error` status before the defer
+        // unconditionally ends the span. `setStatus` + `end` are
+        // idempotent for status reporting.
+        var __obs_span = observability.startQuerySpan(self.allocator, @tagName(qtype), hostname);
+        defer __obs_span.end(null);
+        errdefer observability.endQuerySpan(__obs_span, false, "query failed");
+
         // Check cache first (PF-24-dual-cache: O(1) lookup)
         if (self.cache) |*cache| {
             if (cache.get(hostname, qtype, .in)) |entry| {
@@ -198,6 +212,7 @@ pub const Client = struct {
                         if (self.prefetcher) |*pf| {
                             cache_prefetch_mod.checkAndSchedulePrefetch(pf, entry, hostname, qtype, .in);
                         }
+                        observability.endQuerySpan(__obs_span, true, "");
                         return ResolveResult{
                             .addresses = try results.toOwnedSlice(self.allocator),
                             .from_cache = true,
@@ -296,6 +311,7 @@ pub const Client = struct {
             return error.NoAnswer;
         }
 
+        observability.endQuerySpan(__obs_span, true, "");
         return ResolveResult{
             .addresses = try results.toOwnedSlice(self.allocator),
             .from_cache = false,
@@ -314,6 +330,13 @@ pub const Client = struct {
 
     /// Lookup MX records
     pub fn lookupMX(self: *Self, domain: []const u8) ![]MXRecord {
+        // Open a DNS query span. Same lifecycle pattern as `resolve`:
+        // unconditional `defer end`, error path via `errdefer`, success
+        // path explicit via `endQuerySpan(..., true, "")` before return.
+        var __obs_span = observability.startQuerySpan(self.allocator, "MX", domain);
+        defer __obs_span.end(null);
+        errdefer observability.endQuerySpan(__obs_span, false, "query failed");
+
         const response = switch (self.config.mode) {
             .stub => try self.stub.?.resolve(domain, .mx),
             .recursive => blk: {
@@ -350,7 +373,9 @@ pub const Client = struct {
             }
         }
 
-        return results.toOwnedSlice(self.allocator);
+        const out = try results.toOwnedSlice(self.allocator);
+        observability.endQuerySpan(__obs_span, true, "");
+        return out;
     }
 
     /// Clear the cache

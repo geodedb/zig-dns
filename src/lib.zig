@@ -127,8 +127,9 @@ pub const zone_file = @import("zone_file");
 // Observability seam (otel). The seam is always compiled, but its
 // `enabled` flag tracks `-Dwith_otel`; when off, every call collapses
 // to a comptime-known no-op (verified by the disabled-mode test under
-// tests/observability_disabled_test.zig).
-pub const observability = @import("observability.zig");
+// tests/observability_disabled_test.zig). Imported as a named module
+// so it lives in a single module tree across all consumers.
+pub const observability = @import("observability");
 
 // Re-export commonly used types for convenience
 pub const Name = name.Name;

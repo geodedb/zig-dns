@@ -33,6 +33,24 @@ pub fn build(b: *std.Build) void {
     // `addOptions` modules end up sharing a transitive file path.
     const build_options_mod = build_options.createModule();
 
+    // Observability seam (otel). Declared as a SHARED NAMED MODULE so
+    // every consumer (lib, client, stub, recursive, plus the seam tests)
+    // resolves to the same source file via `@import("observability")`.
+    // Using relative `@import("observability.zig")` from each module
+    // would trip Zig's "file exists in modules X and Y" error because the
+    // file would be pulled into multiple module trees. The seam's
+    // `enabled` flag tracks `build_options.with_otel`; when off, every
+    // helper compiles to a comptime-known no-op and the otel dependency
+    // is never resolved. The optional `otel` import is wired below
+    // inside the `if (with_otel)` block.
+    const observability_mod = b.addModule("observability", .{
+        .root_source_file = b.path("src/observability.zig"),
+        .target = target,
+        .imports = &.{
+            .{ .name = "build_options", .module = build_options_mod },
+        },
+    });
+
     // Internal -- `std.net` compatibility shim for Zig 0.16.0. Provides the
     // pre-0.16 `Address` / `Ip4Address` / `Ip6Address` surface on top of
     // `std.posix.sockaddr` until the transport layer migrates to `std.Io.net`.
@@ -516,6 +534,15 @@ pub fn build(b: *std.Build) void {
     recursive_mod.addImport("clock", clock_mod);
     recursive_mod.addImport("cache_protection", cache_protection_mod);
 
+    // Observability seam: query call sites in client/stub/recursive
+    // import the shared `observability` module by name. Using a named
+    // module (instead of a sibling-file import) is required so Zig
+    // doesn't end up with `observability.zig` living in two module
+    // trees ("file exists in modules X and Y" error).
+    client_mod.addImport("observability", observability_mod);
+    stub_mod.addImport("observability", observability_mod);
+    recursive_mod.addImport("observability", observability_mod);
+
     // Wire additional modules into the public API
     // Transports
     dns_mod.addImport("transport_udp", udp_mod);
@@ -546,18 +573,15 @@ pub fn build(b: *std.Build) void {
     if (parallel_mod) |pm| dns_mod.addImport("parallel", pm);
 
     // ========================================================================
-    // Observability seam (otel)
+    // Observability seam (otel) — final wiring
     // ========================================================================
     //
-    // The seam at src/observability.zig is always compiled (it's just a
-    // file in the dns module's source tree), but its `enabled` flag tracks
-    // `build_options.with_otel`. When the flag is OFF the seam collapses
-    // to a comptime-known no-op and the otel dependency is never fetched.
-    //
-    // Every module that pulls observability.zig in transitively needs the
-    // SAME `build_options` module instance. The dns root re-exports
-    // observability via `pub const observability = @import("observability.zig")`
-    // so wiring the import here propagates to every downstream module.
+    // `observability_mod` itself was declared near the top of build()
+    // alongside `build_options_mod` so it's reachable from
+    // client/stub/recursive imports. Here we attach it to the public
+    // `dns` module so consumers can reach the seam through
+    // `dns.observability`.
+    dns_mod.addImport("observability", observability_mod);
     dns_mod.addImport("build_options", build_options_mod);
 
     // Gated otel dependency. The `lazy = true` entry in build.zig.zon
@@ -570,7 +594,12 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
         }) orelse return;
-        dns_mod.addImport("otel", otel_dep.module("otel"));
+        const otel_module = otel_dep.module("otel");
+        // The seam itself imports `otel` when enabled. Wire it onto the
+        // shared observability module so every consumer sees the same
+        // otel namespace.
+        observability_mod.addImport("otel", otel_module);
+        dns_mod.addImport("otel", otel_module);
     }
 
     // ========================================================================
@@ -761,6 +790,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "transport_io", .module = transport_io_mod },
                 .{ .name = "net_compat", .module = net_compat_mod },
+                .{ .name = "observability", .module = observability_mod },
             },
         },
         .{
@@ -779,6 +809,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "clock", .module = clock_mod },
                 .{ .name = "cache_protection", .module = cache_protection_mod },
                 .{ .name = "net_compat", .module = net_compat_mod },
+                .{ .name = "observability", .module = observability_mod },
             },
         },
         .{
@@ -799,6 +830,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "clock", .module = clock_mod },
                 .{ .name = "cache_protection", .module = cache_protection_mod },
                 .{ .name = "cache_prefetch", .module = cache_prefetch_mod },
+                .{ .name = "observability", .module = observability_mod },
             },
         },
     };
