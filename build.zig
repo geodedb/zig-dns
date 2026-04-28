@@ -600,6 +600,19 @@ pub fn build(b: *std.Build) void {
         // otel namespace.
         observability_mod.addImport("otel", otel_module);
         dns_mod.addImport("otel", otel_module);
+
+        // Bootstrap helper. Only registered when `-Dwith_otel=true` so
+        // the disabled build never compiles otel-touching code. Gated
+        // from lib.zig via `if (observability.enabled) @import("observability_init")`.
+        const observability_init_mod = b.addModule("observability_init", .{
+            .root_source_file = b.path("src/observability_init.zig"),
+            .target = target,
+            .imports = &.{
+                .{ .name = "otel", .module = otel_module },
+                .{ .name = "observability", .module = observability_mod },
+            },
+        });
+        dns_mod.addImport("observability_init", observability_init_mod);
     }
 
     // ========================================================================

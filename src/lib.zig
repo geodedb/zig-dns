@@ -131,6 +131,17 @@ pub const zone_file = @import("zone_file");
 // so it lives in a single module tree across all consumers.
 pub const observability = @import("observability");
 
+/// Bootstrap helper: builds OTEL TracerProvider/MeterProvider/LoggerProvider
+/// from OTEL_* env vars and publishes Tracer/Meter handles to
+/// `observability.global`. Application entry-point code calls
+/// `observability_init.Otel.init` then `installGlobals()` to publish
+/// providers; when `-Dwith_otel=false` this collapses to an empty
+/// struct so the import never resolves the otel namespace.
+pub const observability_init = if (observability.enabled)
+    @import("observability_init")
+else
+    struct {};
+
 // Re-export commonly used types for convenience
 pub const Name = name.Name;
 pub const Header = header.Header;
