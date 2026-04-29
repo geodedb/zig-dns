@@ -53,6 +53,7 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "feature_doq", feature_doq);
+    build_options.addOption([]const u8, "package_name", "dns");
     build_options.addOption(bool, "with_otel", with_otel);
     // Materialize ONE shared `build_options` module. Each consumer module
     // imports the SAME module instance via `addImport` to avoid Zig 0.16's
