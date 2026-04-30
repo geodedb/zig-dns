@@ -22,16 +22,16 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package.
     .dependencies = .{
         .cli = .{
-            .url = "git+https://gitlab.com/devnw/zig/cli.git#cdfbd567a41062c85c1b2d680ed8898257b768d5",
-            .hash = "cli-0.1.1-0aso9FDBBgBC4L6kDmDXJjb37FJPpoWBLIM-IzgaWqqJ",
+            .url = "git+https://gitlab.com/devnw/zig/cli.git#63ca53c25ea0891dccd1eb6ae8b59c560d1077a6",
+            .hash = "cli-0.1.1-0aso9FDBBgBInPvGga6n5GP3SgBMcpSBzBmi4wNBxlrJ",
         },
         .config = .{
-            .url = "git+https://gitlab.com/devnw/zig/config.git#1bfffbedbcf07eb91b3bbe5d62ce10c77622eb88",
-            .hash = "config-0.1.0-TiLumvdgCgB6abReVSSwDXfLl0Y7VXPWQ3JuppAZfzPn",
+            .url = "git+https://gitlab.com/devnw/zig/config.git#4b0b0f5e0492e03815e2c70c8f5329de408a0a27",
+            .hash = "config-0.1.0-TiLumvdgCgDhqL5ZFE0yvWHBfKYGFy6p9hOFdLCVBR5S",
         },
         .thread_pool = .{
-            .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#fa7ce790ca2b59d1170644ce9e9b190a6aad8d1b",
-            .hash = "thread_pool-0.2.1-11B1BobIdgD7WQ2I5rgfsqZxogEhnhOssfgDH_N_0Vjd",
+            .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#c41388bdab88916bb453a20adae2c722405287d1",
+            .hash = "thread_pool-0.2.1-11B1BsqSdgCqx_EsSPzdPqfGhNFzonijUGYfDuy0fpTb",
         },
         // Otel observability dep. Lazy: only fetched when the build
         // reaches `b.lazyDependency("otel", ...)` under `-Dwith_otel=true`.
@@ -39,8 +39,8 @@
         // produced artifact contains zero otel symbols (verified by
         // otel/scripts/verify-consumer-noop.sh).
         .otel = .{
-            .url = "git+https://gitlab.com/devnw/zig/otel.git#eaf8248f3995bafb698ff357a7888e29afd88942",
-            .hash = "otel-0.1.0-B0v3lrgNNADMfbqostIQg-TgWrdsGRrNqob4XXIbql6-",
+            .url = "git+https://gitlab.com/devnw/zig/otel.git#7e014ec8ba14609affc495903293f150643e2382",
+            .hash = "otel-0.1.0-B0v3lrgNNABYMMqtuvc8JP-C7njK9T33jXC2APeGSSsA",
             .lazy = true,
         },
     },
