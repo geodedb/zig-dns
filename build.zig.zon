@@ -22,16 +22,16 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package.
     .dependencies = .{
         .cli = .{
-            .url = "git+https://gitlab.com/devnw/zig/cli.git#f3eea433a834094b9ce9f70c354c55b2231172fb",
-            .hash = "cli-0.1.1-0aso9FDBBgB8Vbtt9o4dR1jlN6qesoPcuSklOOQkgdTs",
+            .url = "git+https://gitlab.com/devnw/zig/cli.git#cdfbd567a41062c85c1b2d680ed8898257b768d5",
+            .hash = "cli-0.1.1-0aso9FDBBgBC4L6kDmDXJjb37FJPpoWBLIM-IzgaWqqJ",
         },
         .config = .{
-            .url = "git+https://gitlab.com/devnw/zig/config.git#90ac948687c8450281e34a9f76f1a30b76801120",
-            .hash = "config-0.1.0-TiLumvdgCgBRpbDBUASCxIrTWsLtBoTYx7cJ8n7dG_CD",
+            .url = "git+https://gitlab.com/devnw/zig/config.git#1bfffbedbcf07eb91b3bbe5d62ce10c77622eb88",
+            .hash = "config-0.1.0-TiLumvdgCgB6abReVSSwDXfLl0Y7VXPWQ3JuppAZfzPn",
         },
         .thread_pool = .{
-            .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#930d41bcd52b0f92f5405da69a72949a970a2990",
-            .hash = "thread_pool-0.2.1-11B1BobIdgAJ7WWVFfqS0BxtbO_vXdSevdXwauTZhSuS",
+            .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#fa7ce790ca2b59d1170644ce9e9b190a6aad8d1b",
+            .hash = "thread_pool-0.2.1-11B1BobIdgD7WQ2I5rgfsqZxogEhnhOssfgDH_N_0Vjd",
         },
         // Otel observability dep. Lazy: only fetched when the build
         // reaches `b.lazyDependency("otel", ...)` under `-Dwith_otel=true`.
@@ -39,8 +39,8 @@
         // produced artifact contains zero otel symbols (verified by
         // otel/scripts/verify-consumer-noop.sh).
         .otel = .{
-            .url = "git+https://gitlab.com/devnw/zig/otel.git#2665f64d4fb85f8d7beb6b21f2218317ea2fc05e",
-            .hash = "otel-0.1.0-B0v3lrgNNADQwluWDPhv5kY_7L_C1vptqunNkx_Ipzy1",
+            .url = "git+https://gitlab.com/devnw/zig/otel.git#eaf8248f3995bafb698ff357a7888e29afd88942",
+            .hash = "otel-0.1.0-B0v3lrgNNADMfbqostIQg-TgWrdsGRrNqob4XXIbql6-",
             .lazy = true,
         },
     },
