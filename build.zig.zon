@@ -22,16 +22,16 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package.
     .dependencies = .{
         .cli = .{
-            .url = "git+https://gitlab.com/devnw/zig/cli.git#bbefa2a854936c2b3634fc2c4b0beccb46e5e411",
-            .hash = "cli-0.1.1-0aso9FDBBgDg1N5oTdvVNwAV-D_A_HZy-QrdIDgvP-KZ",
+            .url = "git+https://gitlab.com/devnw/zig/cli.git#f3eea433a834094b9ce9f70c354c55b2231172fb",
+            .hash = "cli-0.1.1-0aso9FDBBgB8Vbtt9o4dR1jlN6qesoPcuSklOOQkgdTs",
         },
         .config = .{
-            .url = "git+https://gitlab.com/devnw/zig/config.git#76489940dbdf2315d58c22b8afed34482f6dd677",
-            .hash = "config-0.1.0-TiLumvdgCgCUZmVHZVpxK9wwkoj8RvKBDjULW-KXi7iT",
+            .url = "git+https://gitlab.com/devnw/zig/config.git#90ac948687c8450281e34a9f76f1a30b76801120",
+            .hash = "config-0.1.0-TiLumvdgCgBRpbDBUASCxIrTWsLtBoTYx7cJ8n7dG_CD",
         },
         .thread_pool = .{
-            .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#2da0f3055ae109e8c0a34b02db6d04493fd6948e",
-            .hash = "thread_pool-0.2.1-11B1BobIdgCNh_BzZ_4Ed4oSbXu1msJz_XCW9FJZtU4S",
+            .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#930d41bcd52b0f92f5405da69a72949a970a2990",
+            .hash = "thread_pool-0.2.1-11B1BobIdgAJ7WWVFfqS0BxtbO_vXdSevdXwauTZhSuS",
         },
         // Otel observability dep. Lazy: only fetched when the build
         // reaches `b.lazyDependency("otel", ...)` under `-Dwith_otel=true`.
@@ -39,8 +39,8 @@
         // produced artifact contains zero otel symbols (verified by
         // otel/scripts/verify-consumer-noop.sh).
         .otel = .{
-            .url = "git+https://gitlab.com/devnw/zig/otel.git#a1647d2f26f73ec2042b12ab60c1ee3effb7d411",
-            .hash = "otel-0.1.0-B0v3lrgNNAC_Asch0mgFZ-vhA2cXGmBss4K1xNjmTnzA",
+            .url = "git+https://gitlab.com/devnw/zig/otel.git#2665f64d4fb85f8d7beb6b21f2218317ea2fc05e",
+            .hash = "otel-0.1.0-B0v3lrgNNADQwluWDPhv5kY_7L_C1vptqunNkx_Ipzy1",
             .lazy = true,
         },
     },
