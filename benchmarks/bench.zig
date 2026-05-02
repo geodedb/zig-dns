@@ -99,9 +99,13 @@ fn makeTestResponse() [45]u8 {
         0x00, 0x00, // NSCOUNT: 0
         0x00, 0x00, // ARCOUNT: 0
         // Question: example.com A IN (17 bytes)
-        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
-        3, 'c', 'o', 'm',
-        0,          // root terminator
+        7,    'e',
+        'x',  'a',
+        'm',  'p',
+        'l',  'e',
+        3,    'c',
+        'o',  'm',
+        0, // root terminator
         0x00, 0x01, // QTYPE: A
         0x00, 0x01, // QCLASS: IN
         // Answer: example.com A 300 93.184.216.34 (14 bytes)
@@ -118,30 +122,31 @@ fn makeTestResponse() [45]u8 {
 fn makeTestRecord() [27]u8 {
     return .{
         // Name: example.com (uncompressed)
-        7, 'e', 'x', 'a', 'm', 'p', 'l', 'e',
-        3, 'c', 'o', 'm',
-        0,
+        7,    'e',  'x',  'a',  'm',  'p',  'l',  'e',
+        3,    'c',  'o',  'm',  0,
         // Type: A (1)
-        0x00, 0x01,
+           0x00, 0x01,
         // Class: IN (1)
-        0x00, 0x01,
+        0x00,
+        0x01,
         // TTL: 300
         0x00, 0x00, 0x01, 0x2C,
         // RDLENGTH: 4
         0x00, 0x04,
         // RDATA: 192.0.2.1
-        192, 0, 2, 1,
+        192,
+        0,    2,    1,
     };
 }
 
 /// Wire-format EDNS OPT pseudo-record
 fn makeTestEdnsOpt() [11]u8 {
     return .{
-        0x00,       // Name: root
+        0x00, // Name: root
         0x00, 0x29, // TYPE: OPT (41)
         0x04, 0xD0, // CLASS: UDP payload 1232
-        0x00,       // Extended RCODE: 0
-        0x00,       // Version: 0
+        0x00, // Extended RCODE: 0
+        0x00, // Version: 0
         0x80, 0x00, // Flags: DO=1
         0x00, 0x00, // RDLENGTH: 0 (no options)
     };
