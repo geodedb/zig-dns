@@ -22,12 +22,12 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package.
     .dependencies = .{
         .cli = .{
-            .url = "git+https://gitlab.com/devnw/zig/cli.git#7e77b54963924b938aad4b97c42a3ba59057d3ba",
-            .hash = "cli-0.1.4-0aso9FDBBgBn0mefnQc6okW0TRAXDcKk1O-1yaaHRa6F",
+            .url = "git+https://gitlab.com/devnw/zig/cli.git#51a8decd3b4db50a61168a1d35254bb626960ad6",
+            .hash = "cli-0.1.4-0aso9FDBBgATgnm0nVHYhNZD1SNtXCwnxuL0f7Kd77N_",
         },
         .config = .{
-            .url = "git+https://gitlab.com/devnw/zig/config.git#c7077f40fd00adc186eb5145bd626984f2a20513",
-            .hash = "config-0.1.4-TiLumvdgCgC4VsY0V4HKOtCSYlwWjXPkiREwxxSuRC0S",
+            .url = "git+https://gitlab.com/devnw/zig/config.git#dbf3ceaba175cf196a1ae7806b90bcd5ec0df009",
+            .hash = "config-0.1.4-TiLumvdgCgCi-N6NyOTB85Erl-hseWjkXhlhFIz1Aju8",
         },
         .thread_pool = .{
             .url = "git+https://gitlab.com/devnw/zig/thread-pool.git#39528a3e92212efab8ed5840bc20e619a419c0f5",
@@ -39,8 +39,8 @@
         // produced artifact contains zero otel symbols (verified by
         // otel/scripts/verify-consumer-noop.sh).
         .otel = .{
-            .url = "git+https://gitlab.com/devnw/zig/otel.git#214e531c82a3159f5ffe63624e380111e90898c6",
-            .hash = "otel-0.1.5-B0v3lvEMNADmMsONSxCyQcCGyAz0TbResIJdK-rM_Pul",
+            .url = "git+https://gitlab.com/devnw/zig/otel.git#64db4c05079b0f9493c6ecbe60ff3571266589d5",
+            .hash = "otel-0.1.5-B0v3lvEMNAAIk-gM2fawa7UVOS3Whr1K460ZdcNgPeYn",
             .lazy = true,
         },
     },
