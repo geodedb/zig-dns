@@ -22,8 +22,8 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package.
     .dependencies = .{
         .cli = .{
-            .url = "git+https://gitlab.com/devnw/zig/cli.git#51a8decd3b4db50a61168a1d35254bb626960ad6",
-            .hash = "cli-0.1.4-0aso9FDBBgATgnm0nVHYhNZD1SNtXCwnxuL0f7Kd77N_",
+            .url = "git+https://gitlab.com/devnw/zig/cli.git#de11f869fe80e56a756b08dbbd28c9807eec6ca1",
+            .hash = "cli-0.1.4-0aso9FDBBgCUINdIje3hWx5irh9SLOJwJuSb9mNLAvgU",
         },
         .config = .{
             .url = "git+https://gitlab.com/devnw/zig/config.git#dbf3ceaba175cf196a1ae7806b90bcd5ec0df009",
@@ -39,8 +39,8 @@
         // produced artifact contains zero otel symbols (verified by
         // otel/scripts/verify-consumer-noop.sh).
         .otel = .{
-            .url = "git+https://gitlab.com/devnw/zig/otel.git#64db4c05079b0f9493c6ecbe60ff3571266589d5",
-            .hash = "otel-0.1.5-B0v3lvEMNAAIk-gM2fawa7UVOS3Whr1K460ZdcNgPeYn",
+            .url = "git+https://gitlab.com/devnw/zig/otel.git#455ad2b8fb6888d5dab48a0a5bdcc81fd225f635",
+            .hash = "otel-0.1.5-B0v3lvEMNAC40_D5FfUJgpR3hR8nP5R4IKg31uJmpk-y",
             .lazy = true,
         },
     },
