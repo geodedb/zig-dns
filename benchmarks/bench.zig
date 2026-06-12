@@ -11,6 +11,14 @@
 const std = @import("std");
 const dns = @import("dns");
 
+/// Monotonic nanosecond clock. std.time.Timer was removed in Zig 0.16; this
+/// mirrors the working helper in scale_bench.zig.
+inline fn nowNs() u64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    const ts = std.Io.Clock.Timestamp.now(io_inst, .awake);
+    return @intCast(ts.raw.toNanoseconds());
+}
+
 const Message = dns.message.Message;
 const Name = dns.name.Name;
 const ResourceRecord = dns.record.ResourceRecord;
@@ -159,25 +167,25 @@ fn makeTestEdnsOpt() [11]u8 {
 fn benchMessageParse() BenchResult {
     const data = makeTestResponse();
 
-    var timer = std.time.Timer.start() catch return .{ .name = "message parse", .count = 0, .total_ns = 0 };
+    const start_ns = nowNs();
     for (0..MSG_PARSE_COUNT) |_| {
         const msg = Message.parse(&data) catch continue;
         std.mem.doNotOptimizeAway(&msg);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - start_ns;
 
     return .{ .name = "message parse", .count = MSG_PARSE_COUNT, .total_ns = elapsed };
 }
 
 fn benchMessageBuild(allocator: std.mem.Allocator) BenchResult {
-    var timer = std.time.Timer.start() catch return .{ .name = "message build", .count = 0, .total_ns = 0 };
+    const start_ns = nowNs();
     for (0..MSG_BUILD_COUNT) |i| {
         const id: u16 = @truncate(i);
         const query = dns.message.buildQuery(allocator, id, "example.com", .a, .in, true) catch continue;
         std.mem.doNotOptimizeAway(query.ptr);
         allocator.free(query);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - start_ns;
 
     return .{ .name = "message build", .count = MSG_BUILD_COUNT, .total_ns = elapsed };
 }
@@ -190,14 +198,14 @@ fn benchNameEncode(allocator: std.mem.Allocator) BenchResult {
         "a.b.c.d.e.f.g.h.example.com",
     };
 
-    var timer = std.time.Timer.start() catch return .{ .name = "name encode", .count = 0, .total_ns = 0 };
+    const start_ns = nowNs();
     for (0..NAME_ENCODE_COUNT) |i| {
         const domain = domains[i % domains.len];
         const encoded = Name.encode(allocator, domain) catch continue;
         std.mem.doNotOptimizeAway(encoded.ptr);
         allocator.free(encoded);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - start_ns;
 
     return .{ .name = "name encode", .count = NAME_ENCODE_COUNT, .total_ns = elapsed };
 }
@@ -206,14 +214,14 @@ fn benchNameDecode(allocator: std.mem.Allocator) BenchResult {
     // Parse names from a DNS response (exercises compression pointer resolution)
     const data = makeTestResponse();
 
-    var timer = std.time.Timer.start() catch return .{ .name = "name decode", .count = 0, .total_ns = 0 };
+    const start_ns = nowNs();
     for (0..NAME_DECODE_COUNT) |_| {
         const parsed = Name.parse(&data, 12) catch continue;
         const str = parsed.toString(allocator, &data) catch continue;
         std.mem.doNotOptimizeAway(str.ptr);
         allocator.free(str);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - start_ns;
 
     return .{ .name = "name decode", .count = NAME_DECODE_COUNT, .total_ns = elapsed };
 }
@@ -221,12 +229,12 @@ fn benchNameDecode(allocator: std.mem.Allocator) BenchResult {
 fn benchRecordParse() BenchResult {
     const data = makeTestRecord();
 
-    var timer = std.time.Timer.start() catch return .{ .name = "record parse", .count = 0, .total_ns = 0 };
+    const start_ns = nowNs();
     for (0..RECORD_PARSE_COUNT) |_| {
         const rr = ResourceRecord.parse(&data, 0) catch continue;
         std.mem.doNotOptimizeAway(&rr);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - start_ns;
 
     return .{ .name = "record parse", .count = RECORD_PARSE_COUNT, .total_ns = elapsed };
 }
@@ -260,11 +268,11 @@ fn benchCachePut(allocator: std.mem.Allocator) BenchResult {
         allocated = i + 1;
     }
 
-    var timer = std.time.Timer.start() catch return .{ .name = "cache put", .count = 0, .total_ns = 0 };
+    const start_ns = nowNs();
     for (domains[0..allocated]) |domain| {
         cache.put(domain, rr) catch continue;
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - start_ns;
 
     return .{ .name = "cache put", .count = allocated, .total_ns = elapsed };
 }
@@ -287,13 +295,13 @@ fn benchCacheGet(allocator: std.mem.Allocator) BenchResult {
         cache.put(domains[i], rr) catch continue;
     }
 
-    var timer = std.time.Timer.start() catch return .{ .name = "cache get", .count = 0, .total_ns = 0 };
+    const start_ns = nowNs();
     for (0..CACHE_GET_COUNT) |i| {
         const idx = i % allocated;
         const result = cache.get(domains[idx], .a, .in);
         std.mem.doNotOptimizeAway(&result);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - start_ns;
 
     return .{ .name = "cache get", .count = CACHE_GET_COUNT, .total_ns = elapsed };
 }
@@ -304,7 +312,7 @@ fn benchEdnsParse() BenchResult {
     const rr = ResourceRecord.parse(&data, 0) catch
         return .{ .name = "EDNS OPT parse", .count = 0, .total_ns = 0 };
 
-    var timer = std.time.Timer.start() catch return .{ .name = "EDNS OPT parse", .count = 0, .total_ns = 0 };
+    const start_ns = nowNs();
     for (0..EDNS_PARSE_COUNT) |_| {
         const opt = dns.edns.OptRecord.parse(
             rr.class.toInt(),
@@ -313,7 +321,7 @@ fn benchEdnsParse() BenchResult {
         );
         std.mem.doNotOptimizeAway(&opt);
     }
-    const elapsed = timer.read();
+    const elapsed = nowNs() - start_ns;
 
     return .{ .name = "EDNS OPT parse", .count = EDNS_PARSE_COUNT, .total_ns = elapsed };
 }
@@ -329,9 +337,9 @@ fn benchParallelZoneParse(allocator: std.mem.Allocator) BenchResult {
 
     var results: [PARALLEL_ZONE_COUNT]dns.parallel.ParsedRecord = undefined;
 
-    var timer = std.time.Timer.start() catch return .{ .name = "parallel zone parse", .count = 0, .total_ns = 0 };
+    const start_ns = nowNs();
     dns.parallel.parallelZoneRecordParse(allocator, &raw_records, &results);
-    const elapsed = timer.read();
+    const elapsed = nowNs() - start_ns;
 
     // Cleanup thread pool
     defer dns.parallel.deinitPool();
