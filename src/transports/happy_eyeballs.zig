@@ -23,6 +23,12 @@ inline fn timeMilli() i64 {
     return clock.milliTimestamp();
 }
 
+/// Milliseconds elapsed since `start`, clamped to zero if the clock
+/// regressed (GAP-0845: a negative delta would trip the u32 @intCast).
+fn elapsedMilli(now: i64, start: i64) u32 {
+    return @intCast(@max(0, now - start));
+}
+
 /// Happy Eyeballs configuration
 pub const Config = struct {
     /// Connection attempt delay (RFC 8305 recommends 250ms)
@@ -208,8 +214,9 @@ pub const HappyEyeballs = struct {
 
             if (active_count == 0) break;
 
-            // Compute remaining time before overall timeout
-            const elapsed: u32 = @intCast(timeMilli() - start_time);
+            // Compute remaining time before overall timeout (clamped on
+            // clock regression, GAP-0845)
+            const elapsed: u32 = elapsedMilli(timeMilli(), start_time);
             if (elapsed > self.config.connection_timeout_ms) break;
 
             const remaining_ms = self.config.connection_timeout_ms - elapsed;
@@ -237,8 +244,7 @@ pub const HappyEyeballs = struct {
                         const err = getSocketError(attempt.fd);
                         if (err == 0) {
                             attempt.state = .connected;
-                            const now = timeMilli();
-                            const conn_time: u32 = @intCast(@max(0, now - attempt.start_time));
+                            const conn_time: u32 = elapsedMilli(timeMilli(), attempt.start_time);
 
                             winner = AttemptResult{
                                 .fd = attempt.fd,
@@ -526,6 +532,14 @@ pub const AddressSorter = struct {
 // ============================================================================
 // Tests
 // ============================================================================
+
+test "GAP-0845: elapsedMilli clamps clock regression to zero" {
+    // A monotonicity violation (now < start) must clamp to 0 instead of
+    // tripping the u32 intCast on a negative delta.
+    try std.testing.expectEqual(@as(u32, 0), elapsedMilli(100, 200));
+    try std.testing.expectEqual(@as(u32, 0), elapsedMilli(0, 0));
+    try std.testing.expectEqual(@as(u32, 150), elapsedMilli(250, 100));
+}
 
 test "Config defaults" {
     const config = Config{};
