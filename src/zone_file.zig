@@ -349,11 +349,13 @@ pub const ZoneParser = struct {
 
     /// Parse zone file from file path
     pub fn parseFile(self: *Self, path: []const u8) !Zone {
-        const file = std.fs.cwd().openFile(path, .{}) catch return error.FileNotFound;
-        defer file.close();
-
-        const content = file.readToEndAlloc(self.allocator, 10 * 1024 * 1024) catch
-            return error.OutOfMemory;
+        // Zig 0.16 file I/O: std.fs.cwd()/readToEndAlloc were replaced by the
+        // I/O-based std.Io.Dir.readFileAlloc. (This path was previously
+        // uncompiled dead code — only parse() was exercised — so the breakage
+        // was dormant.)
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const content = std.Io.Dir.cwd().readFileAlloc(io, path, self.allocator, .limited(10 * 1024 * 1024)) catch
+            return error.FileNotFound;
         defer self.allocator.free(content);
 
         return self.parse(content);
@@ -891,6 +893,13 @@ test "ZoneParser does not leak explicit owner names (SEC-SR-8)" {
     var zone = try parser.parse(content);
     defer zone.deinit();
     try std.testing.expectEqual(@as(usize, 3), zone.records.items.len);
+}
+
+test "ZoneParser.parseFile type-checks (Zig 0.16 file-I/O guard)" {
+    // parseFile touches the real filesystem so it is not exercised by unit
+    // tests; reference it so a future std.Io API change cannot silently break
+    // this public entry point again (it was dormant-broken once already).
+    _ = &ZoneParser.parseFile;
 }
 
 test "ZoneParser leading-blank continuation inherits owner (MNT-1, #257)" {
