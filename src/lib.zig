@@ -12,7 +12,7 @@
 //! - Stub resolver for simple DNS queries
 //! - Full recursive resolver for complete name resolution
 //! - EDNS0 support (RFC 6891)
-//! - Cross-platform: Linux, macOS, Windows
+//! - Linux (primary); macOS/Windows not yet supported (socket layer is Linux-only)
 //! - Minimal dependencies (optional thread pool for parallelism)
 //!
 //! ## Quick Start

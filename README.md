@@ -7,8 +7,8 @@ A comprehensive pure Zig implementation of the Domain Name System (DNS) protocol
 | Aspect | Info |
 |--------|------|
 | API Stability | Beta |
-| Zig Version | 0.15.1+ |
-| Platforms | Linux, macOS, Windows |
+| Zig Version | 0.16.0+ |
+| Platforms | Linux (primary); macOS/Windows not yet supported |
 
 ## Features
 
@@ -30,7 +30,7 @@ A comprehensive pure Zig implementation of the Domain Name System (DNS) protocol
 - **DNSSEC Primitives**: Ed25519, ECDSA P-256/P-384 signature verification, DS, NSEC/NSEC3 (RFC 4033/4034/4035). ⚠️ Not yet wired into resolution — the validator is never invoked and queries do not set the EDNS DO bit, so resolved answers are **not** DNSSEC-validated ([#207](https://gitlab.com/devnw/zig/dns/-/issues/207)).
 - **EDNS Client Subnet**: Geo-aware DNS queries (RFC 7871)
 - **DNS Cookies**: Lightweight transaction security (RFC 7873)
-- **Cross-Platform**: Linux, macOS, Windows, and more
+- **Linux**: primary supported platform. macOS/Windows are not yet supported — the socket compatibility layer is currently Linux-only ([#250](https://gitlab.com/devnw/zig/dns/-/issues/250)).
 - **Minimal Dependencies**: Pure Zig implementation using the standard library (optional `thread-pool` dependency for parallelism)
 - **Record Types**: A, AAAA, CNAME, MX, NS, PTR, SOA, TXT, DNAME, SRV, CAA, TLSA, SVCB, HTTPS, DNSKEY, RRSIG, DS, NSEC, NSEC3
 
@@ -47,7 +47,7 @@ See [ROADMAP.md](docs/ROADMAP.md) and [GitLab Issues](https://gitlab.com/devnw/z
 
 ## Requirements
 
-- Zig 0.15.1 or later
+- Zig 0.16.0 or later (the library uses the `std.Io` APIs introduced in 0.16)
 
 ## Installation
 
