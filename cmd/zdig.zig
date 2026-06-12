@@ -322,6 +322,14 @@ fn runQuery(ctx: *cli.Context) !void {
         return error.MissingQueryName;
     }
 
+    // Validate the server address early so invalid input gets a clear
+    // message instead of an opaque parse failure (GAP-0882).
+    _ = parseServerAddress(options.server, options.port) catch |err| {
+        try ctx.err("Error: invalid server address '{s}'\n", .{options.server});
+        try ctx.err("Expected an IPv4 (8.8.8.8) or IPv6 (::1, [::1]:5353) address.\n", .{});
+        return err;
+    };
+
     // Perform the query
     if (options.trace) {
         try performTrace(ctx.allocator, &options);
@@ -563,9 +571,37 @@ fn performQuery(allocator: Allocator, options: *const QueryOptions) !void {
     }
 }
 
+/// Parse a DNS server specification into a socket address (GAP-0882).
+///
+/// Accepted forms:
+/// - IPv4:          "8.8.8.8"
+/// - IPv6:          "::1", "2001:db8::1"
+/// - Bracketed IPv6 with optional port: "[::1]", "[::1]:5353"
+///
+/// A port in the bracketed form overrides `default_port`.
+fn parseServerAddress(server: []const u8, default_port: u16) error{ InvalidServerAddress, InvalidServerPort }!net_compat.Address {
+    if (server.len == 0) return error.InvalidServerAddress;
+
+    // Bracketed IPv6: [addr] or [addr]:port
+    if (server[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, server, ']') orelse return error.InvalidServerAddress;
+        const host = server[1..close];
+        const rest = server[close + 1 ..];
+        var port = default_port;
+        if (rest.len > 0) {
+            if (rest[0] != ':' or rest.len == 1) return error.InvalidServerAddress;
+            port = std.fmt.parseInt(u16, rest[1..], 10) catch return error.InvalidServerPort;
+        }
+        return net_compat.Address.parseIp6(host, port) catch error.InvalidServerAddress;
+    }
+
+    // Plain address: try IPv4 first, then IPv6 ("::1" etc. contains ':').
+    return net_compat.Address.parseIp(server, default_port) catch error.InvalidServerAddress;
+}
+
 fn sendQuery(allocator: Allocator, options: *const QueryOptions, query_data: []const u8) ![]u8 {
-    // Parse server address
-    const address = try net_compat.Address.parseIp4(options.server, options.port);
+    // Parse server address (IPv4 or IPv6; GAP-0882)
+    const address = try parseServerAddress(options.server, options.port);
 
     if (options.use_tcp) {
         return sendTcp(allocator, address, query_data, options.timeout);
@@ -575,7 +611,8 @@ fn sendQuery(allocator: Allocator, options: *const QueryOptions, query_data: []c
 }
 
 fn sendUdp(allocator: Allocator, address: net_compat.Address, query_data: []const u8, timeout_secs: u32) ![]u8 {
-    const sock = try net_compat.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    // Socket family must follow the parsed address (GAP-0882: IPv6 support)
+    const sock = try net_compat.socket(address.any.family, std.posix.SOCK.DGRAM, 0);
     defer net_compat.close(sock);
 
     // Set timeout
@@ -632,7 +669,8 @@ fn addressMatches(expected: *const std.posix.sockaddr, received: *const std.posi
 }
 
 fn sendTcp(allocator: Allocator, address: net_compat.Address, query_data: []const u8, timeout_secs: u32) ![]u8 {
-    const sock = try net_compat.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, 0);
+    // Socket family must follow the parsed address (GAP-0882: IPv6 support)
+    const sock = try net_compat.socket(address.any.family, std.posix.SOCK.STREAM, 0);
     defer net_compat.close(sock);
 
     // Set timeouts (SEC-GAP-047: CWE-400)
@@ -1016,8 +1054,8 @@ fn performTrace(allocator: Allocator, options: *const QueryOptions) !void {
         const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, options.qclass, false, options.dnssec);
         defer allocator.free(query_data);
 
-        // Parse server address
-        const address = net_compat.Address.parseIp4(current_server, 53) catch {
+        // Parse server address (IPv4 or IPv6; GAP-0882)
+        const address = parseServerAddress(current_server, 53) catch {
             try writer.print(";; Cannot parse server: {s}\n", .{current_server});
             return;
         };
@@ -1189,6 +1227,47 @@ test "writeSanitized: escapes quote and backslash (SEC-SR-5)" {
     defer aw.deinit();
     try writeSanitized(&aw.writer, "a\"b\\c");
     try testing.expectEqualStrings("a\\\"b\\\\c", aw.written());
+}
+
+test "parseServerAddress: IPv4 plain (GAP-0882)" {
+    const addr = try parseServerAddress("8.8.8.8", 53);
+    try testing.expectEqual(@as(u16, std.posix.AF.INET), addr.any.family);
+    try testing.expectEqual(@as(u16, 53), addr.getPort());
+}
+
+test "parseServerAddress: IPv6 plain loopback (GAP-0882)" {
+    const addr = try parseServerAddress("::1", 53);
+    try testing.expectEqual(@as(u16, std.posix.AF.INET6), addr.any.family);
+    try testing.expectEqual(@as(u16, 53), addr.getPort());
+}
+
+test "parseServerAddress: IPv6 plain full address (GAP-0882)" {
+    const addr = try parseServerAddress("2001:db8::1", 53);
+    try testing.expectEqual(@as(u16, std.posix.AF.INET6), addr.any.family);
+    try testing.expectEqual(@as(u16, 53), addr.getPort());
+}
+
+test "parseServerAddress: bracketed IPv6 with port (GAP-0882)" {
+    const addr = try parseServerAddress("[::1]:5353", 53);
+    try testing.expectEqual(@as(u16, std.posix.AF.INET6), addr.any.family);
+    try testing.expectEqual(@as(u16, 5353), addr.getPort());
+}
+
+test "parseServerAddress: bracketed IPv6 without port uses default (GAP-0882)" {
+    const addr = try parseServerAddress("[2001:db8::1]", 5300);
+    try testing.expectEqual(@as(u16, std.posix.AF.INET6), addr.any.family);
+    try testing.expectEqual(@as(u16, 5300), addr.getPort());
+}
+
+test "parseServerAddress: invalid inputs rejected with clear errors (GAP-0882)" {
+    try testing.expectError(error.InvalidServerAddress, parseServerAddress("", 53));
+    try testing.expectError(error.InvalidServerAddress, parseServerAddress("not-an-ip", 53));
+    try testing.expectError(error.InvalidServerAddress, parseServerAddress("[::1", 53));
+    try testing.expectError(error.InvalidServerAddress, parseServerAddress("[::1]junk", 53));
+    try testing.expectError(error.InvalidServerAddress, parseServerAddress("[::1]:", 53));
+    try testing.expectError(error.InvalidServerAddress, parseServerAddress("[8.8.8.8]:53", 53));
+    try testing.expectError(error.InvalidServerPort, parseServerAddress("[::1]:notaport", 53));
+    try testing.expectError(error.InvalidServerPort, parseServerAddress("[::1]:70000", 53));
 }
 
 test "addressMatches: IPv4 same address and port matches" {
