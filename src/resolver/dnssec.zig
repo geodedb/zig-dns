@@ -386,6 +386,18 @@ pub const Validator = struct {
         var signed_data: std.ArrayList(u8) = .empty;
         defer signed_data.deinit(self.allocator);
 
+        // GAP-0890: Pre-compute the total signed-data size and reserve once,
+        // avoiding incremental reallocations across the ~10 append calls below.
+        // RRSIG fixed RDATA is 18 bytes; each RR contributes its owner name,
+        // 10 fixed bytes (type 2 + class 2 + TTL 4 + RDLENGTH 2), and RDATA.
+        // Name lengths use labels.len (+1 for a possibly-missing root byte),
+        // a tight upper bound on what appendCanonicalName emits.
+        var reserve_size: usize = rrsig_fixed_rdata_len + rrsig.signer.labels.len + 1;
+        for (rrset) |rr| {
+            reserve_size += rr.name.labels.len + 1 + rr_fixed_header_len + rr.rdata.len;
+        }
+        try signed_data.ensureTotalCapacity(self.allocator, reserve_size);
+
         // Add RRSIG RDATA fields (RFC 4034 Section 3.1.8.1)
         try self.appendRrsigRdata(&signed_data, rrsig);
 
@@ -400,6 +412,15 @@ pub const Validator = struct {
             rrsig.signature,
         );
     }
+
+    /// Size of the fixed (non-name) portion of RRSIG RDATA (RFC 4034 S3.1):
+    /// type covered (2) + algorithm (1) + labels (1) + original TTL (4) +
+    /// expiration (4) + inception (4) + key tag (2).
+    const rrsig_fixed_rdata_len: usize = 18;
+
+    /// Size of the fixed per-RR header in canonical RRset form (RFC 4034 S6.3):
+    /// type (2) + class (2) + original TTL (4) + RDLENGTH (2).
+    const rr_fixed_header_len: usize = 10;
 
     /// Append RRSIG RDATA fields (without signature) for signing
     fn appendRrsigRdata(self: *Validator, data: *std.ArrayList(u8), rrsig: RrsigData) !void {
