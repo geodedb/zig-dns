@@ -593,8 +593,11 @@ pub const Name = struct {
     /// Returns just the leftmost label prepended to the zone suffix
     /// Example: for "www.example.com" with zone "com", returns "example.com"
     pub fn minimizedName(self: Self, allocator: std.mem.Allocator, zone: []const u8, full_message: ?[]const u8) ![]u8 {
-        const full_str = try self.toString(allocator, full_message);
-        defer allocator.free(full_str);
+        // Render into a stack buffer (names are <= 255 bytes) instead of
+        // toString's heap allocation; only the returned value is heap-owned
+        // (PF-NEW-37, #224).
+        var name_buf: [max_name_length]u8 = undefined;
+        const full_str = try self.toStringBuf(&name_buf, full_message);
 
         // If zone is root or empty, return first label
         if (zone.len == 0 or (zone.len == 1 and zone[0] == '.')) {
