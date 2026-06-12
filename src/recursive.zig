@@ -606,7 +606,13 @@ pub const RecursiveResolver = struct {
         // Try servers in order
         const max_tries = @min(servers.len, self.config.max_server_attempts);
         for (servers[0..max_tries]) |server| {
-            const response = self.sendQuery(query, server) catch continue;
+            const response = self.sendQuery(query, server) catch |err| switch (err) {
+                // OOM is fatal and must not be silently degraded to NoResponse;
+                // re-raise it like the stub resolver does (REL-4).
+                error.OutOfMemory => return error.OutOfMemory,
+                // Network/timeout/etc.: try the next server.
+                else => continue,
+            };
 
             if (response.len >= 2) {
                 const resp_id = std.mem.readInt(u16, response[0..2], .big);
