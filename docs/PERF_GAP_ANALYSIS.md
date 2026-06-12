@@ -269,6 +269,28 @@ Remaining items by priority (after deep audit; Won't-Do items classified):
 
 ---
 
+## Audit Cycle 2026-06-12 -- Open Performance Findings
+
+Performance-domain gaps from the 2026-06-12 audit (Phase 3 gap-detector + deep review). All **Open**.
+
+| ID | PerfSeverity | Finding | Component | Evidence | Measurement | Issue | Fix Summary | Status |
+|----|--------------|---------|-----------|----------|-------------|-------|-------------|--------|
+| GAP-0858 | P2 | scale_bench 100K tier times out (DebugAllocator + legacy O(n) Cache eviction) | scale_bench, cache | `benchmarks/scale_bench.zig:193`; `src/cache.zig:125-131` (BENCH-2) | 100K tier never completes | [#313](https://gitlab.com/devnw/zig/dns/-/issues/313) | Release allocator and/or O(1) DnsCache; complete within budget | **Open** |
+| GAP-0859 | P2 | Benches measure legacy Cache, not production DnsCache; baseline non-representative | benchmarks | `benchmarks/` target legacy Cache (BENCH-3) | Wrong baseline | [#314](https://gitlab.com/devnw/zig/dns/-/issues/314) | Re-target benchmarks at DnsCache; re-capture baseline | **Open** |
+| GAP-0849 | P2 | bench.zig uses removed std.time.Timer (9 sites); `zig build bench` fails | benchmarks | `benchmarks/bench.zig` -- 9 sites | Bench cannot build | [#216](https://gitlab.com/devnw/zig/dns/-/issues/216) | Migrate to current timer API; bench builds | **Open** |
+| GAP-0860 | P2 | page_allocator per thread-pool task | parallel.zig | `src/parallel.zig:521-532,652-666` (RF-1) | mmap/munmap per task | [#315](https://gitlab.com/devnw/zig/dns/-/issues/315) | Pooled/arena allocator per task | **Open** |
+| GAP-0861 | P2 | putRecordWithKey O(N^2) rdata copy | dns_cache.zig | `src/resolver/dns_cache.zig:511-548` (RF-3) | Quadratic on multi-record pack | [#316](https://gitlab.com/devnw/zig/dns/-/issues/316) | Linear (single-pass / pre-sized) rdata copy | **Open** |
+| GAP-0888 | P2 | TCP length-prefix + payload sent as 2 writeAll calls under TCP_NODELAY -> 2 segments/syscalls per query | tcp, connection_pool | `tcp.zig:57-58`; `connection_pool.zig:587-588,694-695,741-742` (PF-AUD-03) | 2 segments/syscalls per TCP query | [#322](https://gitlab.com/devnw/zig/dns/-/issues/322) | Coalesce prefix+payload into one write (buffer/writev) | **Open** |
+| GAP-0862 | P3 | Full sort on every addRule (RPZ + split_dns) | rpz, split_dns | `rpz.zig:141,244`; `split_dns.zig:298` (RF-4) | O(n log n) per insert | [#328](https://gitlab.com/devnw/zig/dns/-/issues/328) | Defer/batch sort | **Open** |
+| GAP-0863 | P3 | Naive substring search in split_dns matchContains | split_dns.zig | `src/resolver/split_dns.zig:89-101` (RF-5) | Suboptimal match cost | [#329](https://gitlab.com/devnw/zig/dns/-/issues/329) | Use std.mem.indexOf / better matcher | **Open** |
+| GAP-0864 | P3 | getPool() unconditional mutex | parallel.zig | `src/parallel.zig:94-101` (RF-2) | Lock on hot accessor | [#330](https://gitlab.com/devnw/zig/dns/-/issues/330) | Atomic fast path OR Won't-Do decision (Won't-Do candidate) | **Open** |
+| GAP-0885 | P3 | selectWeighted batchy WRR distribution | failover.zig | `src/resolver/failover.zig:289-311` (QR-AUD-11) | Uneven short-term load | [#338](https://gitlab.com/devnw/zig/dns/-/issues/338) | Smooth WRR interleaving | **Open** |
+| GAP-0887 | P3 | applyCase0x20 heap alloc per delegation hop; stack variant possible | name, recursive | `src/name.zig:711-717`; `src/recursive.zig:570` (PF-AUD-02) | 1 alloc per hop | [#339](https://gitlab.com/devnw/zig/dns/-/issues/339) | Stack-buffer variant for in-bound names | **Open** |
+| GAP-0889 | P3 | ConnectionPool fully linear-scan; acquire scans up to 3x | connection_pool.zig | `src/transports/connection_pool.zig:299-356,483-491` (PF-AUD-04) | O(n) (up to 3x) per acquire | [#340](https://gitlab.com/devnw/zig/dns/-/issues/340) | Single-pass / index-assisted acquire | **Open** |
+| GAP-0890 | Info | dnssec signed_data ArrayList no capacity reservation | dnssec.zig | `src/resolver/dnssec.zig:378,397-423` (PF-AUD-05) | ~7 reallocs/verify (crypto dominates) | [#341](https://gitlab.com/devnw/zig/dns/-/issues/341) | ensureTotalCapacity before building signed_data | **Open** |
+
+---
+
 ## Findings by Area
 
 ### Application (`area::app`)
@@ -376,6 +398,7 @@ Remaining items by priority (after deep audit; Won't-Do items classified):
 **Validation Plan:**
 
 ```bash
+```text
 # After creating bench suite:
 zig build bench
 # Verify output includes timing for cache, socket, resolution, name ops
@@ -408,6 +431,7 @@ zig build bench
 **Validation Plan:**
 
 ```bash
+```text
 # Requires PF-18 (benchmarks) to measure properly.
 # Approximate test: time resolution of 1000 unique domains to fill cache,
 # then time 1000 cache-hit lookups.
@@ -440,6 +464,7 @@ zig build test -- --filter "cache"
 **Validation Plan:**
 
 ```bash
+```text
 # Benchmark resolution latency with 2 servers (one unreachable, one responsive):
 zig build test -- --filter "queryWithRetry"
 # Before: latency ~= timeout_ms + actual_response_time
@@ -517,6 +542,7 @@ zig build test -- --filter "queryWithRetry"
 **Validation Plan:**
 
 ```bash
+```text
 # Measure cache put latency at capacity:
 # Fill cache to max_entries, then benchmark put() throughput
 zig build test -- --filter "cache"
@@ -604,6 +630,7 @@ zig build test -- --filter "cache"
 **Validation Plan:**
 
 ```bash
+```text
 zig build test -- --filter "DnsCache"
 # Verify all tests pass
 # Before: allocPrint per put (format + alloc in one step)
@@ -662,6 +689,7 @@ zig build test -- --filter "DnsCache"
 **Validation Plan:**
 
 ```bash
+```text
 zig build test -- --filter "sendQuery"
 # Before: stack recv + heap alloc + memcpy
 # After: heap recv + realloc (one fewer memcpy)
@@ -810,6 +838,7 @@ zig build test -- --filter "sendQuery"
 **Validation Plan:**
 
 ```bash
+```text
 zig build test --summary all
 # Verify allocation count drops by 1 per delegation step (5-10 per resolution)
 ```
@@ -861,6 +890,7 @@ zig build test --summary all
 **Validation Plan:**
 
 ```bash
+```text
 zig build test --summary all
 # Before: 1 heap alloc per buildQuery
 # After: 0 heap allocs for queries under 512 bytes

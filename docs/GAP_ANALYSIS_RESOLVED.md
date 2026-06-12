@@ -24,6 +24,8 @@ The following items were previously Resolved or Won't Do but have regressed due 
 
 ---
 
+## Resolved Gaps
+
 ### GAP-0001: UDP source address validation missing [RESOLVED]
 
 - **Issue:** [#42](https://gitlab.com/devnw/zig/dns/-/issues/42) (open -- needs closure)
@@ -1554,3 +1556,34 @@ The following 15 items were resolved in the final gap closure round. 499/499 tes
 ---
 
 Note: GAP-0001 through GAP-0010 issues remain OPEN in the GitLab tracker despite fixes being present in code. See GAP-0015 (#78) for the broader state-conflict tracking.
+
+---
+
+## Audit Cycle 2026-06-12 -- Verified Fixed (Phase 2)
+
+The following pre-existing tracker issues were verified fixed during Phase 2 of the
+2026-06-12 audit and closed in the GitLab tracker.
+
+### #186 (MEM-01): initWithServer allocates ServerAddress slice never freed [RESOLVED]
+
+- **Issue:** [#186](https://gitlab.com/devnw/zig/dns/-/issues/186) (closed)
+- **Category:** Quality / Memory
+- **Resolution:** `stub.zig` `initWithServer` now frees the allocated `ServerAddress` slice on init failure.
+- **Evidence:** Verified by audit Phase 2 (2026-06-12). Issue was already closed in the tracker; verification noted for audit trail.
+- **Resolved date:** 2026-06-12
+
+### #226 (B-01/B-02): otel lazyDependency forwards only target/optimize [RESOLVED]
+
+- **Issue:** [#226](https://gitlab.com/devnw/zig/dns/-/issues/226) (closed 2026-06-12)
+- **Category:** Build / Observability
+- **Resolution:** The otel `lazyDependency` now forwards all build flags (not just target/optimize).
+- **Evidence:** Verified by audit Phase 2 (2026-06-12) -- builds successfully with `-Dwith_otel=true`.
+- **Resolved date:** 2026-06-12
+
+### #210: -Dwith_otel=true build broken -- observability.enabled path [RESOLVED]
+
+- **Issue:** [#210](https://gitlab.com/devnw/zig/dns/-/issues/210) (closed 2026-06-12)
+- **Category:** Build / Observability
+- **Resolution:** `-Dwith_otel=true` now builds; the `observability.enabled` path was fixed.
+- **Evidence:** Verified by audit Phase 2 (2026-06-12).
+- **Resolved date:** 2026-06-12
