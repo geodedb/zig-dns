@@ -27,7 +27,7 @@ A comprehensive pure Zig implementation of the Domain Name System (DNS) protocol
 - **Zone Transfers**: Full AXFR/IXFR support (RFC 5936, RFC 1995)
 - **Cache Protection**: Bailiwick checking, TTL capping (RFC 5452)
 - **Cache Prefetching**: Proactive cache refresh before TTL expiration
-- **DNSSEC Validation**: Ed25519, ECDSA P-256/P-384 signature verification (RFC 4033/4034/4035)
+- **DNSSEC Primitives**: Ed25519, ECDSA P-256/P-384 signature verification, DS, NSEC/NSEC3 (RFC 4033/4034/4035). ⚠️ Not yet wired into resolution — the validator is never invoked and queries do not set the EDNS DO bit, so resolved answers are **not** DNSSEC-validated ([#207](https://gitlab.com/devnw/zig/dns/-/issues/207)).
 - **EDNS Client Subnet**: Geo-aware DNS queries (RFC 7871)
 - **DNS Cookies**: Lightweight transaction security (RFC 7873)
 - **Cross-Platform**: Linux, macOS, Windows, and more
@@ -42,7 +42,7 @@ See [ROADMAP.md](docs/ROADMAP.md) and [GitLab Issues](https://gitlab.com/devnw/z
 |-------|-------------|--------|
 | Phase 1 | Core Recursion | **Complete** |
 | Phase 2 | Production Ready (DoT, caching, zone transfers) | **Complete** |
-| Phase 3 | DNSSEC Validation | **Partial** (Ed25519/ECDSA complete, RSA pending) |
+| Phase 3 | DNSSEC Validation | **Primitives only** — signature/DS/NSEC code exists but is **not wired into resolution**; answers are not validated ([#207](https://gitlab.com/devnw/zig/dns/-/issues/207)). RSA (8/10/5) pending. |
 | Phase 4 | Modern Features (DoH, DoQ, ECS, Cookies, Prefetch) | **Complete** |
 
 ## Requirements

@@ -28,6 +28,7 @@ zig build -Doptimize=ReleaseFast -Dsafety=true
 | `ReleaseSmall` | Minimal | Good | Embedded, size-constrained |
 
 **Recommendation:** Use `ReleaseSafe` for production DNS servers. The overhead is minimal (~5-10%) compared to `ReleaseFast`, but you retain:
+
 - Bounds checking on array accesses
 - Integer overflow detection
 - Null pointer checks
@@ -65,12 +66,14 @@ zig build -Dtarget=x86_64-linux -Dpic=true
 ### Memory Safety Features
 
 Zig provides these safety features by default in safe builds:
+
 - **Bounds Checking**: Array and slice access validated
 - **Use-After-Free Detection**: Pointer validity checking
 - **Integer Overflow**: Arithmetic overflow detection
 - **Null Safety**: Optional type enforcement
 
 To explicitly disable (NOT RECOMMENDED for production):
+
 ```bash
 zig build -Doptimize=ReleaseFast  # Disables most runtime checks
 ```
@@ -81,7 +84,7 @@ zig build -Doptimize=ReleaseFast  # Disables most runtime checks
 
 When implementing a TLS backend for DoT transport:
 
-```
+```text
 Minimum Requirements:
 - TLS 1.2 or higher (TLS 1.3 preferred)
 - Certificate validation enabled
@@ -95,7 +98,7 @@ See `src/transports/dot.zig` for detailed backend requirements.
 
 When implementing an HTTP backend for DoH transport:
 
-```
+```text
 Minimum Requirements:
 - HTTP/2 support
 - TLS 1.2+ (same requirements as DoT)
@@ -123,6 +126,7 @@ const key = tsig.TsigKey.init(
 ```
 
 **Algorithm Recommendations:**
+
 | Algorithm | Recommendation |
 |-----------|---------------|
 | `hmac_sha256` | **Recommended** |
@@ -150,6 +154,7 @@ const config = zt.ZoneTransferConfig{
 ### Transaction ID Generation
 
 The library requires cryptographically secure entropy for:
+
 - DNS transaction ID generation (cache poisoning protection)
 - 0x20 case randomization (spoofing protection)
 
@@ -163,6 +168,15 @@ var resolver = try RecursiveResolver.init(allocator, config);
 **Do NOT** fall back to timestamp-based seeding in production - this enables transaction ID prediction attacks (see RFC 5452).
 
 ## DNSSEC Considerations
+
+> ⚠️ **DNSSEC validation is NOT active.** The validator in
+> `src/resolver/dnssec.zig` is a standalone module with no callers in the
+> resolution pipeline, and outgoing queries do not set the EDNS DO bit. Setting
+> `RecursiveConfig.dnssec = true` currently has no effect on resolution and
+> provides **no** integrity guarantee — answers are not authenticated. Do not
+> rely on this library for DNSSEC-validated answers. Tracked by issues #207
+> (wiring) and #255. The algorithm table below describes the verification
+> primitives that exist, not an end-to-end validated path.
 
 ### Algorithm Support
 
@@ -179,11 +193,13 @@ var resolver = try RecursiveResolver.init(allocator, config);
 ## Input Validation
 
 The library enforces these limits per RFC 1035:
+
 - Maximum name length: 255 bytes
 - Maximum label length: 63 bytes
 - Maximum compression pointer hops: 16
 
 These limits prevent:
+
 - Buffer overflows from oversized names
 - Infinite loops from malicious compression pointers
 - Resource exhaustion attacks
@@ -203,7 +219,8 @@ These limits prevent:
 ## Reporting Security Issues
 
 For security vulnerabilities, please report via:
+
 - GitLab Security Advisory (preferred)
-- Email: security@devnw.com
+- Email: <security@devnw.com>
 
 Do NOT report security issues in public issue trackers until coordinated disclosure is complete.

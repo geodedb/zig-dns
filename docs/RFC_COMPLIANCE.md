@@ -17,6 +17,7 @@ This document tracks zigdns implementation status for relevant DNS RFCs.
 ## Core DNS Protocol
 
 ### RFC 1034 - Domain Names: Concepts and Facilities
+
 **Status: Complete**
 
 | Section | Feature | Status | Notes |
@@ -29,6 +30,7 @@ This document tracks zigdns implementation status for relevant DNS RFCs.
 | 5.3 | Recursive resolver | Complete | QNAME minimization, 0x20 |
 
 ### RFC 1035 - Domain Names: Implementation and Specification
+
 **Status: Complete**
 
 | Section | Feature | Status | Notes |
@@ -51,11 +53,16 @@ This document tracks zigdns implementation status for relevant DNS RFCs.
 ## DNSSEC
 
 ### RFC 4033 - DNS Security Introduction and Requirements
-**Status: Partial (Ed25519/ECDSA complete; RSA algorithms 5/8/10 not implemented)**
 
-Foundation for DNSSEC validation implemented in `src/resolver/dnssec.zig`.
+**Status: Primitives only — NOT wired into resolution (Ed25519/ECDSA implemented; RSA 5/8/10 not implemented)**
+
+DNSSEC validation primitives exist in `src/resolver/dnssec.zig`, but the
+validator is not invoked by the resolution pipeline and outgoing queries do not
+set the EDNS DO bit, so resolved answers are not validated. No integrity
+guarantee is provided. Tracked by issues #207 / #255.
 
 ### RFC 4034 - Resource Records for DNSSEC
+
 **Status: Partial (Ed25519/ECDSA complete; RSA algorithms 5/8/10 not implemented)**
 
 | Record Type | Status | Issue | Notes |
@@ -68,6 +75,7 @@ Foundation for DNSSEC validation implemented in `src/resolver/dnssec.zig`.
 | NSEC3PARAM | Complete | [#15](https://gitlab.com/devnw/zig/dns/-/issues/15) | parseNSEC3PARAM() |
 
 ### RFC 4035 - Protocol Modifications for DNSSEC
+
 **Status: Complete (Ed25519/ECDSA, RSA requires external lib)**
 
 | Feature | Status | Issue | Notes |
@@ -79,6 +87,7 @@ Foundation for DNSSEC validation implemented in `src/resolver/dnssec.zig`.
 Note: RSA signature verification (algorithms 5, 8, 10) requires external crypto library.
 
 ### RFC 5155 - NSEC3 Hashed Authenticated Denial
+
 **Status: Complete**
 
 | Feature | Status | Notes |
@@ -95,6 +104,7 @@ Note: RSA signature verification (algorithms 5, 8, 10) requires external crypto 
 ## EDNS and Extensions
 
 ### RFC 6891 - Extension Mechanisms for DNS (EDNS0)
+
 **Status: Complete**
 
 | Feature | Status | Notes |
@@ -102,10 +112,11 @@ Note: RSA signature verification (algorithms 5, 8, 10) requires external crypto 
 | OPT pseudo-RR | Complete | Parsing and encoding |
 | UDP payload size | Complete | Default 4096, negotiable |
 | Extended RCODE | Complete | 12-bit RCODE support |
-| DNSSEC OK (DO) | Complete | Flag handling |
+| DNSSEC OK (DO) | Not wired | OPT-record machinery exists, but resolver queries do not set the DO bit (#207) |
 | Option iteration | Complete | Generic option parsing |
 
 ### RFC 7871 - Client Subnet in DNS Queries
+
 **Status: Complete**
 
 | Feature | Status | Notes |
@@ -118,6 +129,7 @@ Note: RSA signature verification (algorithms 5, 8, 10) requires external crypto 
 See [#20](https://gitlab.com/devnw/zig/dns/-/issues/20).
 
 ### RFC 7873 - DNS Cookies
+
 **Status: Complete**
 
 | Feature | Status | Notes |
@@ -135,6 +147,7 @@ See [#21](https://gitlab.com/devnw/zig/dns/-/issues/21).
 ## Negative Caching
 
 ### RFC 2308 - Negative Caching of DNS Queries
+
 **Status: Complete**
 
 | Feature | Status | Notes |
@@ -150,6 +163,7 @@ See [#21](https://gitlab.com/devnw/zig/dns/-/issues/21).
 ## Transport Protocols
 
 ### RFC 7858 - DNS over TLS (DoT)
+
 **Status: Complete (TLS backend required)**
 
 | Feature | Status | Notes |
@@ -164,6 +178,7 @@ See [#21](https://gitlab.com/devnw/zig/dns/-/issues/21).
 Note: Requires external TLS library implementation of TlsBackend interface.
 
 ### RFC 8484 - DNS over HTTPS (DoH)
+
 **Status: Complete (HTTP backend required)**
 
 | Feature | Status | Notes |
@@ -180,6 +195,7 @@ Note: Requires external HTTP/2 library implementation of HttpBackend interface.
 See [#18](https://gitlab.com/devnw/zig/dns/-/issues/18).
 
 ### RFC 9250 - DNS over QUIC (DoQ)
+
 **Status: Complete (QUIC backend required)**
 
 | Feature | Status | Notes |
@@ -200,6 +216,7 @@ See [#19](https://gitlab.com/devnw/zig/dns/-/issues/19).
 ## Resolver Behavior
 
 ### RFC 7816 - QNAME Minimization
+
 **Status: Complete**
 
 | Feature | Status | Notes |
@@ -209,6 +226,7 @@ See [#19](https://gitlab.com/devnw/zig/dns/-/issues/19).
 | Integration | Complete | Enabled by default in resolver |
 
 ### RFC 5936 - DNS Zone Transfer (AXFR)
+
 **Status: Complete**
 
 | Feature | Status | Notes |
@@ -220,6 +238,7 @@ See [#19](https://gitlab.com/devnw/zig/dns/-/issues/19).
 | Serial verification | Complete | Configurable option |
 
 ### RFC 1995 - Incremental Zone Transfer (IXFR)
+
 **Status: Complete**
 
 | Feature | Status | Notes |
@@ -230,6 +249,7 @@ See [#19](https://gitlab.com/devnw/zig/dns/-/issues/19).
 | Changeset parsing | Complete | IxfrChangeset structure |
 
 ### RFC 5452 - Measures for Making DNS More Resilient
+
 **Status: Complete**
 
 | Feature | Status | Notes |

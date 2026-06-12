@@ -106,7 +106,13 @@ pub const RecursiveConfig = struct {
     /// Cache size (number of entries)
     cache_size: usize = 10000,
 
-    /// Whether to use DNSSEC validation
+    /// DNSSEC validation toggle.
+    ///
+    /// NOT YET WIRED: the standalone DNSSEC validator (src/resolver/dnssec.zig)
+    /// is not invoked by the resolution pipeline, and outgoing queries do not
+    /// yet set the EDNS DO bit. This flag therefore has no effect on resolution
+    /// today and provides NO integrity guarantee. Tracked by #207 / #255
+    /// (GAP-0070). Do not rely on it for authenticated answers.
     dnssec: bool = false,
 
     /// Enable QNAME minimization (RFC 7816)
@@ -589,9 +595,13 @@ pub const RecursiveResolver = struct {
             state.last_query_name = try self.allocator.dupe(u8, query_name);
         }
 
-        // Build query on the stack (max 271 bytes, no heap allocation)
+        // Build query on the stack (max 271 bytes, no heap allocation).
+        // These are iterative queries to authoritative servers, so RD must be
+        // false. (Previously self.config.dnssec was passed here as the `rd`
+        // argument, which both corrupted the RD bit and never requested
+        // DNSSEC; #255/API-1. DNSSEC request/validation is tracked by #207.)
         var query_buf: [message_mod.max_query_size]u8 = undefined;
-        const query = try message_mod.buildQueryBuf(&query_buf, id, query_name, qtype, .in, self.config.dnssec);
+        const query = try message_mod.buildQueryBuf(&query_buf, id, query_name, qtype, .in, false);
 
         // Try servers in order
         const max_tries = @min(servers.len, self.config.max_server_attempts);
