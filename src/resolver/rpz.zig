@@ -104,6 +104,10 @@ pub const ResponsePolicyZone = struct {
     default_action: RpzAction = .passthrough,
     /// Statistics
     stats: Stats,
+    /// Whether `rules` is currently sorted by priority. Set false on append so
+    /// the sort is deferred to the next check() instead of running after every
+    /// addRule (PF-NEW-34, #223).
+    rules_sorted: bool = true,
 
     const Self = @This();
 
@@ -136,13 +140,19 @@ pub const ResponsePolicyZone = struct {
     /// Add a rule to the zone
     pub fn addRule(self: *Self, rule: RpzRule) !void {
         try self.rules.append(self.allocator, rule);
+        // Defer the priority sort to the next check() so loading N rules is
+        // O(N) appends + one sort, not O(N^2 log N) (PF-NEW-34, #223).
+        self.rules_sorted = false;
+    }
 
-        // Sort by priority
+    fn ensureRulesSorted(self: *Self) void {
+        if (self.rules_sorted) return;
         std.mem.sort(RpzRule, self.rules.items, {}, struct {
             fn lessThan(_: void, a: RpzRule, b: RpzRule) bool {
                 return a.priority < b.priority;
             }
         }.lessThan);
+        self.rules_sorted = true;
     }
 
     /// Remove a rule by name
@@ -161,6 +171,7 @@ pub const ResponsePolicyZone = struct {
         if (!self.enabled) return null;
 
         self.stats.queries_checked += 1;
+        self.ensureRulesSorted();
 
         for (self.rules.items) |*rule| {
             if (!rule.enabled) continue;
@@ -205,6 +216,9 @@ pub const RpzManager = struct {
     zones: std.ArrayList(ResponsePolicyZone),
     /// Global statistics
     stats: GlobalStats,
+    /// Whether `zones` is sorted by priority; sort is deferred to check()
+    /// instead of after every addZone (PF-NEW-34, #223).
+    zones_sorted: bool = true,
 
     const Self = @This();
 
@@ -239,18 +253,24 @@ pub const RpzManager = struct {
     /// Add a policy zone
     pub fn addZone(self: *Self, zone: ResponsePolicyZone) !void {
         try self.zones.append(self.allocator, zone);
+        // Defer the priority sort to the next check() (PF-NEW-34, #223).
+        self.zones_sorted = false;
+    }
 
-        // Sort by priority
+    fn ensureZonesSorted(self: *Self) void {
+        if (self.zones_sorted) return;
         std.mem.sort(ResponsePolicyZone, self.zones.items, {}, struct {
             fn lessThan(_: void, a: ResponsePolicyZone, b: ResponsePolicyZone) bool {
                 return a.priority < b.priority;
             }
         }.lessThan);
+        self.zones_sorted = true;
     }
 
     /// Check a query against all zones
     pub fn check(self: *Self, qname: []const u8, trigger: TriggerType) ?MatchResult {
         self.stats.total_queries += 1;
+        self.ensureZonesSorted();
 
         for (self.zones.items) |*zone| {
             if (zone.check(qname, trigger)) |result| {
