@@ -90,7 +90,7 @@ zig-format:
   before_script:
     - *install-zig
   script:
-    - zig fmt --check src/ cmd/ build.zig
+    - zig fmt --check src/ cmd/ build.zig tests/ examples/ benchmarks/
 
 # Build job
 build:
