@@ -152,9 +152,13 @@ pub const FailoverConfig = struct {
     circuit_timeout_ms: u32 = 30_000,
     /// Health check interval (ms)
     health_check_interval_ms: u32 = 10_000,
-    /// Maximum retries before giving up
+    /// Maximum retries before giving up.
+    /// RESERVED — not yet wired: retry counting is handled by the caller
+    /// (e.g. RecursiveConfig.max_server_attempts), not the failover manager,
+    /// so setting this currently has no effect (REL-6).
     max_retries: u8 = 3,
-    /// Retry delay (ms)
+    /// Retry delay (ms).
+    /// RESERVED — not yet wired (see max_retries) (REL-6).
     retry_delay_ms: u32 = 100,
     /// Minimum healthy servers required
     min_healthy_servers: u8 = 1,
@@ -164,6 +168,10 @@ pub const FailoverConfig = struct {
 
 /// Failover and load balancing manager
 pub const FailoverManager = struct {
+    /// Upper bound on servers considered per selection. Failover pools are
+    /// tiny; this sizes the stack buffer in selectServer (PF-NEW-33).
+    const max_tracked_servers: usize = 256;
+
     allocator: std.mem.Allocator,
     config: FailoverConfig,
     /// Server states
@@ -251,31 +259,40 @@ pub const FailoverManager = struct {
 
         const now = timeMilli();
 
-        // Get available servers
-        var available: std.ArrayList(*ServerState) = .empty;
-        defer available.deinit(self.allocator);
-
+        // Collect available servers into a stack buffer — failover pools are
+        // tiny, so this avoids a heap allocation + free on every selection,
+        // all of it under the mutex (PF-NEW-33, #218).
+        var stack: [max_tracked_servers]*ServerState = undefined;
+        var count: usize = 0;
         for (self.servers.items) |*server| {
             if (server.isAvailable(now)) {
-                available.append(self.allocator, server) catch continue;
+                if (count >= stack.len) break;
+                stack[count] = server;
+                count += 1;
             }
         }
+        const available = stack[0..count];
 
-        if (available.items.len == 0) {
-            // No healthy servers, try to find any server
+        if (available.len == 0) {
+            // No healthy servers. As a last resort hand back *a* server so the
+            // caller has something to try, but rotate (REL-6) instead of always
+            // returning servers[0] so successive all-unhealthy calls don't hammer
+            // the same primary.
             if (self.servers.items.len > 0) {
-                return &self.servers.items[0];
+                const idx = self.rr_index % self.servers.items.len;
+                self.rr_index +%= 1;
+                return &self.servers.items[idx];
             }
             return null;
         }
 
         return switch (self.config.strategy) {
-            .round_robin => self.selectRoundRobin(available.items),
-            .weighted => self.selectWeighted(available.items),
-            .least_connections => self.selectLeastConnections(available.items),
-            .latency_based => self.selectLatencyBased(available.items),
-            .random => self.selectRandom(available.items),
-            .primary_secondary => self.selectPrimarySecondary(available.items),
+            .round_robin => self.selectRoundRobin(available),
+            .weighted => self.selectWeighted(available),
+            .least_connections => self.selectLeastConnections(available),
+            .latency_based => self.selectLatencyBased(available),
+            .random => self.selectRandom(available),
+            .primary_secondary => self.selectPrimarySecondary(available),
         };
     }
 
@@ -545,6 +562,31 @@ test "FailoverManager round robin selection" {
 
     // Should cycle through servers
     try std.testing.expect(s1 != s2 or manager.servers.items.len == 1);
+}
+
+test "FailoverManager rotates last-resort server when all unhealthy (REL-6)" {
+    const allocator = std.testing.allocator;
+    var manager = try FailoverManager.init(allocator, .{ .strategy = .round_robin });
+    defer manager.deinit();
+
+    try manager.addServer(.{ .address = "server1" });
+    try manager.addServer(.{ .address = "server2" });
+
+    // Force both servers into an open-circuit (unavailable) state.
+    const future = timeMilli() + 1_000_000;
+    for (manager.servers.items) |*server| {
+        server.status = .unhealthy;
+        server.circuit_open_until = future;
+    }
+
+    const s1 = manager.selectServer();
+    const s2 = manager.selectServer();
+
+    try std.testing.expect(s1 != null);
+    try std.testing.expect(s2 != null);
+    // Before the fix this always returned servers[0]; now the last-resort
+    // fallback rotates so it does not hammer a single known-down server.
+    try std.testing.expect(s1 != s2);
 }
 
 test "FailoverManager statistics" {
