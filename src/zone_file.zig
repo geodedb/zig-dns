@@ -7,11 +7,13 @@
 //! - Resource record definitions
 //! - $ORIGIN directive for default domain
 //! - $TTL directive for default TTL
-//! - $INCLUDE directive for including other files
 //! - Comments (starting with ;)
 //! - Parentheses for multi-line records
 //! - @ shorthand for current origin
 //! - Relative names (appended to origin)
+//!
+//! NOT supported: the $INCLUDE directive is rejected explicitly with
+//! error.IncludeNotSupported instead of being silently ignored (GAP-0852).
 
 const std = @import("std");
 
@@ -27,6 +29,7 @@ pub const ParseError = error{
     UnterminatedParenthesis,
     UnexpectedEndOfFile,
     InvalidDirective,
+    IncludeNotSupported,
     FileNotFound,
     OutOfMemory,
 };
@@ -407,8 +410,10 @@ pub const ZoneParser = struct {
             const ttl_str = tokens.next() orelse return error.InvalidDirective;
             self.default_ttl = try parseTTL(ttl_str);
         } else if (std.ascii.eqlIgnoreCase(directive, "$INCLUDE")) {
-            // $INCLUDE is not supported in this basic implementation
-            return;
+            // $INCLUDE is not supported in this basic implementation.
+            // Reject it explicitly instead of silently producing an
+            // incomplete zone (GAP-0852, #244).
+            return error.IncludeNotSupported;
         } else {
             return error.InvalidDirective;
         }
@@ -895,6 +900,22 @@ test "ZoneParser does not leak explicit owner names (SEC-SR-8)" {
     var zone = try parser.parse(content);
     defer zone.deinit();
     try std.testing.expectEqual(@as(usize, 3), zone.records.items.len);
+}
+
+test "GAP-0852: $INCLUDE directive is rejected explicitly" {
+    const allocator = std.testing.allocator;
+    var parser = ZoneParser.init(allocator);
+    defer parser.deinit();
+
+    // $INCLUDE is unsupported; silently ignoring it would yield an
+    // incomplete zone. The parser must reject it loudly instead.
+    const content =
+        \\$ORIGIN example.com.
+        \\$INCLUDE other.zone
+        \\www IN A 192.168.1.1
+    ;
+
+    try std.testing.expectError(error.IncludeNotSupported, parser.parse(content));
 }
 
 test "ZoneParser.parseFile type-checks (Zig 0.16 file-I/O guard)" {
