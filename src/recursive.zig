@@ -213,7 +213,8 @@ pub const RecursiveResolver = struct {
 
     /// Create a new recursive resolver
     ///
-    /// SECURITY: Uses OS CSPRNG (std.crypto.random) for transaction ID generation
+    /// SECURITY: Uses the OS CSPRNG (util/random.zig, std.Io.randomSecure) for
+    /// transaction ID generation
     /// and 0x20 case randomization. This prevents DNS cache poisoning attacks that
     /// exploit predictable transaction IDs (RFC 5452, SEC-C24, CWE-330).
     pub fn init(allocator: std.mem.Allocator, config: RecursiveConfig) InitError!Self {
