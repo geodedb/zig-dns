@@ -382,6 +382,28 @@ pub const Validator = struct {
             return false;
         }
 
+        // GAP-0841 (RFC 4035 Section 5.3.2): validate the RRSIG labels field
+        // against the owner-name label count and reconstruct the canonical
+        // wildcard owner when the RRset was synthesized from a wildcard.
+        if (rrset.len == 0) return error.InvalidData;
+        const owner_labels = countRrsigOwnerLabels(rrset[0].name.labels) catch
+            return error.InvalidData;
+
+        // labels > owner label count: invalid signature (RFC 4035 S5.3.1).
+        if (rrsig.labels > owner_labels) {
+            return error.InvalidSignature;
+        }
+
+        // labels < owner label count: the RRset was expanded from a wildcard.
+        // Reconstruct the canonical owner "*." ++ rightmost rrsig.labels
+        // labels and sign-verify over that name (RFC 4035 S5.3.2).
+        var wildcard_buf: [max_wire_name_len]u8 = undefined;
+        const owner_override: ?[]const u8 = if (rrsig.labels < owner_labels)
+            buildWildcardOwner(&wildcard_buf, rrset[0].name.labels, rrsig.labels) catch
+                return error.InvalidData
+        else
+            null;
+
         // Build the signed data: RRSIG RDATA (without signature) + canonical RRset
         var signed_data: std.ArrayList(u8) = .empty;
         defer signed_data.deinit(self.allocator);
@@ -401,8 +423,8 @@ pub const Validator = struct {
         // Add RRSIG RDATA fields (RFC 4034 Section 3.1.8.1)
         try self.appendRrsigRdata(&signed_data, rrsig);
 
-        // Add canonical RRset
-        try self.appendCanonicalRrset(&signed_data, rrset, rrsig);
+        // Add canonical RRset (with wildcard owner reconstruction when needed)
+        try self.appendCanonicalRrset(&signed_data, rrset, rrsig, owner_override);
 
         // Verify signature based on algorithm
         return self.verifySignature(
@@ -451,12 +473,17 @@ pub const Validator = struct {
         try appendCanonicalName(allocator, data, rrsig.signer);
     }
 
-    /// Append canonical RRset for signing (RFC 4034 Section 6.3)
+    /// Append canonical RRset for signing (RFC 4034 Section 6.3).
+    ///
+    /// When `owner_override` is non-null (wildcard expansion, RFC 4035
+    /// Section 5.3.2), it is used as the canonical owner name for every RR
+    /// in place of the RR's actual owner name.
     fn appendCanonicalRrset(
         self: *Validator,
         data: *std.ArrayList(u8),
         rrset: []const ResourceRecord,
         rrsig: RrsigData,
+        owner_override: ?[]const u8,
     ) !void {
         const allocator = self.allocator;
 
@@ -477,8 +504,13 @@ pub const Validator = struct {
         for (sorted_indices) |idx| {
             const rr = rrset[idx];
 
-            // Owner name (canonical, lowercase)
-            try appendCanonicalName(allocator, data, rr.name);
+            // Owner name (canonical, lowercase); use the reconstructed
+            // wildcard owner when the RRset was wildcard-expanded.
+            if (owner_override) |ow| {
+                try appendCanonicalName(allocator, data, .{ .labels = ow, .wire_length = ow.len });
+            } else {
+                try appendCanonicalName(allocator, data, rr.name);
+            }
 
             // Type (2 bytes)
             try data.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(rr.rtype))));
@@ -777,6 +809,51 @@ fn dottedToWire(dotted: []const u8) error{InvalidData}!WireName {
 /// case-insensitively. Returns true if they represent the same DNS name.
 fn wireNamesEqlInsensitive(a: []const u8, b: []const u8) bool {
     return compareDnsNames(a, b) == .eq;
+}
+
+/// Count owner-name labels for RRSIG labels-field validation
+/// (RFC 4034 Section 3.1.3). The root label does not count, and a leftmost
+/// "*" (wildcard) label does not count either.
+fn countRrsigOwnerLabels(owner_wire: []const u8) error{InvalidData}!u8 {
+    const labels = try extractWireLabels(owner_wire, 128);
+    var count = labels.count;
+    if (count > 0 and labels.items[0].len == 1 and labels.items[0][0] == '*') {
+        count -= 1;
+    }
+    if (count > std.math.maxInt(u8)) return error.InvalidData;
+    return @intCast(count);
+}
+
+/// Build the canonical wildcard owner name for RRSIG verification
+/// (RFC 4035 Section 5.3.2): "*." followed by the rightmost `label_count`
+/// labels of `owner_wire`, in wire format. Returns a slice of `buf`.
+fn buildWildcardOwner(
+    buf: *[max_wire_name_len]u8,
+    owner_wire: []const u8,
+    label_count: u8,
+) error{InvalidData}![]const u8 {
+    const labels = try extractWireLabels(owner_wire, 128);
+    if (label_count > labels.count) return error.InvalidData;
+
+    var pos: usize = 0;
+    buf[pos] = 1;
+    buf[pos + 1] = '*';
+    pos += 2;
+
+    var i: usize = labels.count - label_count;
+    while (i < labels.count) : (i += 1) {
+        const label = labels.items[i];
+        // 1 length byte + label bytes + trailing root byte must fit
+        if (pos + 1 + label.len + 1 > max_wire_name_len) return error.InvalidData;
+        buf[pos] = @intCast(label.len);
+        pos += 1;
+        @memcpy(buf[pos..][0..label.len], label);
+        pos += label.len;
+    }
+
+    buf[pos] = 0;
+    pos += 1;
+    return buf[0..pos];
 }
 
 /// Check whether `name` (wire format) is equal to or a subdomain of `zone`
@@ -2046,6 +2123,221 @@ test "isNameInZone: name is not in zone" {
     const name = "\x04evil\x03com\x00";
     const zone = "\x07example\x03com\x00";
     try std.testing.expect(!isNameInZone(name, zone));
+}
+
+// =========================================================================
+// GAP-0841: RRSIG labels field validation (RFC 4035 Section 5.3.2)
+// =========================================================================
+
+const TestEd25519 = std.crypto.sign.Ed25519;
+
+/// Test helper: build the RFC 4034 signed-data buffer (RRSIG RDATA without
+/// the signature, followed by the canonical RRset using `owner_wire` as the
+/// owner name) so tests can produce real Ed25519 signatures.
+fn buildTestSignedData(
+    allocator: std.mem.Allocator,
+    rrsig: RrsigData,
+    owner_wire: []const u8,
+    rrset: []const ResourceRecord,
+) !std.ArrayList(u8) {
+    var data: std.ArrayList(u8) = .empty;
+    errdefer data.deinit(allocator);
+
+    // RRSIG RDATA fields (RFC 4034 Section 3.1.8.1)
+    try data.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(rrsig.type_covered))));
+    try data.append(allocator, @intFromEnum(rrsig.algorithm));
+    try data.append(allocator, rrsig.labels);
+    try data.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, rrsig.original_ttl)));
+    try data.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, rrsig.sig_expiration)));
+    try data.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, rrsig.sig_inception)));
+    try data.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, rrsig.key_tag)));
+    try appendCanonicalName(allocator, &data, rrsig.signer);
+
+    // Canonical RRset with the given owner name
+    for (rrset) |rr| {
+        try appendCanonicalName(allocator, &data, .{ .labels = owner_wire, .wire_length = owner_wire.len });
+        try data.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(rr.rtype))));
+        try data.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intFromEnum(rr.class))));
+        try data.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, rrsig.original_ttl)));
+        try data.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, rr.rdlength)));
+        try data.appendSlice(allocator, rr.rdata);
+    }
+
+    return data;
+}
+
+/// Test helper: construct an A ResourceRecord with the given wire owner name.
+fn makeTestARecord(owner: []const u8, rdata: []u8) ResourceRecord {
+    return ResourceRecord{
+        .name = .{ .labels = owner, .wire_length = owner.len },
+        .rtype = .a,
+        .class = .in,
+        .ttl = 3600,
+        .rdlength = @intCast(rdata.len),
+        .rdata = rdata,
+        .wire_length = owner.len + 10 + rdata.len,
+    };
+}
+
+test "GAP-0841: verifyRrsig rejects RRSIG with labels greater than owner label count" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setCurrentTime(1_700_000_000);
+
+    const kp = try TestEd25519.KeyPair.generateDeterministic([_]u8{0x42} ** 32);
+    const pub_bytes = kp.public_key.toBytes();
+
+    const owner: []const u8 = "\x01a\x07example\x03com\x00"; // a.example.com -- 3 labels
+    var a_rdata = [_]u8{ 192, 0, 2, 1 };
+    const rr = makeTestARecord(owner, &a_rdata);
+
+    const signer: []const u8 = "\x07example\x03com\x00";
+    const rrsig = RrsigData{
+        .type_covered = .a,
+        .algorithm = .ed25519,
+        .labels = 4, // MORE labels than the owner name has -- must be rejected
+        .original_ttl = 3600,
+        .sig_expiration = 1_800_000_000,
+        .sig_inception = 1_600_000_000,
+        .key_tag = 1234,
+        .signer = .{ .labels = signer, .wire_length = signer.len },
+        .signature = &[_]u8{0} ** 64,
+        .sig_offset = 0,
+    };
+
+    const dnskey = DnskeyData{
+        .flags = .{ .raw = 0x0100 },
+        .protocol = 3,
+        .algorithm = .ed25519,
+        .public_key = &pub_bytes,
+    };
+
+    const rrset = [_]ResourceRecord{rr};
+    try std.testing.expectError(
+        error.InvalidSignature,
+        validator.verifyRrsig(rrsig, &rrset, dnskey),
+    );
+}
+
+test "GAP-0841: wildcard RRSIG validates one level below wildcard, rejected at wildcard depth" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setCurrentTime(1_700_000_000);
+
+    const kp = try TestEd25519.KeyPair.generateDeterministic([_]u8{0x37} ** 32);
+    const pub_bytes = kp.public_key.toBytes();
+
+    const signer: []const u8 = "\x07example\x03com\x00";
+    var a_rdata = [_]u8{ 192, 0, 2, 7 };
+
+    // Sign the canonical wildcard form: *.example.com with labels = 2
+    // (the leftmost "*" label does not count per RFC 4034 Section 3.1.3).
+    const wildcard_owner: []const u8 = "\x01*\x07example\x03com\x00";
+    var rrsig = RrsigData{
+        .type_covered = .a,
+        .algorithm = .ed25519,
+        .labels = 2,
+        .original_ttl = 3600,
+        .sig_expiration = 1_800_000_000,
+        .sig_inception = 1_600_000_000,
+        .key_tag = 4242,
+        .signer = .{ .labels = signer, .wire_length = signer.len },
+        .signature = &[_]u8{0} ** 64,
+        .sig_offset = 0,
+    };
+
+    // The RRset the signature covers (owner irrelevant for signing; the
+    // canonical wildcard owner is used in the signed data).
+    const below_owner: []const u8 = "\x01a\x07example\x03com\x00"; // a.example.com -- 3 labels
+    const below_rr = makeTestARecord(below_owner, &a_rdata);
+
+    var signed = try buildTestSignedData(
+        std.testing.allocator,
+        rrsig,
+        wildcard_owner,
+        &[_]ResourceRecord{below_rr},
+    );
+    defer signed.deinit(std.testing.allocator);
+
+    const sig = try kp.sign(signed.items, null);
+    const sig_bytes = sig.toBytes();
+    rrsig.signature = &sig_bytes;
+
+    const dnskey = DnskeyData{
+        .flags = .{ .raw = 0x0100 },
+        .protocol = 3,
+        .algorithm = .ed25519,
+        .public_key = &pub_bytes,
+    };
+
+    // (1) One level below the wildcard: a.example.com (3 labels) with
+    // rrsig.labels = 2 -- the validator must reconstruct *.example.com
+    // and the signature must verify.
+    const below_rrset = [_]ResourceRecord{below_rr};
+    try std.testing.expect(try validator.verifyRrsig(rrsig, &below_rrset, dnskey));
+
+    // (2) The SAME rrsig applied at a different depth: example.com has
+    // exactly 2 labels, so no wildcard expansion happens; the signed data
+    // covers "example.com" instead of "*.example.com" and the signature
+    // must NOT verify.
+    const exact_owner: []const u8 = "\x07example\x03com\x00";
+    const exact_rr = makeTestARecord(exact_owner, &a_rdata);
+    const exact_rrset = [_]ResourceRecord{exact_rr};
+    try std.testing.expect(!(try validator.verifyRrsig(rrsig, &exact_rrset, dnskey)));
+}
+
+test "GAP-0841: RRSIG over the wildcard owner itself verifies (leftmost * does not count)" {
+    var validator = Validator.init(std.testing.allocator);
+    defer validator.deinit();
+    validator.setCurrentTime(1_700_000_000);
+
+    const kp = try TestEd25519.KeyPair.generateDeterministic([_]u8{0x55} ** 32);
+    const pub_bytes = kp.public_key.toBytes();
+
+    const signer: []const u8 = "\x07example\x03com\x00";
+    var a_rdata = [_]u8{ 192, 0, 2, 9 };
+
+    // RRset owner IS the wildcard name *.example.com; labels = 2 because
+    // the leftmost "*" label does not count (RFC 4034 Section 3.1.3).
+    const wildcard_owner: []const u8 = "\x01*\x07example\x03com\x00";
+    const rr = makeTestARecord(wildcard_owner, &a_rdata);
+
+    var rrsig = RrsigData{
+        .type_covered = .a,
+        .algorithm = .ed25519,
+        .labels = 2,
+        .original_ttl = 3600,
+        .sig_expiration = 1_800_000_000,
+        .sig_inception = 1_600_000_000,
+        .key_tag = 7777,
+        .signer = .{ .labels = signer, .wire_length = signer.len },
+        .signature = &[_]u8{0} ** 64,
+        .sig_offset = 0,
+    };
+
+    var signed = try buildTestSignedData(
+        std.testing.allocator,
+        rrsig,
+        wildcard_owner,
+        &[_]ResourceRecord{rr},
+    );
+    defer signed.deinit(std.testing.allocator);
+
+    const sig = try kp.sign(signed.items, null);
+    const sig_bytes = sig.toBytes();
+    rrsig.signature = &sig_bytes;
+
+    const dnskey = DnskeyData{
+        .flags = .{ .raw = 0x0100 },
+        .protocol = 3,
+        .algorithm = .ed25519,
+        .public_key = &pub_bytes,
+    };
+
+    // labels (2) == owner label count (2, "*" excluded): no expansion,
+    // the owner is used as-is and the signature verifies.
+    const rrset = [_]ResourceRecord{rr};
+    try std.testing.expect(try validator.verifyRrsig(rrsig, &rrset, dnskey));
 }
 
 test "isNameInZone: root zone matches everything" {
