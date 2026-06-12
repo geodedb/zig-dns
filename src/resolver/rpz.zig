@@ -323,7 +323,21 @@ pub const RpzManager = struct {
 /// Wildcard matching validates domain boundaries to prevent bypasses:
 /// - Pattern `*.example.com` matches `www.example.com` but NOT `fakeexample.com`
 /// - Pattern `*example.com` (no dot) also validates boundary at the match point
-fn matchPattern(domain: []const u8, pattern: []const u8) bool {
+fn matchPattern(domain_raw: []const u8, pattern_raw: []const u8) bool {
+    // Normalize FQDN trailing dots (GAP-0855): query names often arrive in
+    // FQDN form ("malware.com.") while rules are stored relative
+    // ("malware.com"), and vice versa. Strip ONE trailing dot from each side
+    // so the forms compare equal. A bare root "." is left intact -- stripping
+    // it would yield an empty pattern that matches everything.
+    const domain = if (domain_raw.len > 1 and domain_raw[domain_raw.len - 1] == '.')
+        domain_raw[0 .. domain_raw.len - 1]
+    else
+        domain_raw;
+    const pattern = if (pattern_raw.len > 1 and pattern_raw[pattern_raw.len - 1] == '.')
+        pattern_raw[0 .. pattern_raw.len - 1]
+    else
+        pattern_raw;
+
     // Handle wildcard prefix
     if (pattern.len > 0 and pattern[0] == '*') {
         const suffix = pattern[1..];
@@ -407,6 +421,22 @@ test "matchPattern wildcard" {
     try std.testing.expect(matchPattern("anything.example.com", "*.example.com"));
     try std.testing.expect(!matchPattern("example.com", "*.example.com"));
     try std.testing.expect(matchPattern("anything", "*"));
+}
+
+test "matchPattern normalizes trailing-dot FQDNs (GAP-0855)" {
+    // Rule stored without trailing dot must match FQDN-form query names.
+    try std.testing.expect(matchPattern("malware.com.", "malware.com"));
+    try std.testing.expect(matchPattern("x.example.com.", "*.example.com"));
+    // Rule stored WITH a trailing dot must match relative-form query names.
+    try std.testing.expect(matchPattern("malware.com", "malware.com."));
+    // Both sides FQDN-form.
+    try std.testing.expect(matchPattern("malware.com.", "malware.com."));
+    // Boundary bypass still rejected in FQDN form.
+    try std.testing.expect(!matchPattern("fakeexample.com.", "*.example.com"));
+    try std.testing.expect(!matchPattern("www.malware.com.", "malware.com"));
+    // A bare root "." pattern is not stripped to empty: it only matches root.
+    try std.testing.expect(matchPattern(".", "."));
+    try std.testing.expect(!matchPattern("malware.com", "."));
 }
 
 test "matchPattern wildcard boundary prevents bypass (GAP-0048)" {
