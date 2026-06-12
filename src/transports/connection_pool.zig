@@ -564,15 +564,25 @@ pub const PipelinedBatch = struct {
     /// Execute all queries in the batch
     /// Uses poll-based timeout to avoid blocking indefinitely on reads/writes.
     pub fn execute(self: *Self, fd: std.posix.fd_t, timeout_ms: u32) !void {
-        // Send all queries with TCP length prefix using writeAll loop
+        // Send all queries with TCP length prefixes coalesced into a single
+        // buffer and one write (GAP-0888): N pipelined frames previously
+        // cost 2N segments/syscalls under TCP_NODELAY.
+        var send_total: usize = 0;
         for (self.queries.items) |q| {
             // SECURITY (SEC-SCAN-04): Bounds check before @intCast to u16 (CWE-681)
             if (q.wire_data.len > std.math.maxInt(u16)) return error.MessageTooLong;
-            var length_prefix: [2]u8 = undefined;
-            std.mem.writeInt(u16, &length_prefix, @intCast(q.wire_data.len), .big);
-
-            try io.writeAllWithTimeout(fd, &length_prefix, timeout_ms);
-            try io.writeAllWithTimeout(fd, q.wire_data, timeout_ms);
+            send_total += 2 + q.wire_data.len;
+        }
+        if (send_total > 0) {
+            const send_buf = try self.allocator.alloc(u8, send_total);
+            defer self.allocator.free(send_buf);
+            var pos: usize = 0;
+            for (self.queries.items) |q| {
+                std.mem.writeInt(u16, send_buf[pos..][0..2], @intCast(q.wire_data.len), .big);
+                @memcpy(send_buf[pos + 2 ..][0..q.wire_data.len], q.wire_data);
+                pos += 2 + q.wire_data.len;
+            }
+            try io.writeAllWithTimeout(fd, send_buf, timeout_ms);
         }
 
         // Receive all responses in order
@@ -672,14 +682,10 @@ pub const PooledTcpTransport = struct {
             self.pool.markConnected(&handle);
         }
 
-        // Send query with TCP length prefix
-        // SECURITY (SEC-SCAN-04): Bounds check before @intCast to u16 (CWE-681)
-        if (wire_req.len > std.math.maxInt(u16)) return error.MessageTooLong;
-        var length_prefix: [2]u8 = undefined;
-        std.mem.writeInt(u16, &length_prefix, @intCast(wire_req.len), .big);
-
-        try io.writeAllWithTimeout(handle.fd, &length_prefix, timeout_ms);
-        try io.writeAllWithTimeout(handle.fd, wire_req, timeout_ms);
+        // Send query with TCP length prefix + payload as one write
+        // (GAP-0888). Bounds check (SEC-SCAN-04, CWE-681) lives in
+        // writeFramedWithTimeout.
+        try io.writeFramedWithTimeout(self.allocator, handle.fd, wire_req, timeout_ms);
 
         // Read response length
         var resp_len_buf: [2]u8 = undefined;
@@ -718,16 +724,25 @@ pub const PooledTcpTransport = struct {
         var total_sent: u64 = 0;
         var total_recv: u64 = 0;
 
-        // Send all queries
+        // Send all queries with length prefixes coalesced into a single
+        // buffer and one write (GAP-0888).
+        var send_total: usize = 0;
         for (queries) |q| {
             // SECURITY (SEC-SCAN-04): Bounds check before @intCast to u16 (CWE-681)
             if (q.len > std.math.maxInt(u16)) return error.MessageTooLong;
-            var length_prefix: [2]u8 = undefined;
-            std.mem.writeInt(u16, &length_prefix, @intCast(q.len), .big);
-
-            try io.writeAllWithTimeout(handle.fd, &length_prefix, timeout_ms);
-            try io.writeAllWithTimeout(handle.fd, q, timeout_ms);
-            total_sent += q.len + 2;
+            send_total += 2 + q.len;
+        }
+        if (send_total > 0) {
+            const send_buf = try self.allocator.alloc(u8, send_total);
+            defer self.allocator.free(send_buf);
+            var pos: usize = 0;
+            for (queries) |q| {
+                std.mem.writeInt(u16, send_buf[pos..][0..2], @intCast(q.len), .big);
+                @memcpy(send_buf[pos + 2 ..][0..q.len], q);
+                pos += 2 + q.len;
+            }
+            try io.writeAllWithTimeout(handle.fd, send_buf, timeout_ms);
+            total_sent = send_total;
         }
 
         // Allocate response array

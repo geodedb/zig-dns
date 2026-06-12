@@ -48,14 +48,9 @@ pub const TcpTransport = struct {
         // Connect
         try io.connectWithTimeout(sock, self.address, timeout_ms);
 
-        // TCP DNS: 2-byte length prefix
-        // SECURITY (SEC-SCAN-04): Bounds check before @intCast to u16 (CWE-681)
-        if (wire_req.len > std.math.maxInt(u16)) return error.MessageTooLong;
-        var length_prefix: [2]u8 = undefined;
-        std.mem.writeInt(u16, &length_prefix, @intCast(wire_req.len), .big);
-
-        try io.writeAllWithTimeout(sock, &length_prefix, timeout_ms);
-        try io.writeAllWithTimeout(sock, wire_req, timeout_ms);
+        // TCP DNS: 2-byte length prefix + payload as one write (GAP-0888).
+        // Bounds check (SEC-SCAN-04, CWE-681) lives in writeFramedWithTimeout.
+        try io.writeFramedWithTimeout(self.allocator, sock, wire_req, timeout_ms);
 
         // Read response length
         var resp_len_buf: [2]u8 = undefined;

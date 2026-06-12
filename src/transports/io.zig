@@ -71,6 +71,42 @@ pub fn writeAllWithTimeout(sock: std.posix.socket_t, data: []const u8, timeout_m
     }
 }
 
+/// Maximum payload kept on the stack by writeFramedWithTimeout's fast
+/// path. Covers every DNS query this library builds (max_query_size is
+/// 282 bytes) plus standard 512-byte UDP-sized messages.
+pub const framed_stack_payload_max: usize = 514;
+
+/// Write a TCP-framed DNS message -- 2-byte big-endian length prefix
+/// followed by the payload -- as a SINGLE write (GAP-0888).
+///
+/// Sending the prefix and payload as two writeAllWithTimeout calls under
+/// TCP_NODELAY produces two TCP segments and two syscalls per query;
+/// coalescing them into one buffer halves both. Payloads up to
+/// framed_stack_payload_max use a stack buffer; larger payloads fall back
+/// to a transient heap allocation.
+pub fn writeFramedWithTimeout(
+    allocator: std.mem.Allocator,
+    sock: std.posix.socket_t,
+    payload: []const u8,
+    timeout_ms: u32,
+) !void {
+    // SECURITY (SEC-SCAN-04): Bounds check before @intCast to u16 (CWE-681)
+    if (payload.len > std.math.maxInt(u16)) return error.MessageTooLong;
+
+    if (payload.len <= framed_stack_payload_max) {
+        var buf: [2 + framed_stack_payload_max]u8 = undefined;
+        std.mem.writeInt(u16, buf[0..2], @intCast(payload.len), .big);
+        @memcpy(buf[2..][0..payload.len], payload);
+        return writeAllWithTimeout(sock, buf[0 .. 2 + payload.len], timeout_ms);
+    }
+
+    const buf = try allocator.alloc(u8, 2 + payload.len);
+    defer allocator.free(buf);
+    std.mem.writeInt(u16, buf[0..2], @intCast(payload.len), .big);
+    @memcpy(buf[2..], payload);
+    return writeAllWithTimeout(sock, buf, timeout_ms);
+}
+
 /// Read from a non-blocking socket with a deadline-based timeout.
 ///
 /// Polls for readability and returns the number of bytes read (may be less
@@ -170,6 +206,70 @@ test "readExactWithTimeout returns ConnectionClosed on early EOF" {
     var buf: [20]u8 = undefined;
     const result = readExactWithTimeout(pair[1], &buf, 5000);
     try std.testing.expectError(error.ConnectionClosed, result);
+}
+
+test "GAP-0888: writeFramedWithTimeout sends prefix and payload as one frame" {
+    const pair = try testSocketPair();
+    defer _ = std.os.linux.close(pair[0]);
+    defer _ = std.os.linux.close(pair[1]);
+
+    const payload = "framed-dns-query";
+    try writeFramedWithTimeout(std.testing.allocator, pair[0], payload, 5000);
+
+    var buf: [64]u8 = undefined;
+    var total: usize = 0;
+    while (total < 2 + payload.len) {
+        const n = try readWithTimeout(pair[1], buf[total..], 5000);
+        if (n == 0) break;
+        total += n;
+    }
+    try std.testing.expectEqual(@as(usize, 2 + payload.len), total);
+    try std.testing.expectEqual(
+        @as(u16, payload.len),
+        std.mem.readInt(u16, buf[0..2], .big),
+    );
+    try std.testing.expectEqualStrings(payload, buf[2..total]);
+}
+
+test "GAP-0888: writeFramedWithTimeout heap fallback for large payloads" {
+    const pair = try testSocketPair();
+    defer _ = std.os.linux.close(pair[0]);
+    defer _ = std.os.linux.close(pair[1]);
+
+    // Larger than the stack fast-path threshold.
+    var payload: [2048]u8 = undefined;
+    for (&payload, 0..) |*b, i| b.* = @truncate(i);
+
+    try writeFramedWithTimeout(std.testing.allocator, pair[0], &payload, 5000);
+
+    var buf: [4096]u8 = undefined;
+    var total: usize = 0;
+    while (total < 2 + payload.len) {
+        const n = try readWithTimeout(pair[1], buf[total..], 5000);
+        if (n == 0) break;
+        total += n;
+    }
+    try std.testing.expectEqual(@as(usize, 2 + payload.len), total);
+    try std.testing.expectEqual(
+        @as(u16, payload.len),
+        std.mem.readInt(u16, buf[0..2], .big),
+    );
+    try std.testing.expectEqualSlices(u8, &payload, buf[2..total]);
+}
+
+test "GAP-0888: writeFramedWithTimeout rejects oversized payloads" {
+    const pair = try testSocketPair();
+    defer _ = std.os.linux.close(pair[0]);
+    defer _ = std.os.linux.close(pair[1]);
+
+    const oversized = try std.testing.allocator.alloc(u8, 65536);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, 0);
+
+    try std.testing.expectError(
+        error.MessageTooLong,
+        writeFramedWithTimeout(std.testing.allocator, pair[0], oversized, 5000),
+    );
 }
 
 test "writeAllWithTimeout handles partial writes" {
