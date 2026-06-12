@@ -416,6 +416,13 @@ pub const Sig0Context = struct {
             return VerifyResult{ .valid = false, .error_reason = "Signer name mismatch" };
         }
 
+        // SECURITY (GAP-0873): a window where inception > expiration is
+        // structurally invalid -- reject it explicitly before evaluating
+        // the time window rather than conflating it with expiry.
+        if (sig0.sig_inception > sig0.sig_expiration) {
+            return VerifyResult{ .valid = false, .error_reason = "Invalid validity window" };
+        }
+
         // Verify time validity
         const now: u32 = @intCast(@as(u64, @bitCast(timeSec())));
         if (now < sig0.sig_inception or now > sig0.sig_expiration) {
@@ -821,6 +828,58 @@ test "GAP-0870: dnsNamesEqual canonical comparison" {
     try std.testing.expect(!dnsNamesEqual("example.com", "example.org"));
     try std.testing.expect(!dnsNamesEqual("sub.example.com", "example.com"));
     try std.testing.expect(!dnsNamesEqual("", "example.com"));
+}
+
+test "GAP-0873: verify rejects inverted validity window explicitly" {
+    const allocator = std.testing.allocator;
+
+    // Trusted key; the crafted record below references it by algorithm,
+    // key tag and signer name so verification reaches the window checks.
+    var key_pair = try Sig0KeyPair.generate(allocator, "test.example.com", .ed25519);
+    defer key_pair.deinit(allocator);
+    const public_key = try Sig0PublicKey.fromDnskey("test.example.com", .ed25519, key_pair.public_key);
+
+    // Hand-craft a message whose SIG(0) record has inception > expiration.
+    // The signature bytes are garbage, but the window sanity check must
+    // fire before signature verification is even attempted.
+    var msg: std.ArrayList(u8) = .empty;
+    defer msg.deinit(allocator);
+
+    // Header: ID, flags, counts (ARCOUNT = 1)
+    try msg.appendSlice(allocator, &[_]u8{ 0x12, 0x34, 0x01, 0x00 });
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0))); // QDCOUNT
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0))); // ANCOUNT
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0))); // NSCOUNT
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 1))); // ARCOUNT
+
+    // SIG RR: root owner, type SIG (24), class ANY (255), TTL 0
+    try msg.append(allocator, 0);
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 24)));
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 255)));
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, 0)));
+
+    // RDATA: fixed fields + signer name + dummy signature
+    const signer_wire = [_]u8{ 4, 't', 'e', 's', 't', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 };
+    const dummy_sig = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF };
+    const rdlength: u16 = 18 + signer_wire.len + dummy_sig.len;
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, rdlength)));
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0))); // type covered
+    try msg.append(allocator, 15); // algorithm: ed25519
+    try msg.append(allocator, 0); // labels
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, 0))); // original TTL
+    // INVERTED window: expiration (1000) < inception (2000)
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, 1000))); // expiration
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, 2000))); // inception
+    try msg.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, public_key.key_tag)));
+    try msg.appendSlice(allocator, &signer_wire);
+    try msg.appendSlice(allocator, &dummy_sig);
+
+    var ctx = Sig0Context.init(allocator);
+    const result = try ctx.verify(msg.items, &public_key);
+    try std.testing.expect(!result.valid);
+    // The inverted window must be reported as such, not conflated with an
+    // ordinary expired/not-yet-valid signature.
+    try std.testing.expectEqualStrings("Invalid validity window", result.error_reason.?);
 }
 
 test "SEC-C20: Sig0Record.parse does not panic on unknown algorithm" {
