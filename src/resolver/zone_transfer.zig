@@ -616,14 +616,23 @@ pub const ZoneTransferClient = struct {
             offset += 4; // QTYPE + QCLASS
         }
 
-        // Parse answer records
+        // Parse answer records.
+        // Bound is `<=` so a final record whose 10-byte fixed header ends
+        // exactly at response.len is still considered (SEC-SR-10); the inner
+        // checks below reject anything genuinely truncated.
         var count: u16 = 0;
-        while (count < ancount and offset + 10 < response.len) {
-            // Parse name
+        while (count < ancount and offset + 10 <= response.len) {
+            // Parse name (allocates name_result.name)
             const name_result = try self.parseName(response, offset);
             offset = name_result.new_offset;
 
-            if (offset + 10 > response.len) break;
+            // On truncation we break out and keep what we parsed so far; the
+            // current record's name is not appended, so free it explicitly —
+            // errdefer does not fire on `break` (SEC-SR-9).
+            if (offset + 10 > response.len) {
+                self.allocator.free(name_result.name);
+                break;
+            }
 
             const rtype = std.mem.readInt(u16, response[offset..][0..2], .big);
             const rclass = std.mem.readInt(u16, response[offset + 2 ..][0..2], .big);
@@ -631,7 +640,14 @@ pub const ZoneTransferClient = struct {
             const rdlength = std.mem.readInt(u16, response[offset + 8 ..][0..2], .big);
             offset += 10;
 
-            if (offset + rdlength > response.len) break;
+            if (offset + rdlength > response.len) {
+                self.allocator.free(name_result.name);
+                break;
+            }
+
+            // Cover the fallible dupe/append below; on error the name is freed
+            // here and the already-appended records by the function-level errdefer.
+            errdefer self.allocator.free(name_result.name);
 
             const rdata = try self.allocator.dupe(u8, response[offset .. offset + rdlength]);
             errdefer self.allocator.free(rdata);
@@ -1010,6 +1026,25 @@ test "SEC-NEW-03b: parseTransferResponse accepts qdcount 0" {
 
     const records = try client.parseTransferResponse(&response);
     defer allocator.free(records);
+    try std.testing.expectEqual(@as(usize, 0), records.len);
+}
+
+test "SEC-SR-9: parseTransferResponse does not leak record name on truncation" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .require_auth = false });
+
+    // Header: qdcount=0, ancount=1
+    const header = [_]u8{ 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0 };
+    // A parseable 12-byte name (label "aaaaaaaaaa" + root)...
+    const name = [_]u8{ 10, 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 0 };
+    // ...followed by fewer than 10 bytes, so the RR header is truncated and
+    // the answer loop breaks after parseName has already allocated the name.
+    const response = header ++ name ++ [_]u8{ 0xAA, 0xBB };
+
+    const records = try client.parseTransferResponse(&response);
+    defer allocator.free(records);
+    // No records survive truncation; the testing allocator fails the test if
+    // the in-progress name allocation leaked.
     try std.testing.expectEqual(@as(usize, 0), records.len);
 }
 

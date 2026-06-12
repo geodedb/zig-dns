@@ -97,6 +97,18 @@ pub const Client = struct {
             .server_addresses = &[_]stub_mod.ServerAddress{},
         };
 
+        // deinit() never runs on a failed init, so any allocation made below
+        // (cache, prefetcher, server_addresses, sub-resolvers) must be undone
+        // here on error. Mirrors deinit(); guarded so it only frees what was
+        // actually initialized (M-01, #258).
+        errdefer {
+            if (self.stub) |*stub| stub.deinit();
+            if (self.recursive) |*recursive| recursive.deinit();
+            if (self.prefetcher) |*pf| pf.deinit();
+            if (self.cache) |*cache| cache.deinit();
+            if (self.servers_owned) allocator.free(self.server_addresses);
+        }
+
         // Initialize cache if enabled (PF-24-dual-cache: O(1) LRU HashMap)
         if (config.cache_size > 0) {
             self.cache = DnsCache.init(allocator, .{
@@ -721,6 +733,23 @@ test "ClientConfig defaults" {
     try std.testing.expectEqual(Mode.stub, config.mode);
     try std.testing.expectEqual(@as(u32, 5000), config.timeout_ms);
     try std.testing.expectEqual(@as(usize, 1000), config.cache_size);
+}
+
+test "Client.initWithConfig leaks nothing on allocation failure (M-01)" {
+    // Drive an allocation failure at every allocation point. Before the fix,
+    // a failure after server_addresses/cache/prefetcher were allocated leaked
+    // them because deinit() never runs on a failed init.
+    const Helper = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var client = try Client.initWithConfig(allocator, .{
+                .mode = .stub,
+                .servers = &[_][]const u8{"8.8.8.8"},
+                .cache_size = 16,
+            });
+            client.deinit();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Helper.run, .{});
 }
 
 test "buildCnameChain from response" {

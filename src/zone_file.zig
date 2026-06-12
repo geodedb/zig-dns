@@ -408,6 +408,10 @@ pub const ZoneParser = struct {
 
         // First token could be: name, TTL, or class
         var name: []const u8 = "";
+        // makeAbsolute allocates; track ownership so the buffer is freed once
+        // it has been duped into the record and last_name (SEC-SR-8). The
+        // other branches assign borrowed slices (last_name/origin).
+        var name_owned = false;
         var ttl: ?u32 = null;
         var class: Class = .in;
         var rtype: ?RecordType = null;
@@ -427,7 +431,9 @@ pub const ZoneParser = struct {
         } else {
             // First token is the name
             name = try self.makeAbsolute(first);
+            name_owned = true;
         }
+        defer if (name_owned) self.allocator.free(name);
 
         // Parse remaining tokens: [TTL] [class] type rdata...
         while (tokens.next()) |token| {
@@ -837,6 +843,26 @@ test "ZoneParser simple A record" {
     const rr = zone.records.items[0];
     try std.testing.expectEqual(RecordType.a, rr.rtype);
     try std.testing.expectEqual([4]u8{ 192, 168, 1, 1 }, rr.rdata.a);
+}
+
+test "ZoneParser does not leak explicit owner names (SEC-SR-8)" {
+    const allocator = std.testing.allocator;
+    var parser = ZoneParser.init(allocator);
+    defer parser.deinit();
+
+    // Each explicit owner name goes through makeAbsolute, which allocates;
+    // the result must be freed once it has been duped into the record and
+    // last_name. The testing allocator fails the test on any leak.
+    const content =
+        \\$ORIGIN example.com.
+        \\www IN A 192.168.1.1
+        \\mail IN A 192.168.1.2
+        \\ftp IN A 192.168.1.3
+    ;
+
+    var zone = try parser.parse(content);
+    defer zone.deinit();
+    try std.testing.expectEqual(@as(usize, 3), zone.records.items.len);
 }
 
 test "ZoneParser SOA record" {
