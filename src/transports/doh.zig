@@ -102,6 +102,11 @@ pub const HttpBackend = struct {
     pub const TlsConfig = struct {
         ca_pem: []const u8,
         bootstrap_ip: ?channel.SocketAddress,
+        /// Hostname the server certificate must be verified against (SNI +
+        /// cert validation). Derived from the request URL authority. Without
+        /// this an IP-bootstrapped backend has no name to verify against and
+        /// could accept any cert for the dialed IP — MITM (A4, #293).
+        server_name: []const u8 = "",
     };
 
     pub const Response = struct {
@@ -203,6 +208,7 @@ pub const DoHTransport = struct {
         const tls = HttpBackend.TlsConfig{
             .ca_pem = self.options.ca_pem,
             .bootstrap_ip = self.options.bootstrap_ip,
+            .server_name = uriHost(self.options.uri),
         };
 
         // Build URL and headers
@@ -279,6 +285,35 @@ pub const DoHTransport = struct {
         .close = closeImpl,
     };
 };
+
+/// Extract the host (authority without userinfo or port) from an http(s) URL,
+/// for use as the TLS verification name (A4, #293). Returns the whole input if
+/// it has no scheme separator.
+pub fn uriHost(uri: []const u8) []const u8 {
+    const after_scheme = if (std.mem.indexOf(u8, uri, "://")) |i| uri[i + 3 ..] else uri;
+    // Authority ends at the first '/', '?' or '#'.
+    var authority = after_scheme;
+    for (after_scheme, 0..) |c, i| {
+        if (c == '/' or c == '?' or c == '#') {
+            authority = after_scheme[0..i];
+            break;
+        }
+    }
+    // Strip userinfo ("user@host").
+    if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| {
+        authority = authority[at + 1 ..];
+    }
+    // Strip the port. For a bracketed IPv6 literal the host is "[...]" and the
+    // port (if any) follows the ']'; otherwise the port follows the last ':'.
+    if (authority.len > 0 and authority[0] == '[') {
+        if (std.mem.indexOfScalar(u8, authority, ']')) |close| {
+            authority = authority[0 .. close + 1];
+        }
+    } else if (std.mem.lastIndexOfScalar(u8, authority, ':')) |colon| {
+        authority = authority[0..colon];
+    }
+    return authority;
+}
 
 /// Base64url encoding for DoH GET requests (RFC 4648, no padding)
 pub fn base64urlEncode(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
@@ -670,6 +705,14 @@ test "base64url round trip" {
 
 test "DoHTransport media type" {
     try std.testing.expectEqualStrings("application/dns-message", DoHTransport.media_type);
+}
+
+test "A4 (#293): uriHost extracts the TLS verification name" {
+    try std.testing.expectEqualStrings("dns.example.com", uriHost("https://dns.example.com/dns-query"));
+    try std.testing.expectEqualStrings("dns.example.com", uriHost("https://dns.example.com:8443/dns-query"));
+    try std.testing.expectEqualStrings("dns.example.com", uriHost("https://user@dns.example.com/dns-query"));
+    try std.testing.expectEqualStrings("dns.example.com", uriHost("https://dns.example.com"));
+    try std.testing.expectEqualStrings("[2001:db8::1]", uriHost("https://[2001:db8::1]:443/dns-query"));
 }
 
 test "MockHttpBackend basic" {
