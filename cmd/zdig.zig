@@ -17,10 +17,13 @@ const net_compat = @import("net_compat");
 const Allocator = std.mem.Allocator;
 
 /// 0.16.0 compat: CSPRNG via Io (std.crypto.random was removed).
-fn csprngInt(comptime T: type) T {
+/// Returns error.EntropyUnavailable instead of crashing the process when
+/// the OS entropy source fails (review follow-up: no catch-unreachable on
+/// a fallible security-critical operation).
+fn csprngInt(comptime T: type) error{EntropyUnavailable}!T {
     var buf: [@sizeOf(T)]u8 = undefined;
     const io_inst = std.Io.Threaded.global_single_threaded.io();
-    std.Io.randomSecure(io_inst, &buf) catch unreachable;
+    std.Io.randomSecure(io_inst, &buf) catch return error.EntropyUnavailable;
     return std.mem.readInt(T, &buf, .little);
 }
 
@@ -330,8 +333,18 @@ fn runQuery(ctx: *cli.Context) !void {
     // Validate the server address early so invalid input gets a clear
     // message instead of an opaque parse failure (GAP-0882).
     _ = parseServerAddress(options.server, options.port) catch |err| {
-        try ctx.err("Error: invalid server address '{s}'\n", .{options.server});
-        try ctx.err("Expected an IPv4 (8.8.8.8) or IPv6 (::1, [::1]:5353) address.\n", .{});
+        switch (err) {
+            // Review follow-up: a bad port deserves a port-specific
+            // message, not the generic invalid-address one.
+            error.InvalidServerPort => {
+                try ctx.err("Error: invalid port in server address '{s}'\n", .{options.server});
+                try ctx.err("Port must be a decimal number between 0 and 65535, e.g. [::1]:5353.\n", .{});
+            },
+            error.InvalidServerAddress => {
+                try ctx.err("Error: invalid server address '{s}'\n", .{options.server});
+                try ctx.err("Expected an IPv4 (8.8.8.8) or IPv6 (::1, [::1]:5353) address.\n", .{});
+            },
+        }
         return err;
     };
 
@@ -516,8 +529,12 @@ fn performQuery(allocator: Allocator, options: *const QueryOptions) !void {
     // Record start time
     const query_start = milliTimestamp();
 
-    // Generate cryptographically secure query ID (SEC-GAP-035: CWE-330)
-    const id: u16 = csprngInt(u16);
+    // Generate cryptographically secure query ID (SEC-GAP-035: CWE-330).
+    // Fail loudly (non-zero exit) rather than query with a predictable ID.
+    const id: u16 = csprngInt(u16) catch |err| {
+        std.debug.print("Error: OS secure entropy unavailable; cannot generate a safe DNS query ID\n", .{});
+        return err;
+    };
 
     // Build the query message using the library's buildQuery function
     const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, options.qclass, !options.no_recurse, options.dnssec);
@@ -1057,8 +1074,12 @@ fn performTrace(allocator: Allocator, options: *const QueryOptions) !void {
     const max_depth = 20;
 
     while (depth < max_depth) {
-        // Generate cryptographically secure query ID (SEC-GAP-035: CWE-330)
-        const id: u16 = csprngInt(u16);
+        // Generate cryptographically secure query ID (SEC-GAP-035: CWE-330).
+        // Fail loudly (non-zero exit) rather than query with a predictable ID.
+        const id: u16 = csprngInt(u16) catch |err| {
+            std.debug.print("Error: OS secure entropy unavailable; cannot generate a safe DNS query ID\n", .{});
+            return err;
+        };
 
         // Build non-recursive query
         const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, options.qclass, false, options.dnssec);

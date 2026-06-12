@@ -48,8 +48,15 @@ pub const DomainPattern = struct {
     case_sensitive: bool = false,
 
     pub fn matches(self: *const DomainPattern, domain: []const u8) bool {
-        const pattern = if (self.case_sensitive) self.pattern else self.pattern;
-        const target = if (self.case_sensitive) domain else domain;
+        // Normalize FQDN trailing dots (mirrors rpz.zig matchPattern,
+        // GAP-0855): query names often arrive in FQDN form
+        // ("server.corp.local.") while rules are stored relative
+        // ("corp.local"), and vice versa. Strip ONE trailing dot from each
+        // side so the forms compare equal. A bare root "." is left intact
+        // -- stripping it would yield an empty pattern that matches
+        // everything.
+        const pattern = stripOneTrailingDot(self.pattern);
+        const target = stripOneTrailingDot(domain);
 
         return switch (self.match_type) {
             .exact => self.matchExact(target, pattern),
@@ -112,6 +119,15 @@ pub const DomainPattern = struct {
         return wildcardMatch(domain, pattern);
     }
 };
+
+/// Strip ONE trailing dot for FQDN/relative form equivalence (GAP-0855
+/// convention; see rpz.zig matchPattern). A bare root "." is preserved.
+fn stripOneTrailingDot(name: []const u8) []const u8 {
+    if (name.len > 1 and name[name.len - 1] == '.') {
+        return name[0 .. name.len - 1];
+    }
+    return name;
+}
 
 /// Wildcard matching (supports * and ?)
 fn wildcardMatch(str: []const u8, pattern: []const u8) bool {
@@ -403,6 +419,47 @@ test "DomainPattern suffix match" {
     try std.testing.expect(pattern.matches("api.example.com"));
     try std.testing.expect(!pattern.matches("example.com"));
     try std.testing.expect(!pattern.matches("example.org"));
+}
+
+test "DomainPattern FQDN trailing-dot normalization - exact" {
+    // Mirrors rpz.zig matchPattern (GAP-0855): queries often arrive in
+    // FQDN form while rules are stored relative, and vice versa.
+    const pattern = DomainPattern{
+        .pattern = "server.corp.local",
+        .match_type = .exact,
+    };
+    try std.testing.expect(pattern.matches("server.corp.local."));
+
+    const fqdn_pattern = DomainPattern{
+        .pattern = "server.corp.local.",
+        .match_type = .exact,
+    };
+    try std.testing.expect(fqdn_pattern.matches("server.corp.local"));
+
+    // Bare root "." is left intact and must not match everything.
+    const root_pattern = DomainPattern{
+        .pattern = ".",
+        .match_type = .exact,
+    };
+    try std.testing.expect(!root_pattern.matches("example.com"));
+}
+
+test "DomainPattern FQDN trailing-dot normalization - suffix" {
+    const pattern = DomainPattern{
+        .pattern = "corp.local",
+        .match_type = .suffix,
+    };
+    try std.testing.expect(pattern.matches("server.corp.local."));
+    try std.testing.expect(pattern.matches("corp.local."));
+    // Label boundary enforcement (GAP-0847) still holds in FQDN form.
+    try std.testing.expect(!pattern.matches("evilcorp.local."));
+
+    const fqdn_rule = DomainPattern{
+        .pattern = ".corp.local.",
+        .match_type = .suffix,
+    };
+    try std.testing.expect(fqdn_rule.matches("server.corp.local"));
+    try std.testing.expect(fqdn_rule.matches("server.corp.local."));
 }
 
 test "DomainPattern suffix match enforces label boundary (GAP-0847)" {

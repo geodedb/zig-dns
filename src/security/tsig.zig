@@ -781,6 +781,19 @@ pub const TsigContext = struct {
 
     /// Strip TSIG from message and adjust ARCOUNT
     fn stripTsig(self: *Self, message: []const u8, tsig_info: TsigInfo) ![]u8 {
+        // Guard (review follow-up): verify the record at tsig_start really
+        // is a TSIG RR before truncating there. Truncating at a non-TSIG
+        // offset would silently corrupt the message -- the TSIG-is-last-
+        // record assumption is re-validated instead of trusted.
+        const name_result = try parseName_(self.allocator, message, tsig_info.tsig_start);
+        self.allocator.free(name_result.name);
+        if (name_result.offset + 2 > message.len) return error.InvalidMessage;
+        const rtype = std.mem.readInt(u16, message[name_result.offset..][0..2], .big);
+        if (rtype != 250) return error.NotTsigRecord;
+
+        const arcount = std.mem.readInt(u16, message[10..12], .big);
+        if (arcount == 0) return error.InvalidMessage;
+
         var buffer: std.ArrayList(u8) = .empty;
         errdefer buffer.deinit(self.allocator);
 
@@ -788,7 +801,6 @@ pub const TsigContext = struct {
         try buffer.appendSlice(self.allocator, message[0..tsig_info.tsig_start]);
 
         // Decrement ARCOUNT
-        const arcount = std.mem.readInt(u16, message[10..12], .big);
         std.mem.writeInt(u16, buffer.items[10..12], arcount - 1, .big);
 
         return buffer.toOwnedSlice(self.allocator);
