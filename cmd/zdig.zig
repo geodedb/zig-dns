@@ -284,7 +284,12 @@ fn runQuery(ctx: *cli.Context) !void {
 
         // Check for +option style flags
         if (arg[0] == '+') {
-            parseOption(&options, arg[1..]);
+            parseOption(&options, arg[1..]) catch {
+                // GAP-0883: name the unrecognized option and exit non-zero
+                try ctx.err("Error: unknown option '{s}'\n", .{arg});
+                try ctx.err("Try 'zdig --help' for a list of options.\n", .{});
+                return error.UnknownOption;
+            };
             continue;
         }
 
@@ -338,7 +343,7 @@ fn runQuery(ctx: *cli.Context) !void {
     }
 }
 
-fn parseOption(options: *QueryOptions, opt: []const u8) void {
+fn parseOption(options: *QueryOptions, opt: []const u8) error{UnknownOption}!void {
     // Handle +option and +nooption style
     const is_no = std.mem.startsWith(u8, opt, "no");
     const name = if (is_no) opt[2..] else opt;
@@ -375,6 +380,11 @@ fn parseOption(options: *QueryOptions, opt: []const u8) void {
         options.additional = value;
     } else if (std.mem.eql(u8, name, "comments") or std.mem.eql(u8, name, "cmd")) {
         options.comments = value;
+    } else {
+        // GAP-0883: a typo'd option (e.g. +dnssecc) must not be a silent
+        // no-op. Reject so the caller can report it dig-style and exit
+        // non-zero.
+        return error.UnknownOption;
     }
 }
 
@@ -1227,6 +1237,31 @@ test "writeSanitized: escapes quote and backslash (SEC-SR-5)" {
     defer aw.deinit();
     try writeSanitized(&aw.writer, "a\"b\\c");
     try testing.expectEqualStrings("a\\\"b\\\\c", aw.written());
+}
+
+test "parseOption: known options set fields (GAP-0883)" {
+    var opts = QueryOptions{};
+    try parseOption(&opts, "tcp");
+    try testing.expect(opts.use_tcp);
+    try parseOption(&opts, "notcp");
+    try testing.expect(!opts.use_tcp);
+    try parseOption(&opts, "dnssec");
+    try testing.expect(opts.dnssec);
+    try parseOption(&opts, "short");
+    try testing.expect(opts.short);
+    try parseOption(&opts, "norecurse");
+    try testing.expect(opts.no_recurse);
+    try parseOption(&opts, "qr");
+    try testing.expect(opts.question);
+}
+
+test "parseOption: unknown options are rejected (GAP-0883)" {
+    var opts = QueryOptions{};
+    // Typo'd option must not be a silent no-op (dig-style behavior).
+    try testing.expectError(error.UnknownOption, parseOption(&opts, "dnssecc"));
+    try testing.expectError(error.UnknownOption, parseOption(&opts, "bogus"));
+    try testing.expectError(error.UnknownOption, parseOption(&opts, "nobogus"));
+    try testing.expectError(error.UnknownOption, parseOption(&opts, ""));
 }
 
 test "parseServerAddress: IPv4 plain (GAP-0882)" {
