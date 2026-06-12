@@ -694,21 +694,37 @@ pub const Name = struct {
 pub fn applyCase0x20(allocator: std.mem.Allocator, domain: []const u8, random: std.Random) ![]u8 {
     const result = try allocator.alloc(u8, domain.len);
     errdefer allocator.free(result);
+    randomizeCase0x20(domain, result, random);
+    return result;
+}
 
+/// Allocation-free variant of applyCase0x20 (GAP-0887): writes the
+/// randomized name into a caller-provided buffer. DNS names are at most
+/// 253 text bytes, so a `[253]u8` stack buffer always suffices.
+/// Returns a slice of `buf` containing the randomized name.
+pub fn applyCase0x20Buf(domain: []const u8, buf: []u8, random: std.Random) ![]u8 {
+    if (buf.len < domain.len) {
+        return error.BufferTooSmall;
+    }
+    const result = buf[0..domain.len];
+    randomizeCase0x20(domain, result, random);
+    return result;
+}
+
+/// Shared 0x20 randomization kernel for the heap and buffer variants.
+fn randomizeCase0x20(domain: []const u8, out: []u8, random: std.Random) void {
     for (domain, 0..) |c, i| {
         if (std.ascii.isAlphabetic(c)) {
             // Randomly choose upper or lower case
             if (random.boolean()) {
-                result[i] = std.ascii.toUpper(c);
+                out[i] = std.ascii.toUpper(c);
             } else {
-                result[i] = std.ascii.toLower(c);
+                out[i] = std.ascii.toLower(c);
             }
         } else {
-            result[i] = c;
+            out[i] = c;
         }
     }
-
-    return result;
 }
 
 /// Encode a name with 0x20 case randomization applied
@@ -1255,6 +1271,32 @@ test "applyCase0x20" {
 
     // Dots should be preserved
     try std.testing.expectEqual(@as(u8, '.'), result[7]);
+}
+
+test "GAP-0887: applyCase0x20Buf matches heap variant for same seed" {
+    const allocator = std.testing.allocator;
+    const domain = "Example.COM";
+
+    // Same deterministic seed for both variants -> identical output.
+    var prng_heap = std.Random.DefaultPrng.init(0xdecafbad);
+    const heap_result = try applyCase0x20(allocator, domain, prng_heap.random());
+    defer allocator.free(heap_result);
+
+    var prng_buf = std.Random.DefaultPrng.init(0xdecafbad);
+    var buf: [253]u8 = undefined;
+    const buf_result = try applyCase0x20Buf(domain, &buf, prng_buf.random());
+
+    try std.testing.expectEqualStrings(heap_result, buf_result);
+    try std.testing.expect(std.ascii.eqlIgnoreCase(domain, buf_result));
+}
+
+test "GAP-0887: applyCase0x20Buf rejects undersized buffer" {
+    var prng = std.Random.DefaultPrng.init(1);
+    var buf: [4]u8 = undefined;
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        applyCase0x20Buf("example.com", &buf, prng.random()),
+    );
 }
 
 test "verifyCase0x20" {

@@ -600,24 +600,25 @@ pub const RecursiveResolver = struct {
         // Generate query ID using OS CSPRNG (SEC-C24: prevents cache poisoning)
         const id = try csprngInt(u16);
 
-        // Apply 0x20 case randomization if enabled (using CSPRNG for unpredictability)
+        // Apply 0x20 case randomization if enabled (using CSPRNG for
+        // unpredictability). GAP-0887: the randomized name is written to a
+        // stack buffer (DNS names are at most 253 text bytes) and encoded
+        // into query_buf below -- no heap allocation on the query path.
         var local_prng: std.Random.DefaultPrng = undefined;
+        var case_buf: [253]u8 = undefined;
         const query_name = if (self.config.case_randomization)
-            try name_mod.applyCase0x20(self.allocator, domain, try csprngRandom(&local_prng))
+            try name_mod.applyCase0x20Buf(domain, &case_buf, try csprngRandom(&local_prng))
         else
-            try self.allocator.dupe(u8, domain);
-        defer self.allocator.free(query_name);
+            domain;
 
         // Store for 0x20 verification (PF-NEW-12: skip the dupe when case
         // randomization is disabled -- last_query_name is only checked under
         // the case_randomization branch, so the extra copy is wasted).
         //
-        // PF-NEW-20/PF-NEW-27: Two allocations here are intentional for correctness:
-        // 1. query_name: freed after this query attempt completes (defer above)
-        // 2. last_query_name: persists across retry iterations for 0x20 verification
-        // Combining them would require careful lifetime tracking across the retry
-        // loop boundary; the micro-optimization (~1 alloc per delegation) is not
-        // worth the correctness risk.
+        // PF-NEW-20/PF-NEW-27/GAP-0887: this dupe is the only remaining heap
+        // allocation here -- last_query_name must persist across retry
+        // iterations for 0x20 verification, so it cannot borrow the stack
+        // buffer above.
         if (self.config.case_randomization) {
             if (state.last_query_name) |old| {
                 self.allocator.free(old);
