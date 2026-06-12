@@ -16,10 +16,6 @@ const std = @import("std");
 const clock = @import("clock");
 const random_util = @import("random");
 
-inline fn timeMilli() i64 {
-    return clock.milliTimestamp();
-}
-
 /// Shared SystemClock instance used as the default clock seam. SystemClock
 /// holds no state (its vtable impls ignore the instance pointer), so a
 /// single module-level instance is safe to share across managers.
@@ -258,6 +254,7 @@ pub const FailoverManager = struct {
         try self.servers.append(self.allocator, ServerState{
             .config = config,
         });
+        // ABA on wrap needs 2^32 mutations while a handle is held -- acceptable.
         self.generation +%= 1;
     }
 
@@ -270,6 +267,7 @@ pub const FailoverManager = struct {
         for (self.servers.items, 0..) |server, i| {
             if (std.mem.eql(u8, server.config.address, address)) {
                 _ = self.servers.swapRemove(i);
+                // ABA on wrap needs 2^32 mutations while a handle is held -- acceptable.
                 self.generation +%= 1;
                 return true;
             }
@@ -302,7 +300,8 @@ pub const FailoverManager = struct {
 
         // Collect available server indices into a stack buffer — failover
         // pools are tiny, so this avoids a heap allocation + free on every
-        // selection, all of it under the mutex (PF-NEW-33, #218). Indices
+        // selection, all of it under the mutex (PF-NEW-33, #218); no OOM
+        // path means selection can never silently skip servers. Indices
         // (not pointers) so nothing aliasing servers.items escapes (GAP-0876).
         var stack: [max_tracked_servers]usize = undefined;
         var count: usize = 0;
@@ -507,18 +506,17 @@ pub const FailoverManager = struct {
         return count;
     }
 
-    /// Get statistics
+    /// Get statistics.
+    ///
+    /// Note: no accessor exposes the internal `ServerState` slice. Returning
+    /// `self.servers.items` would alias memory that relocates on
+    /// addServer/removeServer, with the mutex already released -- if
+    /// per-server monitoring is needed, add a snapshot API that copies
+    /// summary structs under the lock instead.
     pub fn getStats(self: *Self) Stats {
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.stats;
-    }
-
-    /// Get all server states (for monitoring)
-    pub fn getServerStates(self: *Self) []const ServerState {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        return self.servers.items;
     }
 
     /// Force health check on all servers
@@ -557,7 +555,8 @@ test "ServerState record success" {
         .config = .{ .address = "test" },
     };
 
-    const now = timeMilli();
+    // ServerState methods take an explicit timestamp; any fixed value works.
+    const now: i64 = 1_000;
     state.recordSuccess(100, now);
 
     try std.testing.expectEqual(@as(u64, 1), state.total_requests);
@@ -571,7 +570,8 @@ test "ServerState record failure and circuit breaker" {
         .config = .{ .address = "test" },
     };
 
-    const now = timeMilli();
+    // ServerState methods take an explicit timestamp; any fixed value works.
+    const now: i64 = 1_000;
 
     // First failure - degraded
     state.recordFailure(now, 30_000);
@@ -644,7 +644,7 @@ test "FailoverManager rotates last-resort server when all unhealthy (REL-6)" {
     try manager.addServer(.{ .address = "server2" });
 
     // Force both servers into an open-circuit (unavailable) state.
-    const future = timeMilli() + 1_000_000;
+    const future = clock.milliTimestamp() + 1_000_000;
     for (manager.servers.items) |*server| {
         server.status = .unhealthy;
         server.circuit_open_until = future;
@@ -774,11 +774,9 @@ test "FailoverManager weighted selection proportions over 1000 draws (GAP-0880)"
         counts[handle.index] += 1;
     }
 
-    // Expected proportions: 25% / 75% of 1000 draws, +/-10 percentage
-    // points tolerance (the algorithm is deterministic, so this is loose).
-    try std.testing.expect(counts[0] >= 150 and counts[0] <= 350);
-    try std.testing.expect(counts[1] >= 650 and counts[1] <= 850);
-    try std.testing.expectEqual(@as(usize, 1000), counts[0] + counts[1]);
+    // Smooth WRR is deterministic: exactly 25% / 75% of 1000 draws.
+    try std.testing.expectEqual(@as(usize, 250), counts[0]);
+    try std.testing.expectEqual(@as(usize, 750), counts[1]);
 }
 
 test "FailoverManager least-connections picks lowest active count (GAP-0880)" {
@@ -848,10 +846,13 @@ test "FailoverManager primary-secondary fails over and returns (GAP-0880)" {
     // Both healthy: primary wins.
     try std.testing.expectEqual(@as(usize, 0), manager.selectServer().?.index);
 
-    // Trip the primary's circuit breaker.
+    // Trip the primary's circuit breaker. The primary stays merely degraded
+    // (still available) until the third failure, so selectServer keeps
+    // returning it throughout the loop.
     var i: usize = 0;
     while (i < 3) : (i += 1) {
-        const handle = ServerHandle{ .index = 0, .generation = manager.generation };
+        const handle = manager.selectServer().?;
+        try std.testing.expectEqual(@as(usize, 0), handle.index);
         try std.testing.expect(manager.recordFailure(handle));
     }
     try std.testing.expectEqual(ServerStatus.unhealthy, manager.servers.items[0].status);
