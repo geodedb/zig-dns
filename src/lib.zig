@@ -20,12 +20,13 @@
 //! ```zig
 //! const dns = @import("dns");
 //!
-//! // Create a client
-//! var client = dns.Client.init(allocator);
+//! // Create a client (init is fallible: it probes OS entropy)
+//! var client = try dns.Client.init(allocator);
 //! defer client.deinit();
 //!
-//! // Resolve a hostname
-//! const result = try client.resolve("example.com", .a);
+//! // Resolve a hostname; the caller owns the result
+//! var result = try client.resolve("example.com", .a);
+//! defer result.deinit(allocator);
 //! ```
 //!
 //! ## Module Organization
