@@ -695,6 +695,11 @@ pub const RecursiveResolver = struct {
     /// Extract referral information from a response.
     /// Iterates the additional section exactly once (O(authority + additional))
     /// rather than once per NS record (O(authority * additional)).
+    /// Maximum NS records accepted from a single referral's authority section.
+    /// Bounds the glue<->NS matching cost against crafted referrals (PF-NEW-35,
+    /// #214); far above any legitimate delegation (root has 13).
+    const max_referral_ns_records: usize = 64;
+
     fn extractReferral(self: *Self, response: []const u8, msg: Message) !?Referral {
         var ns_names: std.ArrayList([]const u8) = .empty;
         defer ns_names.deinit(self.allocator);
@@ -718,6 +723,13 @@ pub const RecursiveResolver = struct {
                 if (zone_str == null) {
                     zone_str = try rr.name.toStringBuf(&zone_buf, response);
                 }
+
+                // PF-NEW-35 (#214): cap NS records per referral. A legitimate
+                // delegation has at most ~13; a crafted referral could carry
+                // thousands of NS records and thousands of glue records, making
+                // the glue-matching loop below O(glue x NS) (~4096^2) — a
+                // CPU-DoS amplification vector. Capping NS bounds it.
+                if (ns_names.items.len >= max_referral_ns_records) continue;
 
                 const ns_name = try rr.parseName(response);
                 // PF-NEW-14: Use stack buffer + dupe instead of toString's
