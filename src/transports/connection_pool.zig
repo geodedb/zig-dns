@@ -300,12 +300,24 @@ pub const ConnectionPool = struct {
 
         const now = timeMilli();
 
-        // First, try to reuse an existing connection
+        // GAP-0889: single O(N) walk computes both the reuse candidate and
+        // the per-server connection count (previously a reuse scan plus a
+        // separate countServerConnections pass).
+        var server_count: u16 = 0;
+        var reuse: ?*PooledConnection = null;
         for (self.connections.items) |*conn| {
             if (!conn.server.eql(server)) continue;
-            if (!conn.isHealthy(self.config, now)) continue;
-            if (!conn.canPipeline(self.config)) continue;
+            if (conn.state != .closed) server_count += 1;
+            if (reuse == null and
+                conn.isHealthy(self.config, now) and
+                conn.canPipeline(self.config))
+            {
+                reuse = conn;
+            }
+        }
 
+        // First, try to reuse an existing connection
+        if (reuse) |conn| {
             conn.markActive(now);
             self.stats.connections_reused += 1;
             const handle = ConnectionHandle{
@@ -318,7 +330,6 @@ pub const ConnectionPool = struct {
         }
 
         // Check if we can create a new connection
-        const server_count = self.countServerConnections(server);
         if (server_count >= self.config.max_connections_per_server) {
             self.mutex.unlock();
             return error.PoolExhausted;
@@ -340,18 +351,27 @@ pub const ConnectionPool = struct {
         // QC-NEW-02 TOCTOU fix: Re-check the connection limit now that
         // we hold the lock again. Another thread may have created a
         // connection for the same server while we were unlocked.
-        const recheck_count = self.countServerConnections(server);
+        // GAP-0889: the recheck count and the fallback reuse candidate are
+        // computed in the same single walk.
+        var recheck_count: u16 = 0;
+        var recheck_reuse: ?*PooledConnection = null;
+        for (self.connections.items) |*conn| {
+            if (!conn.server.eql(server)) continue;
+            if (conn.state != .closed) recheck_count += 1;
+            if (recheck_reuse == null and
+                conn.isHealthy(self.config, now) and
+                conn.canPipeline(self.config))
+            {
+                recheck_reuse = conn;
+            }
+        }
         if (recheck_count >= self.config.max_connections_per_server) {
             // Limit exceeded -- close the fd we just created and try to
             // reuse an existing connection that may have become available.
             net.close(fd);
             fd = -1; // Prevent errdefer double-close
 
-            for (self.connections.items) |*conn| {
-                if (!conn.server.eql(server)) continue;
-                if (!conn.isHealthy(self.config, now)) continue;
-                if (!conn.canPipeline(self.config)) continue;
-
+            if (recheck_reuse) |conn| {
                 conn.markActive(now);
                 self.stats.connections_reused += 1;
                 return ConnectionHandle{
@@ -465,16 +485,6 @@ pub const ConnectionPool = struct {
         self.stats.idle_connections = idle;
 
         return self.stats;
-    }
-
-    fn countServerConnections(self: *Self, server: ServerKey) u16 {
-        var count: u16 = 0;
-        for (self.connections.items) |conn| {
-            if (conn.server.eql(server) and conn.state != .closed) {
-                count += 1;
-            }
-        }
-        return count;
     }
 
     /// Create a new pooled connection entry (socket only, no active connection).
