@@ -281,6 +281,20 @@ pub const ClientSubnet = struct {
 
     const Self = @This();
 
+    /// Validate a source prefix length against the RFC 7871 family caps
+    /// (GAP-0872: must run BEFORE any `(prefix + 7) / 8` byte math, which
+    /// would overflow u8 arithmetic for prefix >= 249).
+    fn validatePrefixLength(family: AddressFamily, prefix_length: u8) error{InvalidPrefixLength}!void {
+        const max: u8 = switch (family) {
+            .ipv4 => 32,
+            .ipv6 => 128,
+            // Unknown families carry at most a 128-bit address per the
+            // option's design; bound them so byte math stays sane.
+            _ => 128,
+        };
+        if (prefix_length > max) return error.InvalidPrefixLength;
+    }
+
     /// Parse Client Subnet option from EDNS option data
     pub fn parse(data: []const u8) !Self {
         if (data.len < 4) {
@@ -290,6 +304,8 @@ pub const ClientSubnet = struct {
         const family = @as(AddressFamily, @enumFromInt(std.mem.readInt(u16, data[0..2], .big)));
         const source_prefix_length = data[2];
         const scope_prefix_length = data[3];
+
+        try validatePrefixLength(family, source_prefix_length);
 
         // Calculate expected address length (rounded up to bytes).
         // Widen to usize so source_prefix_length >= 249 cannot overflow u8.
@@ -308,6 +324,8 @@ pub const ClientSubnet = struct {
 
     /// Encode Client Subnet option to wire format
     pub fn encode(self: Self, allocator: std.mem.Allocator) ![]u8 {
+        try validatePrefixLength(self.family, self.source_prefix_length);
+
         const addr_bytes = (@as(usize, self.source_prefix_length) + 7) / 8;
         const total_len = 4 + addr_bytes;
 
@@ -823,6 +841,50 @@ test "OptionIterator" {
     try std.testing.expect(iter.next() == null);
 }
 
+test "GAP-0872: ClientSubnet.parse validates prefix length before byte math" {
+    // prefix 250 used to overflow the u8 `+ 7` arithmetic (panic in safe
+    // builds); now rejected by the RFC 7871 family cap first.
+    const overflow_v4 = [_]u8{ 0x00, 0x01, 250, 0x00 };
+    try std.testing.expectError(error.InvalidPrefixLength, ClientSubnet.parse(&overflow_v4));
+
+    // In-u8-range but over the family cap: IPv4 allows at most /32.
+    const over_v4 = [_]u8{ 0x00, 0x01, 33, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05 };
+    try std.testing.expectError(error.InvalidPrefixLength, ClientSubnet.parse(&over_v4));
+
+    // IPv6 allows at most /128.
+    const over_v6 = [_]u8{ 0x00, 0x02, 129, 0x00 } ++ [_]u8{0} ** 17;
+    try std.testing.expectError(error.InvalidPrefixLength, ClientSubnet.parse(&over_v6));
+
+    // Boundary values remain accepted.
+    const max_v4 = [_]u8{ 0x00, 0x01, 32, 0x00, 0xC0, 0xA8, 0x01, 0x02 };
+    const ecs_v4 = try ClientSubnet.parse(&max_v4);
+    try std.testing.expectEqual(@as(usize, 4), ecs_v4.address.len);
+
+    const max_v6 = [_]u8{ 0x00, 0x02, 128, 0x00 } ++ [_]u8{0xAB} ** 16;
+    const ecs_v6 = try ClientSubnet.parse(&max_v6);
+    try std.testing.expectEqual(@as(usize, 16), ecs_v6.address.len);
+}
+
+test "GAP-0872: ClientSubnet.encode validates prefix length" {
+    const allocator = std.testing.allocator;
+
+    const bad = ClientSubnet{
+        .family = .ipv4,
+        .source_prefix_length = 250,
+        .scope_prefix_length = 0,
+        .address = &[_]u8{},
+    };
+    try std.testing.expectError(error.InvalidPrefixLength, bad.encode(allocator));
+
+    const over_v6 = ClientSubnet{
+        .family = .ipv6,
+        .source_prefix_length = 129,
+        .scope_prefix_length = 0,
+        .address = &[_]u8{},
+    };
+    try std.testing.expectError(error.InvalidPrefixLength, over_v6.encode(allocator));
+}
+
 test "ClientSubnet.parse IPv4" {
     const data = [_]u8{
         0x00, 0x01, // Family: IPv4
@@ -855,15 +917,16 @@ test "ClientSubnet.parse IPv6" {
 
 test "ClientSubnet.parse rejects overflowing source_prefix_length (SEC-SR-3)" {
     // source_prefix_length = 255. `(source_prefix_length + 7) / 8` must not
-    // overflow u8 (255 + 7 = 262): parse must return InvalidOptionData, not
-    // panic (ReleaseSafe) or wrap to a tiny addr_bytes (ReleaseFast).
+    // overflow u8 (255 + 7 = 262): parse must reject, not panic (ReleaseSafe)
+    // or wrap to a tiny addr_bytes (ReleaseFast). With GAP-0872 the RFC 7871
+    // family cap rejects it first with the more specific error.
     const data = [_]u8{
         0x00, 0x01, // Family: IPv4
         0xFF, // Source prefix: 255 (overflows `prefix + 7` as u8)
         0x00, // Scope prefix: 0
         0xC0, 0xA8, 0x01, // 3 address bytes (far fewer than 255/8 = 32)
     };
-    try std.testing.expectError(error.InvalidOptionData, ClientSubnet.parse(&data));
+    try std.testing.expectError(error.InvalidPrefixLength, ClientSubnet.parse(&data));
 }
 
 test "ClientSubnet.encode" {
