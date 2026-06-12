@@ -1146,6 +1146,14 @@ pub fn build(b: *std.Build) void {
     const run_happy_eyeballs_test = b.addRunArtifact(happy_eyeballs_test);
     test_transport_step.dependOn(&run_happy_eyeballs_test.step);
 
+    // Per-protocol transport tests. These were previously never run by
+    // `zig build test`, leaving udp/tcp/dot/doh/doq unit tests dormant. Reuse
+    // the already-wired modules so their in-file tests execute in CI.
+    for ([_]*std.Build.Module{ udp_mod, tcp_mod, dot_mod, doh_mod, doq_mod }) |mod| {
+        const t = b.addTest(.{ .root_module = mod });
+        test_transport_step.dependOn(&b.addRunArtifact(t).step);
+    }
+
     test_step.dependOn(test_transport_step);
 
     // ========================================================================

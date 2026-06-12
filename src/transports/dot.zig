@@ -75,6 +75,12 @@
 const std = @import("std");
 const channel = @import("channel");
 
+/// Wall-clock milliseconds. std.time.milliTimestamp was removed in Zig 0.16.
+inline fn timeMilli() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+}
+
 pub const Channel = channel.Channel;
 pub const ChannelKind = channel.ChannelKind;
 pub const DoTOptions = channel.DoTOptions;
@@ -250,7 +256,7 @@ pub const DoTTransport = struct {
         if (self.connection) |conn| {
             if (conn.isOpen()) {
                 // Check idle timeout
-                const now = std.time.milliTimestamp();
+                const now = timeMilli();
                 if (now - self.last_used < self.max_idle_ms) {
                     return; // Connection still good
                 }
@@ -286,7 +292,7 @@ pub const DoTTransport = struct {
             }
         }
 
-        self.last_used = std.time.milliTimestamp();
+        self.last_used = timeMilli();
     }
 
     fn queryImpl(ctx: *anyopaque, wire_req: []const u8, timeout_ms: u32) anyerror![]u8 {
@@ -332,7 +338,7 @@ pub const DoTTransport = struct {
             total_read += n;
         }
 
-        self.last_used = std.time.milliTimestamp();
+        self.last_used = timeMilli();
         return response;
     }
 
@@ -603,19 +609,23 @@ pub const MockDoT = struct {
 test "DoTTransport ALPN validation" {
     const allocator = std.testing.allocator;
 
-    // Valid ALPN
-    _ = try DoTTransport.init(allocator, .{
+    // Valid ALPN (CA trust must be configured, or init fails closed —
+    // SEC-GAP-057; use the system trust store for the test).
+    var t = try DoTTransport.init(allocator, .{
         .server_name = "dns.example.com",
         .addr = .{ .host = "1.2.3.4", .port = 853 },
         .ca_pem = "",
+        .use_system_ca = true,
         .alpn_dot = "dot",
     });
+    t.deinit();
 
-    // Invalid ALPN
+    // Invalid ALPN (rejected before the CA-trust check)
     try std.testing.expectError(error.InvalidAlpn, DoTTransport.init(allocator, .{
         .server_name = "dns.example.com",
         .addr = .{ .host = "1.2.3.4", .port = 853 },
         .ca_pem = "",
+        .use_system_ca = true,
         .alpn_dot = "wrong",
     }));
 }
@@ -686,6 +696,7 @@ test "DoTTransport without backend" {
         .server_name = "dns.example.com",
         .addr = .{ .host = "1.2.3.4", .port = 853 },
         .ca_pem = "",
+        .use_system_ca = true, // CA trust required (SEC-GAP-057)
         .alpn_dot = "dot",
     });
     defer transport.deinit();

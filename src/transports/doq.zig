@@ -605,9 +605,11 @@ test "parseDoQResponse rejects oversized response" {
     const oversized = try allocator.alloc(u8, DoQTransport.max_message_size + 3);
     defer allocator.free(oversized);
     @memset(oversized, 0);
-    std.mem.writeInt(u16, oversized[0..2], @intCast(DoQTransport.max_message_size + 1), .big);
-    oversized[2] = 0;
-    oversized[3] = 0;
+    // The 2-byte length prefix is a u16 and so cannot itself exceed
+    // max_message_size; MessageTooLarge is triggered by the overall buffer
+    // length (max_message_size + 3 > max_message_size + 2). Write the maximum
+    // valid prefix rather than max+1, which overflows u16.
+    std.mem.writeInt(u16, oversized[0..2], @intCast(DoQTransport.max_message_size), .big);
     try std.testing.expectError(error.MessageTooLarge, parseDoQResponse(oversized));
 }
 

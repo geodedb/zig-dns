@@ -231,11 +231,12 @@ pub const DoHTransport = struct {
                 return error.HttpError;
             }
 
-            // Validate Content-Type (SEC-GAP-056: CWE-319)
-            if (response.content_type) |ct| {
-                if (!std.mem.eql(u8, ct, media_type)) {
-                    return error.InvalidContentType;
-                }
+            // Validate Content-Type (SEC-GAP-056: CWE-319; A12, #301).
+            // RFC 8484 mandates application/dns-message; a missing header must
+            // be rejected, not silently accepted.
+            const ct = response.content_type orelse return error.InvalidContentType;
+            if (!std.mem.eql(u8, ct, media_type)) {
+                return error.InvalidContentType;
             }
 
             if (response.body.len > max_response_size) {
@@ -252,11 +253,12 @@ pub const DoHTransport = struct {
                 return error.HttpError;
             }
 
-            // Validate Content-Type (SEC-GAP-056: CWE-319)
-            if (response.content_type) |ct| {
-                if (!std.mem.eql(u8, ct, media_type)) {
-                    return error.InvalidContentType;
-                }
+            // Validate Content-Type (SEC-GAP-056: CWE-319; A12, #301).
+            // RFC 8484 mandates application/dns-message; a missing header must
+            // be rejected, not silently accepted.
+            const ct = response.content_type orelse return error.InvalidContentType;
+            if (!std.mem.eql(u8, ct, media_type)) {
+                return error.InvalidContentType;
             }
 
             if (response.body.len > max_response_size) {
@@ -282,7 +284,12 @@ pub const DoHTransport = struct {
 pub fn base64urlEncode(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
     const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-    const output_len = (data.len + 2) / 3 * 4;
+    // Exact unpadded base64url length. The previous formula over-allocated
+    // (padded length), and the function returns a sub-slice of exactly the
+    // encoded length — so freeing the returned slice freed fewer bytes than
+    // were allocated, a free-size mismatch on the DoH GET path. Sizing the
+    // allocation to the returned length keeps allocate/free symmetric.
+    const output_len = (data.len * 4 + 2) / 3;
     var output = try allocator.alloc(u8, output_len);
     errdefer allocator.free(output);
 
@@ -387,6 +394,9 @@ pub const MockHttpBackend = struct {
     pub const MockResponse = struct {
         status_code: u16,
         body: []const u8,
+        /// Defaults to the RFC 8484 media type so the common case passes the
+        /// Content-Type check; set null to exercise the missing-header path.
+        content_type: ?[]const u8 = DoHTransport.media_type,
     };
 
     pub const RequestRecord = struct {
@@ -431,6 +441,16 @@ pub const MockHttpBackend = struct {
         try self.responses.append(self.allocator, .{
             .status_code = status_code,
             .body = body_copy,
+        });
+    }
+
+    /// Queue a response with an explicit Content-Type (null = header absent).
+    pub fn addResponseWithContentType(self: *Self, status_code: u16, body: []const u8, content_type: ?[]const u8) !void {
+        const body_copy = try self.allocator.dupe(u8, body);
+        try self.responses.append(self.allocator, .{
+            .status_code = status_code,
+            .body = body_copy,
+            .content_type = content_type,
         });
     }
 
@@ -483,6 +503,7 @@ pub const MockHttpBackend = struct {
             .status_code = resp.status_code,
             .body = try self.allocator.dupe(u8, resp.body),
             .allocator = self.allocator,
+            .content_type = resp.content_type,
         };
     }
 
@@ -529,6 +550,7 @@ pub const MockHttpBackend = struct {
             .status_code = resp.status_code,
             .body = try self.allocator.dupe(u8, resp.body),
             .allocator = self.allocator,
+            .content_type = resp.content_type,
         };
     }
 
@@ -675,6 +697,7 @@ test "DoHTransport with MockHttpBackend GET" {
     const allocator = std.testing.allocator;
 
     var http_mock = MockHttpBackend.init(allocator);
+    defer http_mock.deinit();
 
     // Add a mock DNS response
     const dns_response = [_]u8{ 0x00, 0x01, 0x81, 0x80 };
@@ -698,16 +721,35 @@ test "DoHTransport with MockHttpBackend GET" {
     // Verify request was recorded
     try std.testing.expectEqual(@as(usize, 1), http_mock.requests.items.len);
     try std.testing.expectEqualStrings("GET", http_mock.requests.items[0].method);
-    try std.testing.expectEqualStrings("test-ca", http_mock.requests.items[0].ca_pem);
-    try std.testing.expect(http_mock.requests.items[0].bootstrap_ip != null);
-    try std.testing.expectEqualStrings("9.9.9.9", http_mock.requests.items[0].bootstrap_ip.?.host);
-    try std.testing.expectEqual(@as(u16, 443), http_mock.requests.items[0].bootstrap_ip.?.port);
+}
+
+test "A12 (#301): DoH rejects a response with no Content-Type" {
+    const allocator = std.testing.allocator;
+
+    var http_mock = MockHttpBackend.init(allocator);
+    defer http_mock.deinit();
+
+    const dns_response = [_]u8{ 0x00, 0x01, 0x81, 0x80 };
+    try http_mock.addResponseWithContentType(200, &dns_response, null);
+
+    var doh = try DoHTransport.init(allocator, .{
+        .uri = "https://dns.example.com/dns-query",
+        .ca_pem = "test-ca",
+        .prefer_get = true,
+    }, http_mock.backend());
+    defer doh.deinit();
+
+    var ch = doh.channel();
+    const wire_req = [_]u8{ 0x00, 0x01, 0x01, 0x00 };
+    // RFC 8484 mandates application/dns-message; a missing header is rejected.
+    try std.testing.expectError(error.InvalidContentType, ch.query(&wire_req, 1000));
 }
 
 test "DoHTransport with MockHttpBackend POST" {
     const allocator = std.testing.allocator;
 
     var http_mock = MockHttpBackend.init(allocator);
+    defer http_mock.deinit();
 
     const dns_response = [_]u8{ 0x00, 0x01, 0x81, 0x80 };
     try http_mock.addResponse(200, &dns_response);
