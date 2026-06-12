@@ -102,15 +102,9 @@ pub const DomainPattern = struct {
         if (self.case_sensitive) {
             return std.mem.indexOf(u8, domain, pattern) != null;
         }
-        // Case-insensitive contains check
-        if (domain.len < pattern.len) return false;
-        var i: usize = 0;
-        while (i <= domain.len - pattern.len) : (i += 1) {
-            if (std.ascii.eqlIgnoreCase(domain[i .. i + pattern.len], pattern)) {
-                return true;
-            }
-        }
-        return false;
+        // GAP-0863: stdlib case-insensitive search (Boyer-Moore-Horspool on
+        // large inputs) instead of a hand-rolled O(d*p) sliding window.
+        return std.ascii.findIgnoreCase(domain, pattern) != null;
     }
 
     fn matchWildcard(self: *const DomainPattern, domain: []const u8, pattern: []const u8) bool {
@@ -467,6 +461,28 @@ test "DomainPattern prefix match" {
     try std.testing.expect(pattern.matches("internal.example.com"));
     try std.testing.expect(pattern.matches("internal.corp"));
     try std.testing.expect(!pattern.matches("example.internal.com"));
+}
+
+test "DomainPattern contains match is case-insensitive (GAP-0863)" {
+    const pattern = DomainPattern{
+        .pattern = "tracker",
+        .match_type = .contains,
+    };
+
+    try std.testing.expect(pattern.matches("tracker.example.com"));
+    try std.testing.expect(pattern.matches("ads.TRACKER.example.com"));
+    try std.testing.expect(pattern.matches("AdTrAcKeR.net"));
+    try std.testing.expect(pattern.matches("tracker"));
+    try std.testing.expect(!pattern.matches("example.com"));
+    try std.testing.expect(!pattern.matches("track.example.com"));
+
+    const cs_pattern = DomainPattern{
+        .pattern = "tracker",
+        .match_type = .contains,
+        .case_sensitive = true,
+    };
+    try std.testing.expect(cs_pattern.matches("ads.tracker.net"));
+    try std.testing.expect(!cs_pattern.matches("ads.TRACKER.net"));
 }
 
 test "DomainPattern wildcard match" {
