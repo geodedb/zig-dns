@@ -224,26 +224,28 @@ pub const Zone = struct {
     /// Returns an empty (zero-length) slice when no matching records exist.
     /// Propagates `error.OutOfMemory` if the slice cannot be allocated.
     pub fn getRecords(self: *const Self, name: []const u8, rtype: RecordType) ![]const ResourceRecord {
-        var count: usize = 0;
+        // Single pass over the records (previously two full O(N) scans — a
+        // count pass plus a collect pass — per lookup; PF-NEW-39 partial #215).
+        // The cheap integer rtype compare is checked first so most non-matching
+        // records skip the case-insensitive name compare. A full O(1) name
+        // index is tracked separately because it must handle records appended
+        // after parse (e.g. AXFR streaming).
+        var result: std.ArrayList(ResourceRecord) = .empty;
+        errdefer result.deinit(self.allocator);
         for (self.records.items) |rr| {
-            if (std.ascii.eqlIgnoreCase(rr.name, name) and rr.rtype == rtype) {
-                count += 1;
+            if (rr.rtype == rtype and std.ascii.eqlIgnoreCase(rr.name, name)) {
+                try result.append(self.allocator, rr);
             }
         }
 
-        if (count == 0) return &[_]ResourceRecord{};
+        if (result.items.len == 0) {
+            result.deinit(self.allocator);
+            return &[_]ResourceRecord{};
+        }
 
-        // Heap-allocate a slice of matching records (QA-AUDIT-03: not a view,
+        // Heap-allocated slice of matching records (QA-AUDIT-03: not a view,
         // this is a new allocation that the caller must free).
-        const result = try self.allocator.alloc(ResourceRecord, count);
-        var i: usize = 0;
-        for (self.records.items) |rr| {
-            if (std.ascii.eqlIgnoreCase(rr.name, name) and rr.rtype == rtype) {
-                result[i] = rr;
-                i += 1;
-            }
-        }
-        return result;
+        return result.toOwnedSlice(self.allocator);
     }
 };
 
