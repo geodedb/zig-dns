@@ -185,8 +185,13 @@ pub const HappyEyeballs = struct {
             // This avoids the spin-wait anti-pattern while still racing
             // connections per RFC 8305.
             var active_count: usize = 0;
-            var poll_fds_buf: [16]std.posix.pollfd = undefined;
-            var poll_index_map: [16]usize = undefined; // maps poll index -> attempts index
+            // Sized to the full max_parallel_attempts (u8) range so every
+            // connecting socket is polled. A 16-entry buffer silently left
+            // attempts 17+ open-but-unpolled when max_parallel_attempts > 16
+            // (REL-8).
+            const max_poll_fds = std.math.maxInt(u8) + 1; // 256
+            var poll_fds_buf: [max_poll_fds]std.posix.pollfd = undefined;
+            var poll_index_map: [max_poll_fds]usize = undefined; // maps poll index -> attempts index
 
             for (attempts.items, 0..) |*attempt, idx| {
                 if (attempt.state != .connecting) continue;
@@ -216,7 +221,12 @@ pub const HappyEyeballs = struct {
                 self.config.connection_attempt_delay_ms,
             ));
 
-            const poll_result = std.posix.poll(poll_fds_buf[0..active_count], poll_timeout) catch 0;
+            // A poll() failure (NetworkDown/SystemResources/Unexpected) is real.
+            // Masking it as "0 events" spun the loop until the overall timeout
+            // and surfaced a generic ConnectionFailed; propagate it instead so
+            // the root cause is visible (REL-9). The function's defer closes any
+            // open attempt FDs on this error path.
+            const poll_result = try std.posix.poll(poll_fds_buf[0..active_count], poll_timeout);
 
             if (poll_result > 0) {
                 for (0..active_count) |pi| {
