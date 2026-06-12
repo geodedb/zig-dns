@@ -1,18 +1,19 @@
 # Performance Gap Analysis
 
-Last updated: 2026-06-12 (Round 5 review -- benchmark harness + resolver/cache/policy scan added 12 new open findings: bench harness broken under Zig 0.16, glue-to-NS CPU-DoS amplification, zone/cache/rpz/failover/parallel hot-path issues. 47 Resolved, 21 Won't Do, 12 Open, 1 Blocked.)
+Last updated: 2026-06-12 (Gap-closure campaign closed all 12 open findings from Round 5; 1 Won't Do (GAP-0864). 59 Resolved, 22 Won't Do, 0 Open, 1 Blocked.)
 
+> Round 5 (2026-06-12): benchmark harness + resolver/cache/policy scan added 12 new open findings. All closed by campaign 2026-06-12.
 > Previous: 2026-03-25 (Audit deep review complete -- DNSSEC-path scan found 4 micro-findings, all negligible vs crypto cost; no new items added. Zero perf regressions from recent commits. 47 Resolved, 21 Won't Do, 0 Open, 1 Blocked.)
 
 ## Summary
 
 | Status | Count | Items |
 |---|---|---|
-| **Resolved** | 47 | PF-01, PF-02b, PF-04, PF-06, PF-07, PF-08, PF-09, PF-11, PF-12, PF-15, PF-17, PF-19, PF-20, PF-21, PF-22, PF-22-prefetch, PF-23, PF-24, PF-24-dual-cache, PF-25, PF-26, PF-27, PF-28, PF-29, PF-30, PF-31, PF-NEW-01, PF-NEW-02, PF-NEW-03, PF-NEW-04, PF-NEW-05, PF-NEW-06, PF-NEW-07, PF-NEW-08, PF-NEW-09, PF-NEW-10, PF-NEW-12, PF-NEW-13, PF-NEW-14, PF-NEW-15, PF-NEW-21, PF-NEW-23, PF-NEW-24, PF-NEW-25, PF-NEW-29, PF-NEW-30, PF-NEW-31 |
-| **Open** | 12 | PF-NEW-38, PF-NEW-35, PF-NEW-36, PF-NEW-39, PF-NEW-32, PF-NEW-33, PF-NEW-40, PF-NEW-41, PF-NEW-43, PF-NEW-42, PF-NEW-34, PF-NEW-37 |
-| **Won't Do** | 21 | PF-02, PF-02b-evict, PF-02c, PF-03, PF-03b, PF-03c, PF-05, PF-10, PF-13, PF-14, PF-16, PF-18, PF-NEW-16, PF-NEW-17, PF-NEW-18, PF-NEW-19, PF-NEW-20, PF-NEW-22, PF-NEW-27, PF-NEW-28, PF-21-pool |
+| **Resolved** | 59 | PF-01, PF-02b, PF-04, PF-06, PF-07, PF-08, PF-09, PF-11, PF-12, PF-15, PF-17, PF-19, PF-20, PF-21, PF-22, PF-22-prefetch, PF-23, PF-24, PF-24-dual-cache, PF-25, PF-26, PF-27, PF-28, PF-29, PF-30, PF-31, PF-NEW-01, PF-NEW-02, PF-NEW-03, PF-NEW-04, PF-NEW-05, PF-NEW-06, PF-NEW-07, PF-NEW-08, PF-NEW-09, PF-NEW-10, PF-NEW-12, PF-NEW-13, PF-NEW-14, PF-NEW-15, PF-NEW-21, PF-NEW-23, PF-NEW-24, PF-NEW-25, PF-NEW-29, PF-NEW-30, PF-NEW-31, GAP-0849, GAP-0858, GAP-0859, GAP-0860, GAP-0861, GAP-0862, GAP-0863, GAP-0885, GAP-0887, GAP-0888, GAP-0889, GAP-0890 |
+| **Open** | 0 | |
+| **Won't Do** | 22 | PF-02, PF-02b-evict, PF-02c, PF-03, PF-03b, PF-03c, PF-05, PF-10, PF-13, PF-14, PF-16, PF-18, PF-NEW-16, PF-NEW-17, PF-NEW-18, PF-NEW-19, PF-NEW-20, PF-NEW-22, PF-NEW-27, PF-NEW-28, PF-21-pool, GAP-0864 |
 | **Blocked** | 1 | PF-23-spice |
-| **Total** | **81** | |
+| **Total** | **82** | |
 
 ### Round 5 (2026-06-12) -- New Open Findings
 
@@ -269,25 +270,25 @@ Remaining items by priority (after deep audit; Won't-Do items classified):
 
 ---
 
-## Audit Cycle 2026-06-12 -- Open Performance Findings
+## Audit Cycle 2026-06-12 -- Performance Findings (RESOLVED 2026-06-12)
 
-Performance-domain gaps from the 2026-06-12 audit (Phase 3 gap-detector + deep review). All **Open**.
+Performance-domain gaps from the 2026-06-12 audit (Phase 3 gap-detector + deep review). All closed by the 2026-06-12 gap-closure campaign. See `GAP_ANALYSIS_RESOLVED.md` section "Gap-Closure Campaign 2026-06-12" for stubs with commit evidence.
 
 | ID | PerfSeverity | Finding | Component | Evidence | Measurement | Issue | Fix Summary | Status |
 |----|--------------|---------|-----------|----------|-------------|-------|-------------|--------|
-| GAP-0858 | P2 | scale_bench 100K tier times out (DebugAllocator + legacy O(n) Cache eviction) | scale_bench, cache | `benchmarks/scale_bench.zig:193`; `src/cache.zig:125-131` (BENCH-2) | 100K tier never completes | [#313](https://gitlab.com/devnw/zig/dns/-/issues/313) | Release allocator and/or O(1) DnsCache; complete within budget | **Open** |
-| GAP-0859 | P2 | Benches measure legacy Cache, not production DnsCache; baseline non-representative | benchmarks | `benchmarks/` target legacy Cache (BENCH-3) | Wrong baseline | [#314](https://gitlab.com/devnw/zig/dns/-/issues/314) | Re-target benchmarks at DnsCache; re-capture baseline | **Open** |
-| GAP-0849 | P2 | bench.zig uses removed std.time.Timer (9 sites); `zig build bench` fails | benchmarks | `benchmarks/bench.zig` -- 9 sites | Bench cannot build | [#216](https://gitlab.com/devnw/zig/dns/-/issues/216) | Migrate to current timer API; bench builds | **Open** |
-| GAP-0860 | P2 | page_allocator per thread-pool task | parallel.zig | `src/parallel.zig:521-532,652-666` (RF-1) | mmap/munmap per task | [#315](https://gitlab.com/devnw/zig/dns/-/issues/315) | Pooled/arena allocator per task | **Open** |
-| GAP-0861 | P2 | putRecordWithKey O(N^2) rdata copy | dns_cache.zig | `src/resolver/dns_cache.zig:511-548` (RF-3) | Quadratic on multi-record pack | [#316](https://gitlab.com/devnw/zig/dns/-/issues/316) | Linear (single-pass / pre-sized) rdata copy | **Open** |
-| GAP-0888 | P2 | TCP length-prefix + payload sent as 2 writeAll calls under TCP_NODELAY -> 2 segments/syscalls per query | tcp, connection_pool | `tcp.zig:57-58`; `connection_pool.zig:587-588,694-695,741-742` (PF-AUD-03) | 2 segments/syscalls per TCP query | [#322](https://gitlab.com/devnw/zig/dns/-/issues/322) | Coalesce prefix+payload into one write (buffer/writev) | **Open** |
-| GAP-0862 | P3 | Full sort on every addRule (RPZ + split_dns) | rpz, split_dns | `rpz.zig:141,244`; `split_dns.zig:298` (RF-4) | O(n log n) per insert | [#328](https://gitlab.com/devnw/zig/dns/-/issues/328) | Defer/batch sort | **Open** |
-| GAP-0863 | P3 | Naive substring search in split_dns matchContains | split_dns.zig | `src/resolver/split_dns.zig:89-101` (RF-5) | Suboptimal match cost | [#329](https://gitlab.com/devnw/zig/dns/-/issues/329) | Use std.mem.indexOf / better matcher | **Open** |
-| GAP-0864 | P3 | getPool() unconditional mutex | parallel.zig | `src/parallel.zig:94-101` (RF-2) | Lock on hot accessor | [#330](https://gitlab.com/devnw/zig/dns/-/issues/330) | Atomic fast path OR Won't-Do decision (Won't-Do candidate) | **Open** |
-| GAP-0885 | P3 | selectWeighted batchy WRR distribution | failover.zig | `src/resolver/failover.zig:289-311` (QR-AUD-11) | Uneven short-term load | [#338](https://gitlab.com/devnw/zig/dns/-/issues/338) | Smooth WRR interleaving | **Open** |
-| GAP-0887 | P3 | applyCase0x20 heap alloc per delegation hop; stack variant possible | name, recursive | `src/name.zig:711-717`; `src/recursive.zig:570` (PF-AUD-02) | 1 alloc per hop | [#339](https://gitlab.com/devnw/zig/dns/-/issues/339) | Stack-buffer variant for in-bound names | **Open** |
-| GAP-0889 | P3 | ConnectionPool fully linear-scan; acquire scans up to 3x | connection_pool.zig | `src/transports/connection_pool.zig:299-356,483-491` (PF-AUD-04) | O(n) (up to 3x) per acquire | [#340](https://gitlab.com/devnw/zig/dns/-/issues/340) | Single-pass / index-assisted acquire | **Open** |
-| GAP-0890 | Info | dnssec signed_data ArrayList no capacity reservation | dnssec.zig | `src/resolver/dnssec.zig:378,397-423` (PF-AUD-05) | ~7 reallocs/verify (crypto dominates) | [#341](https://gitlab.com/devnw/zig/dns/-/issues/341) | ensureTotalCapacity before building signed_data | **Open** |
+| GAP-0858 | P2 | scale_bench 100K tier times out (DebugAllocator + legacy O(n) Cache eviction) | scale_bench, cache | `benchmarks/scale_bench.zig:193`; `src/cache.zig:125-131` (BENCH-2) | 100K tier never completes | [#313](https://gitlab.com/devnw/zig/dns/-/issues/313) | Release allocator and/or O(1) DnsCache; complete within budget | **Resolved** (2026-06-12) |
+| GAP-0859 | P2 | Benches measure legacy Cache, not production DnsCache; baseline non-representative | benchmarks | `benchmarks/` target legacy Cache (BENCH-3) | Wrong baseline | [#314](https://gitlab.com/devnw/zig/dns/-/issues/314) | Re-target benchmarks at DnsCache; re-capture baseline | **Resolved** (2026-06-12) |
+| GAP-0849 | P2 | bench.zig uses removed std.time.Timer (9 sites); `zig build bench` fails | benchmarks | `benchmarks/bench.zig` -- 9 sites | Bench cannot build | [#216](https://gitlab.com/devnw/zig/dns/-/issues/216) | Migrate to current timer API; bench builds | **Resolved** (2026-06-12) |
+| GAP-0860 | P2 | page_allocator per thread-pool task | parallel.zig | `src/parallel.zig:521-532,652-666` (RF-1) | mmap/munmap per task | [#315](https://gitlab.com/devnw/zig/dns/-/issues/315) | Pooled/arena allocator per task | **Resolved** (2026-06-12, a742417) |
+| GAP-0861 | P2 | putRecordWithKey O(N^2) rdata copy | dns_cache.zig | `src/resolver/dns_cache.zig:511-548` (RF-3) | Quadratic on multi-record pack | [#316](https://gitlab.com/devnw/zig/dns/-/issues/316) | Linear (single-pass / pre-sized) rdata copy | **Resolved** (2026-06-12, 5e9c6e2) |
+| GAP-0888 | P2 | TCP length-prefix + payload sent as 2 writeAll calls under TCP_NODELAY -> 2 segments/syscalls per query | tcp, connection_pool | `tcp.zig:57-58`; `connection_pool.zig:587-588,694-695,741-742` (PF-AUD-03) | 2 segments/syscalls per TCP query | [#322](https://gitlab.com/devnw/zig/dns/-/issues/322) | Coalesce prefix+payload into one write (buffer/writev) | **Resolved** (2026-06-12, 3527d69) |
+| GAP-0862 | P3 | Full sort on every addRule (RPZ + split_dns) | rpz, split_dns | `rpz.zig:141,244`; `split_dns.zig:298` (RF-4) | O(n log n) per insert | [#328](https://gitlab.com/devnw/zig/dns/-/issues/328) | Defer/batch sort | **Resolved** (2026-06-12, 2dd64a4) |
+| GAP-0863 | P3 | Naive substring search in split_dns matchContains | split_dns.zig | `src/resolver/split_dns.zig:89-101` (RF-5) | Suboptimal match cost | [#329](https://gitlab.com/devnw/zig/dns/-/issues/329) | Use std.mem.indexOf / better matcher | **Resolved** (2026-06-12, 4f330a7) |
+| GAP-0864 | P3 | getPool() unconditional mutex | parallel.zig | `src/parallel.zig:94-101` (RF-2) | Lock on hot accessor | [#330](https://gitlab.com/devnw/zig/dns/-/issues/330) | Won't Do: mutex is correct primitive; lock-free fast path adds complexity for negligible gain | **Won't Do** (2026-06-12) |
+| GAP-0885 | P3 | selectWeighted batchy WRR distribution | failover.zig | `src/resolver/failover.zig:289-311` (QR-AUD-11) | Uneven short-term load | [#338](https://gitlab.com/devnw/zig/dns/-/issues/338) | Smooth WRR interleaving | **Resolved** (2026-06-12, ebe6d24, 80573a2) |
+| GAP-0887 | P3 | applyCase0x20 heap alloc per delegation hop; stack variant possible | name, recursive | `src/name.zig:711-717`; `src/recursive.zig:570` (PF-AUD-02) | 1 alloc per hop | [#339](https://gitlab.com/devnw/zig/dns/-/issues/339) | Stack-buffer variant for in-bound names | **Resolved** (2026-06-12, 53a0dcc) |
+| GAP-0889 | P3 | ConnectionPool fully linear-scan; acquire scans up to 3x | connection_pool.zig | `src/transports/connection_pool.zig:299-356,483-491` (PF-AUD-04) | O(n) (up to 3x) per acquire | [#340](https://gitlab.com/devnw/zig/dns/-/issues/340) | Single-pass / index-assisted acquire | **Resolved** (2026-06-12, d369a05) |
+| GAP-0890 | Info | dnssec signed_data ArrayList no capacity reservation | dnssec.zig | `src/resolver/dnssec.zig:378,397-423` (PF-AUD-05) | ~7 reallocs/verify (crypto dominates) | [#341](https://gitlab.com/devnw/zig/dns/-/issues/341) | ensureTotalCapacity before building signed_data | **Resolved** (2026-06-12, b7bb3d5) |
 
 ---
 

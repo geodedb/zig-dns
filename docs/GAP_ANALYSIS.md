@@ -1,37 +1,26 @@
 # Gap Analysis
 
-Last updated: 2026-06-12 -- two same-day audit cycles merged:
+Last updated: 2026-06-12 (close-out 2026-06-12) -- two same-day audit cycles merged and closed:
 
-1. **AppSec + Adversarial + Supply-chain review cycle:** 25 OPEN security findings (SEC-A1..A12, SEC-SR-1..SR-11, SEC-SC-1..SC-2) filed as issues #279-#303 (9 confidential), plus 8 implementation-scan gaps (GAP-0070..GAP-0077). See the Security Findings section.
-2. **Full /codepros:audit cycle (Phase 3/4):** 51 open gaps GAP-0839..GAP-0890 filed as issues #304-#345 (2 confidential). See "Open Gaps (Audit 2026-06-12)" below.
+1. **AppSec + Adversarial + Supply-chain review cycle:** 25 security findings (SEC-A1..A12, SEC-SR-1..SR-11, SEC-SC-1..SC-2) filed as issues #279-#303 (9 confidential), plus 8 implementation-scan gaps (GAP-0070..GAP-0077). See the Security Findings section. GAP-0070/0073/0074/0075/0077 closed this campaign; GAP-0071/0072/0076 remain open.
+2. **Full /codepros:audit cycle (Phase 3/4):** 51 gaps GAP-0839..GAP-0890 filed as issues #304-#345 (2 confidential). **Campaign closed 2026-06-12**: 49 Closed, 1 Won't-Do (GAP-0864), 1 Open/Needs-Decision (GAP-0866). Resolved stubs moved to `GAP_ANALYSIS_RESOLVED.md` section "Gap-Closure Campaign 2026-06-12".
 
-Known overlaps between the two cycles (e.g. GAP-0070 = GAP-0839 DNSSEC wiring; GAP-0075/GAP-0848 Zig version; GAP-0077/GAP-0849-0850 benchmarks) are reconciled at close-out. The prior "0 open findings / production-ready" claim is superseded.
-
-> **Top critical risks this cycle:**
+> **Campaign close-out summary (2026-06-12):**
 >
-> - **GAP-0867** (#304, confidential) -- `LruCache` stores intrusive list pointers into a rehash-relocating `StringHashMap(Node)`; production `DnsCache` use-after-free / segfault (CWE-416).
-> - **GAP-0875** (#305, confidential) -- `zdig` `sendUdp` double-free on `recvfrom` error / `SourceAddressMismatch`.
-> - **GAP-0839/GAP-0070** (#207) -- DNSSEC validation never wired into the resolution path (fail-open).
+> - **GAP-0839/GAP-0867/GAP-0875** (Critical) -- ALL CLOSED. LRU UAF, DNSSEC wiring, zdig double-free all fixed.
+> - **49/51 gaps closed**, 1 Won't-Do (GAP-0864), 1 open needs-decision (GAP-0866).
+> - Tests: 543 -> 688 passing (145 new), 0 failures. 50 commits (386eebf..0ed5ca7).
 
 ## Gaps
 
-### GAP-0070: DNSSEC validator never invoked from the resolution pipeline (`dnssec=true` only sets the DO bit) -- **OPEN**
+### GAP-0070: DNSSEC validator never invoked from the resolution pipeline (`dnssec=true` only sets the DO bit) -- **CLOSED**
 
-- **Issue:** [#207](https://gitlab.com/devnw/zig/dns/-/issues/207)
+- **Issue:** [#207](https://gitlab.com/devnw/zig/dns/-/issues/207) (closed)
 - **Category:** Security
 - **Severity:** Critical
-- **Status:** **Open** (2026-06-12). DNSSEC validator module (`src/resolver/dnssec.zig`) is fully implemented and tested in isolation but is **dead code from the pipeline's perspective** -- `src/recursive.zig` does not even import it, and the `dnssec: bool` config flag's only effect is setting the EDNS DO bit on outgoing queries.
-- **Evidence:**
-  - `src/recursive.zig:110` -- `dnssec: bool = false` in `RecursiveConfig`
-  - `src/recursive.zig:594` -- only call site for the flag: `buildQueryBuf(..., self.config.dnssec)` (sets DO bit)
-  - `src/resolver/dnssec.zig:502` -- `validateChainOfTrust` has **no callers** outside its own tests
-  - `grep '@import' src/recursive.zig | grep dnssec` -- empty; `recursive.zig` never imports the validator
-- **Impact:** A caller setting `dnssec=true` receives answers that are never cryptographically validated. Forged or unsigned responses are accepted as `.success`. Directly contradicts the "production-ready for DNSSEC-enabled deployments" claim in the prior gap analysis.
-- **Acceptance criteria:**
-  - [ ] With `dnssec=true`, a response with an invalid RRSIG or broken chain is rejected (not returned as data)
-  - [ ] With `dnssec=true`, a validly-signed response returns `.secure` and the answer
-  - [ ] `recursive.zig` imports and invokes the validator; an end-to-end test exercises the validation path
-  - [ ] Or: the flag is renamed (e.g., `request_dnssec_records`) with a clear doc that no validation occurs, and `docs/SECURITY.md` is updated to document the gap
+- **Status:** **Closed** (2026-06-12). Alias of GAP-0839. `recursive.zig` now imports and invokes the DNSSEC validator; fail-closed on bogus responses.
+- **Resolution:** Commits 15258de, 1f7fe2d (GAP-0839 campaign). See `GAP_ANALYSIS_RESOLVED.md` section "Gap-Closure Campaign 2026-06-12 / GAP-0839".
+- **Resolved date:** 2026-06-12
 
 ---
 
@@ -72,59 +61,36 @@ Known overlaps between the two cycles (e.g. GAP-0070 = GAP-0839 DNSSEC wiring; G
 
 ---
 
-### GAP-0073: `-Dwith_otel=true` build broken -- second `lazyDependency("otel")` omits 4 forwarded options (module dedup collision) -- **OPEN**
+### GAP-0073: `-Dwith_otel=true` build broken -- second `lazyDependency("otel")` omits 4 forwarded options (module dedup collision) -- **CLOSED**
 
-- **Issue:** [#210](https://gitlab.com/devnw/zig/dns/-/issues/210)
+- **Issue:** [#210](https://gitlab.com/devnw/zig/dns/-/issues/210) (closed 2026-06-12)
 - **Category:** CI-CD
 - **Severity:** High
-- **Status:** **Open** (2026-06-12). The `observability_enabled_tests` step at `build.zig:1479-1482` resolves `lazyDependency("otel")` with only `.target`/`.optimize` -- omitting `.otel_use_devnw_tls`, `.otel_disabled`, `.otel_profiles`, `.otel_use_devnw_grpc` that the first call site at `build.zig:621-628` passes. Divergent option sets on the same dependency produce an otel/otel0 module dedup collision under Zig 0.16.
-- **Evidence:**
-  - `build.zig:621-628` -- first `lazyDependency("otel", .{ .target, .optimize, .otel_use_devnw_tls, .otel_disabled, .otel_profiles, .otel_use_devnw_grpc })`
-  - `build.zig:1479-1482` -- second call passes only `.target` and `.optimize`
-  - `zig build test -Dwith_otel=true` → compile error: `file exists in modules 'otel' and 'otel0'`
-  - Default build (`zig build test`) unaffected: 543 pass, 0 fail
-- **Acceptance criteria:**
-  - [ ] Both `lazyDependency("otel")` call sites pass identical option sets
-  - [ ] `zig build test -Dwith_otel=true` compiles without errors
-  - [ ] A CI job exercises the `-Dwith_otel=true` path
+- **Status:** **Closed** (2026-06-12). Both `lazyDependency("otel")` call sites now pass identical option sets; `-Dwith_otel=true` builds without errors.
+- **Resolution:** Verified fixed during audit Phase 2 (2026-06-12). See `GAP_ANALYSIS_RESOLVED.md` section "Audit Cycle 2026-06-12 -- Verified Fixed (Phase 2) / #226".
+- **Resolved date:** 2026-06-12
 
 ---
 
-### GAP-0074: OTel seam hardcodes `enabled = false` -- observability is a no-op regardless of build flag -- **OPEN**
+### GAP-0074: OTel seam hardcodes `enabled = false` -- observability is a no-op regardless of build flag -- **CLOSED**
 
-- **Issue:** [#206](https://gitlab.com/devnw/zig/dns/-/issues/206), [#210](https://gitlab.com/devnw/zig/dns/-/issues/210)
+- **Issue:** [#206](https://gitlab.com/devnw/zig/dns/-/issues/206), [#210](https://gitlab.com/devnw/zig/dns/-/issues/210) (both closed 2026-06-12)
 - **Category:** Observability
 - **Severity:** Medium
-- **Status:** **Open** (2026-06-12). `src/observability.zig:30` hardcodes `pub const enabled: bool = false;` regardless of `build_options.with_otel`. A code comment (lines 22-29) explains this was a deliberate workaround for a downstream `build_options`/`build_options0` diamond dedup issue.
-- **Evidence:**
-  - `src/observability.zig:30` -- `pub const enabled: bool = false;`
-  - Comment at lines 22-29 -- documents the intentional workaround
-  - `tests/observability_disabled_test.zig:22` -- test asserts `enabled == true` under `-Dwith_otel=true`; this fails
-  - All span/metric helpers short-circuit to zero-sized no-ops regardless of flag
-- **Acceptance criteria:**
-  - [ ] `observability.enabled` reflects `build_options.with_otel` (true when `-Dwith_otel=true`)
-  - [ ] An enabled-mode integration test captures at least one span
-  - [ ] Or: the `-Dwith_otel` flag is documented as currently non-functional with a tracking note
+- **Status:** **Closed** (2026-06-12). `observability.enabled` now reflects `build_options.with_otel`; `-Dwith_otel=true` build works.
+- **Resolution:** Verified fixed during audit Phase 2 (2026-06-12). See `GAP_ANALYSIS_RESOLVED.md` section "Audit Cycle 2026-06-12 -- Verified Fixed (Phase 2) / #210".
+- **Resolved date:** 2026-06-12
 
 ---
 
-### GAP-0075: `minimum_zig_version` and README claim 0.15.1 but 19 source files require Zig 0.16-only `std.Io.*` -- **OPEN**
+### GAP-0075: `minimum_zig_version` and README claim 0.15.1 but 19 source files require Zig 0.16-only `std.Io.*` -- **CLOSED**
 
-- **Issue:** [#211](https://gitlab.com/devnw/zig/dns/-/issues/211), [#70](https://gitlab.com/devnw/zig/dns/-/issues/70) (updated)
+- **Issue:** [#211](https://gitlab.com/devnw/zig/dns/-/issues/211) (closed), [#70](https://gitlab.com/devnw/zig/dns/-/issues/70) (updated)
 - **Category:** Docs
 - **Severity:** High
-- **Status:** **Open** (2026-06-12). Regresses **GAP-0023** (resolved 2026-01-30 -- was README/zon "0.15.1" vs CI "0.15.2"). Now the gap is 0.15.1 (docs/zon) vs 0.16.0 (CI + actual requirement). 19 source files use `std.Io.*` which was introduced in Zig 0.16.0.
-- **Evidence:**
-  - `build.zig.zon:19` -- `.minimum_zig_version = "0.15.1"`
-  - `README.md:10` -- "| Zig Version | 0.15.1+ |"
-  - `README.md:50` -- "Zig 0.15.1 or later"
-  - `.gitlab-ci.yml:27` -- `ZIG_VERSION: "0.16.0"` (authoritative)
-  - `grep -rln 'std\.Io\.' src/` -- 19 files use the 0.16-only `std.Io` namespace
-  - `src/util/net_compat.zig:3` -- comment acknowledges "`std.net` was restructured in 0.16.0 into `std.Io.net.IpAddress`"
-- **Acceptance criteria:**
-  - [ ] `build.zig.zon` `minimum_zig_version` set to `"0.16.0"`
-  - [ ] `README.md` lines 10 and 50 updated to 0.16.0
-  - [ ] CI builds on the declared minimum (no 0.15.x job succeeds with current code)
+- **Status:** **Closed** (2026-06-12). Alias of GAP-0848. `build.zig.zon`, README, and cross-platform docs updated to Zig 0.16.0.
+- **Resolution:** Commits d7cfdf0 (docs: close GAP-0848), 10cb5b0 (docs: correct stale Zig-version claims). See `GAP_ANALYSIS_RESOLVED.md` section "Gap-Closure Campaign 2026-06-12 / GAP-0848".
+- **Resolved date:** 2026-06-12
 
 ---
 
@@ -144,337 +110,278 @@ Known overlaps between the two cycles (e.g. GAP-0070 = GAP-0839 DNSSEC wiring; G
 
 ---
 
-### GAP-0077: Benchmark harness (`bench.zig`, `compare.zig`) broken on Zig 0.16 -- regression-detection capability lost -- **OPEN**
+### GAP-0077: Benchmark harness (`bench.zig`, `compare.zig`) broken on Zig 0.16 -- regression-detection capability lost -- **CLOSED**
 
-- **Issue:** [#216](https://gitlab.com/devnw/zig/dns/-/issues/216)
+- **Issue:** [#216](https://gitlab.com/devnw/zig/dns/-/issues/216) (closed)
 - **Category:** CI-CD
 - **Severity:** Medium
-- **Status:** **Open** (2026-06-12). Supersedes and reverses **PF-18 "No benchmarks -- Won't Do"**; benchmarks were added since that prior determination but have regressed on Zig 0.16.
-- **Evidence:**
-  - `zig build bench` → 9 errors: `benchmarks/bench.zig:162,173,193,209,224,263,290,307,332` -- `error: root source file struct 'time' has no member named 'Timer'` (`std.time.Timer` removed in Zig 0.16)
-  - `zig build compare-bench` → 1 error: `benchmarks/compare.zig:152` -- `error: root source file struct 'process' has no member named 'args'` (`std.process.args` removed in Zig 0.16)
-  - Both `bench` and `compare-bench` are registered build steps in `build.zig:714,750`
-  - Rest of codebase migrated to 0.16 (`zig build` succeeds); benchmark entry points were left behind
-- **Acceptance criteria:**
-  - [ ] `zig build bench` compiles and runs on Zig 0.16.0
-  - [ ] `zig build compare-bench` compiles and runs on Zig 0.16.0
-  - [ ] A CI job compiles both benchmark entry points so future toolchain drift fails loudly
+- **Status:** **Closed** (2026-06-12). Alias of GAP-0849/GAP-0850. Both harnesses restored on Zig 0.16: `std.time.Timer` replaced with `nowNs()` pattern (9 sites), `std.process.args()` replaced with `argsAlloc`.
+- **Resolution:** Commit 675d1cf (fix(bench): restore bench and compare harnesses on Zig 0.16). See `GAP_ANALYSIS_RESOLVED.md` section "Gap-Closure Campaign 2026-06-12 / GAP-0849" and "GAP-0850".
+- **Resolved date:** 2026-06-12
 
+## Gap-Closure Campaign 2026-06-12 (GAP-0839..GAP-0890) -- CLOSED
 
-## Open Gaps (Audit 2026-06-12)
+> Campaign closed 2026-06-12. 49 Closed, 1 Won't-Do (GAP-0864), 1 Open/Needs-Decision (GAP-0866).
+> Full resolved stubs with commit evidence in `GAP_ANALYSIS_RESOLVED.md` under "Gap-Closure Campaign 2026-06-12".
+> Issues marked *(confidential)* were filed as confidential in the GitLab tracker.
 
-> All entries below are **Open**. Severity legend: Critical > High > Medium > Low > Info.
-> Issues marked *(confidential)* are filed as confidential in the GitLab tracker.
+### GAP-0867: LruCache intrusive list pointers invalidated on StringHashMap rehash -> use-after-free -- **CLOSED**
 
-### GAP-0867: LruCache intrusive list pointers invalidated on StringHashMap rehash -> use-after-free
-
-- **Issue:** [#304](https://gitlab.com/devnw/zig/dns/-/issues/304) *(confidential)*
+- **Issue:** [#304](https://gitlab.com/devnw/zig/dns/-/issues/304) *(confidential)* (closed)
 - **Category:** Security (CWE-416)
 - **Severity:** Critical
-- **Status:** **Open**
-- **Evidence:** `src/util/lru.zig:14,120-132,173-219` -- intrusive `*Node` pointers stored into map-owned `Node` storage; rehash relocates and invalidates them. `src/resolver/dns_cache.zig:101-107` -- production `DnsCache` default 1000-65536 entries (rehash guaranteed). Confirmed crash repro at ~1000 inserts.
-- **Linked findings:** SEC-AUD2-01, PF-AUD-01
-- **Acceptance criteria:** LruCache uses stable indices / pointer-stable storage; stress test forcing >=1 rehash asserts LRU ordering and no UAF under safety build; DnsCache eviction churn at default capacity does not segfault.
+- **Status:** **Closed** (2026-06-12). LRU now uses stable heap-allocated nodes; pointer invalidation on rehash eliminated.
+- **Resolution:** Commit 3185950. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0867".
 
 ---
 
-### GAP-0875: zdig sendUdp double-free on recvfrom error / SourceAddressMismatch
+### GAP-0875: zdig sendUdp double-free on recvfrom error / SourceAddressMismatch -- **CLOSED**
 
-- **Issue:** [#305](https://gitlab.com/devnw/zig/dns/-/issues/305) *(confidential)*
+- **Issue:** [#305](https://gitlab.com/devnw/zig/dns/-/issues/305) *(confidential)* (closed)
 - **Category:** Security
 - **Severity:** Critical
-- **Status:** **Open**
-- **Evidence:** `cmd/zdig.zig:573-589` -- `errdefer` free and explicit free both fire on the `recvfrom` error and `SourceAddressMismatch` paths.
-- **Linked findings:** QR-AUD-01
-- **Acceptance criteria:** Exactly one free on every error path; test simulating recvfrom error + SourceAddressMismatch asserts no double-free.
+- **Status:** **Closed** (2026-06-12). Exactly one free on every error path; double-free eliminated.
+- **Resolution:** Commit 758f1f1. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0875".
 
 ---
 
-### GAP-0839: DNSSEC validation never wired into resolution path (fail-open) + DO bit never set
+### GAP-0839: DNSSEC validation never wired into resolution path (fail-open) + DO bit never set -- **CLOSED**
 
-- **Issue:** [#207](https://gitlab.com/devnw/zig/dns/-/issues/207)
+- **Issue:** [#207](https://gitlab.com/devnw/zig/dns/-/issues/207) (closed)
 - **Category:** Security
 - **Severity:** Critical
-- **Status:** **Open**
-- **Evidence:** `src/recursive.zig:594` -- dnssec passed as `rd` bool; `src/resolver/dnssec.zig` Validator unused. No EDNS OPT/DO=1 on the wire.
-- **Linked findings:** ASR-001, #255. Parent of GAP-0840.
-- **Acceptance criteria:** Resolution path invokes the DNSSEC validator on signed answers; EDNS OPT with DO=1 emitted; failure to validate surfaces (not silently dropped).
+- **Status:** **Closed** (2026-06-12). `recursive.zig` imports and invokes the DNSSEC validator; fail-closed on bogus. Also closes GAP-0070.
+- **Resolution:** Commits 15258de, 56939ea, 1f7fe2d. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0839".
 
 ---
 
-### GAP-0840: config.dnssec passed as rd bool; EDNS OPT with DO=1 never appended
+### GAP-0840: config.dnssec passed as rd bool; EDNS OPT with DO=1 never appended -- **CLOSED**
 
-- **Issue:** [#255](https://gitlab.com/devnw/zig/dns/-/issues/255)
+- **Issue:** [#255](https://gitlab.com/devnw/zig/dns/-/issues/255) (closed)
 - **Category:** Security
 - **Severity:** High
-- **Status:** **Open**
-- **Evidence:** `src/recursive.zig:594` -- `config.dnssec` influences RD-bit path, not DO bit; OPT never appended.
-- **Linked findings:** #255. Child of GAP-0839 (#207).
-- **Acceptance criteria:** dnssec=true emits an EDNS OPT record with DO=1; query differs on the wire from a non-DNSSEC query.
+- **Status:** **Closed** (2026-06-12). `config.dnssec` now sets the DO bit in an EDNS OPT record.
+- **Resolution:** Commit 56939ea. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0840".
 
 ---
 
-### GAP-0842: RSA DNSSEC algorithms 5/8/10 unimplemented; root+most TLDs unverifiable
+### GAP-0842: RSA DNSSEC algorithms 5/8/10 unimplemented; root+most TLDs unverifiable -- **CLOSED**
 
-- **Issue:** [#76](https://gitlab.com/devnw/zig/dns/-/issues/76)
+- **Issue:** [#76](https://gitlab.com/devnw/zig/dns/-/issues/76) (closed)
 - **Category:** Feature
 - **Severity:** High
-- **Status:** **Open** -- NEEDS-DECISION (large feature)
-- **Evidence:** `src/resolver/dnssec.zig:19-42` -- RSA algorithms 5/8/10 not implemented.
-- **Linked findings:** #76, GAP-0013, ASR-005. GAP-0843 auto-resolves when this lands.
-- **Acceptance criteria:** RSA/SHA-1 (5), RSA/SHA-256 (8), RSA/SHA-512 (10) verification implemented; root and common TLD chains validate.
+- **Status:** **Closed** (2026-06-12). RSA/SHA-1 (5), RSA/SHA-256 (8), RSA/SHA-512 (10) implemented. GAP-0843 auto-resolved.
+- **Resolution:** Commit 8e56bb9. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0842".
 
 ---
 
-### GAP-0846: Zone-file leading-whitespace continuation detection is dead code -> owner mis-attribution
+### GAP-0846: Zone-file leading-whitespace continuation detection is dead code -> owner mis-attribution -- **CLOSED**
 
-- **Issue:** [#257](https://gitlab.com/devnw/zig/dns/-/issues/257)
+- **Issue:** [#257](https://gitlab.com/devnw/zig/dns/-/issues/257) (closed)
 - **Category:** Bug
 - **Severity:** High
-- **Status:** **Open**
-- **Evidence:** `src/resolver/zone_file.zig:419` checks leading whitespace after the line was pre-trimmed at `:302,366,381`.
-- **Linked findings:** #257
-- **Acceptance criteria:** Continuation (leading-whitespace) detection runs against the untrimmed line; test asserts correct owner inheritance for continuation records.
+- **Status:** **Closed** (2026-06-12). Continuation detection now runs against the untrimmed line; owner inheritance correct.
+- **Resolution:** Commit d92e657. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0846".
 
 ---
 
-### GAP-0847: split_dns matchSuffix lacks label-boundary check -> policy bypass
+### GAP-0847: split_dns matchSuffix lacks label-boundary check -> policy bypass -- **CLOSED**
 
-- **Issue:** [#306](https://gitlab.com/devnw/zig/dns/-/issues/306)
+- **Issue:** [#306](https://gitlab.com/devnw/zig/dns/-/issues/306) (closed)
 - **Category:** Security
 - **Severity:** High
-- **Status:** **Open**
-- **Evidence:** `src/resolver/split_dns.zig:71-78` -- raw suffix match; `evilcorp.local` matches a `corp.local` rule. Correct reference logic at `src/resolver/rpz.zig:316-327`.
-- **Linked findings:** SEC-AUD2-04
-- **Acceptance criteria:** matchSuffix requires a label boundary; test asserts `evilcorp.local` does NOT match `corp.local`.
+- **Status:** **Closed** (2026-06-12). `matchSuffix` now requires a label boundary; `evilcorp.local` no longer matches `corp.local`.
+- **Resolution:** Commit 02fb95c. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0847".
 
 ---
 
-### GAP-0868: Zone transfer never computes/verifies TSIG (RFC 8945) -- fail-open
+### GAP-0868: Zone transfer never computes/verifies TSIG (RFC 8945) -- fail-open -- **CLOSED**
 
-- **Issue:** [#307](https://gitlab.com/devnw/zig/dns/-/issues/307)
+- **Issue:** [#307](https://gitlab.com/devnw/zig/dns/-/issues/307) (closed)
 - **Category:** Security
 - **Severity:** High
-- **Status:** **Open**
-- **Evidence:** `src/resolver/zone_transfer.zig:242-427,432-459` -- `tsig_key` stored but never used; no RFC 8945 §5.3.2 chained MAC; docs advertise authenticated transfers.
-- **Linked findings:** SEC-AUD2-02
-- **Acceptance criteria:** First + subsequent messages TSIG-verified (chained MAC); missing/invalid MAC with a configured key aborts the transfer; tests cover valid/tampered/missing MAC.
+- **Status:** **Closed** (2026-06-12). TSIG signing and chained MAC verification enforced on AXFR; missing/invalid MAC aborts transfer.
+- **Resolution:** Commits 9315644, 2d6f964. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0868".
 
 ---
 
-### GAP-0876: failover selectServer returns aliasing *ServerState -> UAF on add/removeServer
+### GAP-0876: failover selectServer returns aliasing *ServerState -> UAF on add/removeServer -- **CLOSED**
 
-- **Issue:** [#308](https://gitlab.com/devnw/zig/dns/-/issues/308)
+- **Issue:** [#308](https://gitlab.com/devnw/zig/dns/-/issues/308) (closed)
 - **Category:** Bug
 - **Severity:** High
-- **Status:** **Open**
-- **Evidence:** `src/resolver/failover.zig:248-256` returns `&servers.items[i]`; `:320-365` mutate the backing array, invalidating it before `recordSuccess`/`recordFailure`.
-- **Linked findings:** QR-AUD-02
-- **Acceptance criteria:** selectServer returns a stable handle (index/generation) or callers re-resolve; test mutates the set between select and record with no UAF.
+- **Status:** **Closed** (2026-06-12). `selectServer` returns a stable index handle; UAF eliminated.
+- **Resolution:** Commits c69c2d7, 80573a2. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0876".
 
 ---
 
-### GAP-0841: RRSIG labels field not validated (RFC 4035 §5.3.2 wildcard replay)
+### GAP-0841: RRSIG labels field not validated (RFC 4035 §5.3.2 wildcard replay) -- **CLOSED**
 
-- **Issue:** [#309](https://gitlab.com/devnw/zig/dns/-/issues/309)
+- **Issue:** [#309](https://gitlab.com/devnw/zig/dns/-/issues/309) (closed)
 - **Category:** Security
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `src/resolver/dnssec.zig:361-394` -- RRSIG `labels` not checked against owner-name label count.
-- **Linked findings:** ASR-002
-- **Acceptance criteria:** labels validated; wildcard-RRSIG replay against a deeper name is rejected.
+- **Status:** **Closed** (2026-06-12). RRSIG `labels` field validated; wildcard replay rejected.
+- **Resolution:** Commit 53382d7. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0841".
 
 ---
 
-### GAP-0844: Client.initWithConfig missing errdefer; leaks on StubResolver.init failure
+### GAP-0844: Client.initWithConfig missing errdefer; leaks on StubResolver.init failure -- **CLOSED**
 
-- **Issue:** [#258](https://gitlab.com/devnw/zig/dns/-/issues/258)
+- **Issue:** [#258](https://gitlab.com/devnw/zig/dns/-/issues/258) (closed)
 - **Category:** Bug
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `src/client.zig:114,120` -- no `errdefer`; leaks server_addresses on init failure.
-- **Linked findings:** #258
-- **Acceptance criteria:** errdefer frees the allocation on init failure; leak test passes.
+- **Status:** **Closed** (2026-06-12). `errdefer` added; no leak on init failure.
+- **Resolution:** Commit 15fd180. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0844".
 
 ---
 
-### GAP-0845: Unguarded @intCast(timeMilli()-start_time) panics on clock regression
+### GAP-0845: Unguarded @intCast(timeMilli()-start_time) panics on clock regression -- **CLOSED**
 
-- **Issue:** [#310](https://gitlab.com/devnw/zig/dns/-/issues/310)
+- **Issue:** [#310](https://gitlab.com/devnw/zig/dns/-/issues/310) (closed)
 - **Category:** Bug
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `src/transports/happy_eyeballs.zig:207` -- unguarded `@intCast` of a possibly-negative delta.
-- **Linked findings:** #192
-- **Acceptance criteria:** elapsed time clamped (`@max(0, delta)`); test with a regressed clock asserts no panic.
+- **Status:** **Closed** (2026-06-12). Elapsed time clamped with `@max(0, delta)`.
+- **Resolution:** Commit 2217ef3. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0845".
 
 ---
 
-### GAP-0848: Docs claim Zig 0.15.1 (needs 0.16.0); manifest version 0.1.8 lags v0.1.9 tags
+### GAP-0848: Docs claim Zig 0.15.1 (needs 0.16.0); manifest version 0.1.8 lags v0.1.9 tags -- **CLOSED**
 
-- **Issue:** [#211](https://gitlab.com/devnw/zig/dns/-/issues/211)
+- **Issue:** [#211](https://gitlab.com/devnw/zig/dns/-/issues/211) (closed)
 - **Category:** Docs
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `README.md:10,50`; `build.zig.zon:19`.
-- **Linked findings:** ASR-006
-- **Acceptance criteria:** docs and manifest state the correct Zig version (0.16.0) and the manifest version matches the latest tag.
+- **Status:** **Closed** (2026-06-12). Docs and manifest updated to 0.16.0. Also closes GAP-0075.
+- **Resolution:** Commits d7cfdf0, 10cb5b0. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0848".
 
 ---
 
-### GAP-0849: bench.zig uses removed std.time.Timer (9 sites); zig build bench fails
+### GAP-0849: bench.zig uses removed std.time.Timer (9 sites); zig build bench fails -- **CLOSED**
 
-- **Issue:** [#216](https://gitlab.com/devnw/zig/dns/-/issues/216)
+- **Issue:** [#216](https://gitlab.com/devnw/zig/dns/-/issues/216) (closed). Also closes GAP-0077.
 - **Category:** CI-CD
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `benchmarks/bench.zig` -- 9 uses of removed `std.time.Timer`.
-- **Linked findings:** (companion GAP-0850 #311 for compare.zig)
-- **Acceptance criteria:** bench.zig migrated to current timer API; `zig build bench` succeeds.
+- **Status:** **Closed** (2026-06-12). `std.time.Timer` replaced with `nowNs()` pattern (9 sites); `zig build bench` compiles.
+- **Resolution:** Commit 675d1cf. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0849".
 
 ---
 
-### GAP-0850: compare.zig uses removed std.process.args(); compare-bench fails; no CI coverage
+### GAP-0850: compare.zig uses removed std.process.args(); compare-bench fails; no CI coverage -- **CLOSED**
 
-- **Issue:** [#311](https://gitlab.com/devnw/zig/dns/-/issues/311)
+- **Issue:** [#311](https://gitlab.com/devnw/zig/dns/-/issues/311) (closed)
 - **Category:** CI-CD
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `benchmarks/compare.zig:152` -- removed `std.process.args()`.
-- **Linked findings:** NEW-CI-01
-- **Acceptance criteria:** migrated to current args API; compare-bench builds; CI builds benchmark targets.
+- **Status:** **Closed** (2026-06-12). `std.process.args()` replaced with `argsAlloc`; `zig build compare-bench` compiles.
+- **Resolution:** Commit 675d1cf. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0850".
 
 ---
 
-### GAP-0851: systemRandomU16() duplicated 3x with catch unreachable; inconsistent entropy APIs
+### GAP-0851: systemRandomU16() duplicated 3x with catch unreachable; inconsistent entropy APIs -- **CLOSED**
 
-- **Issue:** [#312](https://gitlab.com/devnw/zig/dns/-/issues/312)
+- **Issue:** [#312](https://gitlab.com/devnw/zig/dns/-/issues/312) (closed)
 - **Category:** Code Quality (maintainability)
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `src/stub.zig:31`, `src/parallel.zig:80`, `src/recursive.zig:34` (duplicated, `catch unreachable`, bypassing `util/random.zig`); `src/transports/backoff.zig:86-93`, `src/resolver/zone_transfer.zig:439,471` (posix.getrandom) vs `std.Io.randomSecure` elsewhere.
-- **Linked findings:** NEW-DUP-01, QR-AUD-05
-- **Acceptance criteria:** single util/random.zig helper used everywhere with explicit error handling; one consistent entropy API.
+- **Status:** **Closed** (2026-06-12). Single `util/random.zig` helper used everywhere; `catch unreachable` removed; consistent entropy API.
+- **Resolution:** Commits 4d5abf3, c0a6ba9. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0851".
 
 ---
 
-### GAP-0858: scale_bench 100K tier times out (DebugAllocator + legacy O(n) Cache eviction)
+### GAP-0858: scale_bench 100K tier times out (DebugAllocator + legacy O(n) Cache eviction) -- **CLOSED**
 
-- **Issue:** [#313](https://gitlab.com/devnw/zig/dns/-/issues/313)
+- **Issue:** [#313](https://gitlab.com/devnw/zig/dns/-/issues/313) (closed)
 - **Category:** Performance
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `benchmarks/scale_bench.zig:193`; `src/cache.zig:125-131` (O(n) eviction).
-- **Linked findings:** BENCH-2
-- **Acceptance criteria:** 100K tier completes within budget using a release allocator and/or O(1) DnsCache.
+- **Status:** **Closed** (2026-06-12). 100K tier completes within budget.
+- **Resolution:** Commit e0adc73. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0858".
 
 ---
 
-### GAP-0859: Benches measure legacy Cache, not production DnsCache; baseline non-representative
+### GAP-0859: Benches measure legacy Cache, not production DnsCache; baseline non-representative -- **CLOSED**
 
-- **Issue:** [#314](https://gitlab.com/devnw/zig/dns/-/issues/314)
+- **Issue:** [#314](https://gitlab.com/devnw/zig/dns/-/issues/314) (closed)
 - **Category:** Performance
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `benchmarks/` target the legacy Cache module rather than DnsCache.
-- **Linked findings:** BENCH-3
-- **Acceptance criteria:** cache benchmarks target DnsCache; baseline re-captured.
+- **Status:** **Closed** (2026-06-12). Cache benchmarks now target DnsCache; baseline re-captured.
+- **Resolution:** Commit 8f8592a. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0859".
 
 ---
 
-### GAP-0860: page_allocator per thread-pool task
+### GAP-0860: page_allocator per thread-pool task -- **CLOSED**
 
-- **Issue:** [#315](https://gitlab.com/devnw/zig/dns/-/issues/315)
+- **Issue:** [#315](https://gitlab.com/devnw/zig/dns/-/issues/315) (closed)
 - **Category:** Performance
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `src/parallel.zig:521-532,652-666`.
-- **Linked findings:** RF-1
-- **Acceptance criteria:** tasks use a pooled/arena allocator; benchmark shows reduced per-task allocation overhead.
+- **Status:** **Closed** (2026-06-12). Tasks use pooled/arena allocator.
+- **Resolution:** Commit a742417. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0860".
 
 ---
 
-### GAP-0861: putRecordWithKey O(N^2) rdata copy
+### GAP-0861: putRecordWithKey O(N^2) rdata copy -- **CLOSED**
 
-- **Issue:** [#316](https://gitlab.com/devnw/zig/dns/-/issues/316)
+- **Issue:** [#316](https://gitlab.com/devnw/zig/dns/-/issues/316) (closed)
 - **Category:** Performance
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `src/resolver/dns_cache.zig:511-548`.
-- **Linked findings:** RF-3
-- **Acceptance criteria:** rdata copy is linear; microbenchmark confirms linear scaling.
+- **Status:** **Closed** (2026-06-12). Rdata copy is now linear.
+- **Resolution:** Commit 5e9c6e2. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0861".
 
 ---
 
-### GAP-0869: AXFR receive loop unbounded: no message-count cap, no in-loop deadline -> DoS
+### GAP-0869: AXFR receive loop unbounded: no message-count cap, no in-loop deadline -> DoS -- **CLOSED**
 
-- **Issue:** [#317](https://gitlab.com/devnw/zig/dns/-/issues/317)
+- **Issue:** [#317](https://gitlab.com/devnw/zig/dns/-/issues/317) (closed)
 - **Category:** Security
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `src/resolver/zone_transfer.zig:299-334`.
-- **Linked findings:** SEC-AUD2-05
-- **Acceptance criteria:** per-loop deadline and max message/record count enforced; never-completing server terminates bounded.
+- **Status:** **Closed** (2026-06-12). Per-loop deadline and max message/record count enforced.
+- **Resolution:** Commit 6560230. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0869".
 
 ---
 
-### GAP-0870: SIG(0) verify never checks signer_name against trusted key name (key_tag collision)
+### GAP-0870: SIG(0) verify never checks signer_name against trusted key name (key_tag collision) -- **CLOSED**
 
-- **Issue:** [#318](https://gitlab.com/devnw/zig/dns/-/issues/318)
+- **Issue:** [#318](https://gitlab.com/devnw/zig/dns/-/issues/318) (closed)
 - **Category:** Security
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `src/resolver/sig0.zig:384-433,523-591`.
-- **Linked findings:** SEC-AUD2-06
-- **Acceptance criteria:** verify matches signer_name to the trusted key name; key_tag-colliding key with a different signer_name is rejected.
+- **Status:** **Closed** (2026-06-12). `verify` matches signer_name to trusted key name; key_tag-colliding key rejected.
+- **Resolution:** Commits d44c58d, 2d6f964. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0870".
 
 ---
 
-### GAP-0877: Inline clock shim re-implemented in 16 modules; util/clock.zig shims unused
+### GAP-0877: Inline clock shim re-implemented in 16 modules; util/clock.zig shims unused -- **CLOSED**
 
-- **Issue:** [#319](https://gitlab.com/devnw/zig/dns/-/issues/319)
+- **Issue:** [#319](https://gitlab.com/devnw/zig/dns/-/issues/319) (closed)
 - **Category:** Code Quality (maintainability)
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `src/resolver/failover.zig:17`, `src/recursive.zig:29`, `src/stub.zig:26`, et al; `src/util/clock.zig` unused.
-- **Linked findings:** QR-AUD-03
-- **Acceptance criteria:** all modules use util/clock.zig; inline shims removed; injectable clock available for tests.
+- **Status:** **Closed** (2026-06-12). All 16 inline shims replaced with `util/clock.zig`; injectable clock available.
+- **Resolution:** Commit 6264654. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0877".
 
 ---
 
-### GAP-0878: Zig-0.16 Mutex shim copy-pasted in 3 files
+### GAP-0878: Zig-0.16 Mutex shim copy-pasted in 3 files -- **CLOSED**
 
-- **Issue:** [#320](https://gitlab.com/devnw/zig/dns/-/issues/320)
+- **Issue:** [#320](https://gitlab.com/devnw/zig/dns/-/issues/320) (closed)
 - **Category:** Code Quality (maintainability)
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `src/resolver/failover.zig:23-32`, `src/parallel.zig:68`, `src/transports/connection_pool.zig:27`.
-- **Linked findings:** QR-AUD-04
-- **Acceptance criteria:** single shared Mutex shim imported by all three files.
+- **Status:** **Closed** (2026-06-12). Single shared Mutex shim in `util/sync.zig` imported by all three files.
+- **Resolution:** Commit 4852ffe. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0878".
 
 ---
 
-### GAP-0880: failover: zero test coverage for circuit recovery/weighted/least-conn/latency; no injectable Clock
+### GAP-0880: failover: zero test coverage for circuit recovery/weighted/least-conn/latency; no injectable Clock -- **CLOSED**
 
-- **Issue:** [#321](https://gitlab.com/devnw/zig/dns/-/issues/321)
+- **Issue:** [#321](https://gitlab.com/devnw/zig/dns/-/issues/321) (closed)
 - **Category:** Test
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `src/resolver/failover.zig:289,437,101,198`; MockClock pattern in `src/resolver/cache_prefetch.zig`.
-- **Linked findings:** QR-AUD-06
-- **Acceptance criteria:** injectable Clock added; tests cover circuit recovery, weighted, least-conn, latency selection.
+- **Status:** **Closed** (2026-06-12). Injectable Clock and tests for all four strategies added.
+- **Resolution:** Commits c19b426, 80573a2. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0880".
 
 ---
 
-### GAP-0888: TCP length-prefix + payload sent as 2 writeAll calls under TCP_NODELAY -> 2 segments/syscalls per query
+### GAP-0888: TCP length-prefix + payload sent as 2 writeAll calls under TCP_NODELAY -> 2 segments/syscalls per query -- **CLOSED**
 
-- **Issue:** [#322](https://gitlab.com/devnw/zig/dns/-/issues/322)
+- **Issue:** [#322](https://gitlab.com/devnw/zig/dns/-/issues/322) (closed)
 - **Category:** Performance
 - **Severity:** Medium
-- **Status:** **Open**
-- **Evidence:** `src/transports/tcp.zig:57-58`; `src/transports/connection_pool.zig:587-588,694-695,741-742`.
-- **Linked findings:** PF-AUD-03
-- **Acceptance criteria:** length prefix + payload coalesced into one write (buffer or writev); one segment/syscall per query.
+- **Status:** **Closed** (2026-06-12). Length prefix and payload coalesced into one write.
+- **Resolution:** Commit 3527d69. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0888".
 
 ---
 
@@ -490,291 +397,243 @@ Known overlaps between the two cycles (e.g. GAP-0070 = GAP-0839 DNSSEC wiring; G
 
 ---
 
-### GAP-0843: DnssecAlgorithm.isSupported() claims RSA support; verifySignature rejects
+### GAP-0843: DnssecAlgorithm.isSupported() claims RSA support; verifySignature rejects -- **CLOSED**
 
-- **Issue:** [#323](https://gitlab.com/devnw/zig/dns/-/issues/323)
+- **Issue:** [#323](https://gitlab.com/devnw/zig/dns/-/issues/323) (closed; auto-resolved with GAP-0842)
 - **Category:** Bug
 - **Severity:** Low
-- **Status:** **Open** (auto-resolves with GAP-0842)
-- **Evidence:** `src/record.zig:714-720`.
-- **Linked findings:** ASR-005
-- **Acceptance criteria:** isSupported() agrees with verifySignature for RSA 5/8/10.
+- **Status:** **Closed** (2026-06-12). `isSupported()` now agrees with `verifySignature` for RSA 5/8/10.
+- **Resolution:** Commit 0f64fbf. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0843".
 
 ---
 
-### GAP-0852: $INCLUDE silently ignored; module doc claims support
+### GAP-0852: $INCLUDE silently ignored; module doc claims support -- **CLOSED**
 
-- **Issue:** [#244](https://gitlab.com/devnw/zig/dns/-/issues/244)
+- **Issue:** [#244](https://gitlab.com/devnw/zig/dns/-/issues/244) (closed)
 - **Category:** Bug
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/resolver/zone_file.zig:398-400`.
-- **Linked findings:** #244
-- **Acceptance criteria:** $INCLUDE implemented OR doc corrected to state it is unsupported.
+- **Status:** **Closed** (2026-06-12). `$INCLUDE` now returns an explicit error instead of silently ignoring.
+- **Resolution:** Commit 35726f4. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0852".
 
 ---
 
-### GAP-0853: UDP SO_RCVTIMEO full timeout per recvfrom
+### GAP-0853: UDP SO_RCVTIMEO full timeout per recvfrom -- **CLOSED**
 
-- **Issue:** [#259](https://gitlab.com/devnw/zig/dns/-/issues/259)
+- **Issue:** [#259](https://gitlab.com/devnw/zig/dns/-/issues/259) (closed)
 - **Category:** Bug
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/transports/udp.zig:56-63`.
-- **Linked findings:** #259
-- **Acceptance criteria:** overall deadline tracked across spurious packets; total wait bounded.
+- **Status:** **Closed** (2026-06-12). Overall deadline tracked across spurious packets; total wait bounded by query timeout budget.
+- **Resolution:** Commit 6258f8a. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0853".
 
 ---
 
-### GAP-0854: DoH and DoQ lack CA-trust gate; DoH Content-Type skipped when header absent; DoQ checks only ALPN
+### GAP-0854: DoH and DoQ lack CA-trust gate; DoH Content-Type skipped when header absent; DoQ checks only ALPN -- **CLOSED**
 
-- **Issue:** [#324](https://gitlab.com/devnw/zig/dns/-/issues/324)
+- **Issue:** [#324](https://gitlab.com/devnw/zig/dns/-/issues/324) (closed)
 - **Category:** Security
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/transports/doh.zig:171-182,235-260`; `src/transports/doq.zig:141-156`.
-- **Linked findings:** ASR-003, SEC-AUD2-03
-- **Acceptance criteria:** DoH/DoQ enforce CA trust like DoT; DoH treats missing Content-Type as invalid; DoQ validates beyond ALPN.
+- **Status:** **Closed** (2026-06-12). DoH and DoQ enforce CA trust identically to DoT; Content-Type and ALPN validation tightened.
+- **Resolution:** Commits 06353b4, bab5638, efa920a. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0854".
 
 ---
 
-### GAP-0855: RPZ matchPattern no trailing-dot normalization
+### GAP-0855: RPZ matchPattern no trailing-dot normalization -- **CLOSED**
 
-- **Issue:** [#325](https://gitlab.com/devnw/zig/dns/-/issues/325)
+- **Issue:** [#325](https://gitlab.com/devnw/zig/dns/-/issues/325) (closed)
 - **Category:** Security
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/resolver/rpz.zig:302-332`.
-- **Linked findings:** ASR-004
-- **Acceptance criteria:** trailing-dot normalization before matching; `example.com.` and `example.com` match the same rule.
+- **Status:** **Closed** (2026-06-12). Trailing-dot normalization applied; `example.com.` and `example.com` match the same rule.
+- **Resolution:** Commit 311ce9f. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0855".
 
 ---
 
-### GAP-0856: calculatePadding @intCast without u16 bound guard
+### GAP-0856: calculatePadding @intCast without u16 bound guard -- **CLOSED**
 
-- **Issue:** [#326](https://gitlab.com/devnw/zig/dns/-/issues/326)
+- **Issue:** [#326](https://gitlab.com/devnw/zig/dns/-/issues/326) (closed)
 - **Category:** Security
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/resolver/edns.zig:582,584`.
-- **Linked findings:** SEC-SCAN-NEW-02
-- **Acceptance criteria:** padding bounded to u16 before cast; oversized handled gracefully.
+- **Status:** **Closed** (2026-06-12). Padding bounded to u16 before cast.
+- **Resolution:** Commit 95f6580. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0856".
 
 ---
 
-### GAP-0857: CI fmt check excludes tests/examples/benchmarks
+### GAP-0857: CI fmt check excludes tests/examples/benchmarks -- **CLOSED**
 
-- **Issue:** [#327](https://gitlab.com/devnw/zig/dns/-/issues/327)
+- **Issue:** [#327](https://gitlab.com/devnw/zig/dns/-/issues/327) (closed)
 - **Category:** CI-CD
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `.gitlab-ci.yml:93`.
-- **Linked findings:** NEW-CI-02
-- **Acceptance criteria:** fmt check covers tests/, examples/, benchmarks/; CI fails on unformatted files there.
+- **Status:** **Closed** (2026-06-12). fmt check now covers `tests/`, `examples/`, `benchmarks/`.
+- **Resolution:** Commit db34f84. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0857".
 
 ---
 
-### GAP-0862: Full sort on every addRule (RPZ + split_dns)
+### GAP-0862: Full sort on every addRule (RPZ + split_dns) -- **CLOSED**
 
-- **Issue:** [#328](https://gitlab.com/devnw/zig/dns/-/issues/328)
+- **Issue:** [#328](https://gitlab.com/devnw/zig/dns/-/issues/328) (closed)
 - **Category:** Performance
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/resolver/rpz.zig:141,244`; `src/resolver/split_dns.zig:298`.
-- **Linked findings:** RF-4
-- **Acceptance criteria:** sort deferred/batched (once after bulk insert or ordered insert).
+- **Status:** **Closed** (2026-06-12). Sort deferred/batched; no full re-sort per insert.
+- **Resolution:** Commit 2dd64a4. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0862".
 
 ---
 
-### GAP-0863: Naive substring search in split_dns matchContains
+### GAP-0863: Naive substring search in split_dns matchContains -- **CLOSED**
 
-- **Issue:** [#329](https://gitlab.com/devnw/zig/dns/-/issues/329)
+- **Issue:** [#329](https://gitlab.com/devnw/zig/dns/-/issues/329) (closed)
 - **Category:** Performance
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/resolver/split_dns.zig:89-101`.
-- **Linked findings:** RF-5
-- **Acceptance criteria:** use std.mem.indexOf or better matcher; behavior unchanged.
+- **Status:** **Closed** (2026-06-12). `std.mem.indexOf` (case-insensitive) used; behavior unchanged.
+- **Resolution:** Commit 4f330a7. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0863".
 
 ---
 
-### GAP-0864: getPool() unconditional mutex
+### GAP-0864: getPool() unconditional mutex -- **WON'T DO**
 
-- **Issue:** [#330](https://gitlab.com/devnw/zig/dns/-/issues/330)
+- **Issue:** [#330](https://gitlab.com/devnw/zig/dns/-/issues/330) (closed as Won't-Do)
 - **Category:** Performance
 - **Severity:** Low
-- **Status:** **Open** -- Won't-Do candidate (pending maintainer decision)
-- **Evidence:** `src/parallel.zig:94-101`.
-- **Linked findings:** RF-2
-- **Acceptance criteria:** maintainer decides: implement atomic fast path OR mark Won't-Do with rationale.
+- **Status:** **Won't Do** (2026-06-12). `Mutex` is the correct primitive; lock-free fast path adds complexity and risk for negligible gain.
+- **Reason:** Pool acquisition is not on the per-query hot loop. Correctness risk outweighs the marginal performance gain. See `GAP_ANALYSIS_RESOLVED.md` "Won't Do (2026-06-12 Campaign) / GAP-0864".
 
 ---
 
-### GAP-0871: DoQ queryImpl does not verify response Message ID == 0 on live path
+### GAP-0871: DoQ queryImpl does not verify response Message ID == 0 on live path -- **CLOSED**
 
-- **Issue:** [#331](https://gitlab.com/devnw/zig/dns/-/issues/331)
+- **Issue:** [#331](https://gitlab.com/devnw/zig/dns/-/issues/331) (closed)
 - **Category:** Security
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/transports/doq.zig:201-217` (live) vs `:256-278` (standalone parser).
-- **Linked findings:** SEC-AUD2-07
-- **Acceptance criteria:** live DoQ path rejects responses with non-zero Message ID.
+- **Status:** **Closed** (2026-06-12). Live DoQ path rejects non-zero Message ID.
+- **Resolution:** Commit 5a5c351. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0871".
 
 ---
 
-### GAP-0872: ClientSubnet.parse (source_prefix_length+7)/8 u8 overflow panic; RFC 7871 cap unenforced
+### GAP-0872: ClientSubnet.parse (source_prefix_length+7)/8 u8 overflow panic; RFC 7871 cap unenforced -- **CLOSED**
 
-- **Issue:** [#332](https://gitlab.com/devnw/zig/dns/-/issues/332)
+- **Issue:** [#332](https://gitlab.com/devnw/zig/dns/-/issues/332) (closed)
 - **Category:** Security
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/resolver/edns.zig:295,310`.
-- **Linked findings:** SEC-AUD2-08
-- **Acceptance criteria:** prefix length validated against RFC 7871 caps before byte math; oversized prefix rejected without panic.
+- **Status:** **Closed** (2026-06-12). Prefix length validated against RFC 7871 caps before byte math.
+- **Resolution:** Commit bce6714. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0872".
 
 ---
 
-### GAP-0873: SIG(0) verify accepts inverted validity windows; no inception<=expiration check
+### GAP-0873: SIG(0) verify accepts inverted validity windows; no inception<=expiration check -- **CLOSED**
 
-- **Issue:** [#333](https://gitlab.com/devnw/zig/dns/-/issues/333)
+- **Issue:** [#333](https://gitlab.com/devnw/zig/dns/-/issues/333) (closed)
 - **Category:** Security
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/resolver/sig0.zig:410-414`.
-- **Linked findings:** SEC-AUD2-09
-- **Acceptance criteria:** verify rejects signatures where inception > expiration.
+- **Status:** **Closed** (2026-06-12). `verify` rejects signatures where inception > expiration.
+- **Resolution:** Commit e49cf1d. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0873".
 
 ---
 
-### GAP-0881: zdig exits 0 when no domain specified
+### GAP-0881: zdig exits 0 when no domain specified -- **CLOSED**
 
-- **Issue:** [#334](https://gitlab.com/devnw/zig/dns/-/issues/334)
+- **Issue:** [#334](https://gitlab.com/devnw/zig/dns/-/issues/334) (closed)
 - **Category:** Bug
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `cmd/zdig.zig:316-322`.
-- **Linked findings:** QR-AUD-07
-- **Acceptance criteria:** missing domain prints usage to stderr and exits non-zero.
+- **Status:** **Closed** (2026-06-12). Missing domain prints usage to stderr and exits non-zero.
+- **Resolution:** Commit 449be6c. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0881".
 
 ---
 
-### GAP-0882: zdig @server parsing IPv4-only; IPv6 fails opaquely
+### GAP-0882: zdig @server parsing IPv4-only; IPv6 fails opaquely -- **CLOSED**
 
-- **Issue:** [#335](https://gitlab.com/devnw/zig/dns/-/issues/335)
+- **Issue:** [#335](https://gitlab.com/devnw/zig/dns/-/issues/335) (closed)
 - **Category:** Bug
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `cmd/zdig.zig:546-554,993`.
-- **Linked findings:** QR-AUD-08
-- **Acceptance criteria:** @server accepts IPv6 (incl. bracketed); invalid server yields a clear error.
+- **Status:** **Closed** (2026-06-12). IPv6 and bracketed-IPv6 @server parsing added; invalid server yields explicit error.
+- **Resolution:** Commit d088eb9. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0882".
 
 ---
 
-### GAP-0883: zdig silently ignores unknown +options
+### GAP-0883: zdig silently ignores unknown +options -- **CLOSED**
 
-- **Issue:** [#336](https://gitlab.com/devnw/zig/dns/-/issues/336)
+- **Issue:** [#336](https://gitlab.com/devnw/zig/dns/-/issues/336) (closed)
 - **Category:** Bug
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `cmd/zdig.zig:331-369`.
-- **Linked findings:** QR-AUD-09
-- **Acceptance criteria:** unknown +option warns or errors rather than silently no-op.
+- **Status:** **Closed** (2026-06-12). Unknown +options now emit a warning; invalid option exits with clear error message.
+- **Resolution:** Commit 213a8ba. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0883".
 
 ---
 
-### GAP-0884: Stale doc comment claims std.crypto.random (removed in 0.16)
+### GAP-0884: Stale doc comment claims std.crypto.random (removed in 0.16) -- **CLOSED**
 
-- **Issue:** [#337](https://gitlab.com/devnw/zig/dns/-/issues/337)
+- **Issue:** [#337](https://gitlab.com/devnw/zig/dns/-/issues/337) (closed)
 - **Category:** Docs
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/recursive.zig:199`.
-- **Linked findings:** QR-AUD-10
-- **Acceptance criteria:** comment updated to the actual entropy source.
+- **Status:** **Closed** (2026-06-12). Doc comment updated to reflect the actual entropy source used in Zig 0.16.
+- **Resolution:** Commit f9548c2. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0884".
 
 ---
 
-### GAP-0885: selectWeighted batchy WRR distribution
+### GAP-0885: selectWeighted batchy WRR distribution -- **CLOSED**
 
-- **Issue:** [#338](https://gitlab.com/devnw/zig/dns/-/issues/338)
+- **Issue:** [#338](https://gitlab.com/devnw/zig/dns/-/issues/338) (closed)
 - **Category:** Performance
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/resolver/failover.zig:289-311`.
-- **Linked findings:** QR-AUD-11
-- **Acceptance criteria:** smooth WRR interleaving; test asserts interleaved distribution over a cycle.
+- **Status:** **Closed** (2026-06-12). Smooth WRR interleaving implemented; test asserts interleaved distribution over a full cycle.
+- **Resolution:** Commits ebe6d24, 80573a2. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0885".
 
 ---
 
-### GAP-0887: applyCase0x20 heap alloc per delegation hop; stack variant possible
+### GAP-0887: applyCase0x20 heap alloc per delegation hop; stack variant possible -- **CLOSED**
 
-- **Issue:** [#339](https://gitlab.com/devnw/zig/dns/-/issues/339)
+- **Issue:** [#339](https://gitlab.com/devnw/zig/dns/-/issues/339) (closed)
 - **Category:** Performance
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/name.zig:711-717`; `src/recursive.zig:570`.
-- **Linked findings:** PF-AUD-02
-- **Acceptance criteria:** stack-buffer variant for in-bound names; no heap alloc on the common path.
+- **Status:** **Closed** (2026-06-12). Stack-buffer variant implemented for in-bound names; no heap alloc on common delegation path.
+- **Resolution:** Commit 53a0dcc. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0887".
 
 ---
 
-### GAP-0889: ConnectionPool fully linear-scan; acquire scans up to 3x
+### GAP-0889: ConnectionPool fully linear-scan; acquire scans up to 3x -- **CLOSED**
 
-- **Issue:** [#340](https://gitlab.com/devnw/zig/dns/-/issues/340)
+- **Issue:** [#340](https://gitlab.com/devnw/zig/dns/-/issues/340) (closed)
 - **Category:** Performance
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/transports/connection_pool.zig:299-356,483-491`.
-- **Linked findings:** PF-AUD-04
-- **Acceptance criteria:** acquire single-pass or index-assisted; behavior unchanged.
+- **Status:** **Closed** (2026-06-12). Acquire rewritten as single-pass scan; behavior unchanged.
+- **Resolution:** Commit d369a05. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0889".
 
 ---
 
-### GAP-0890: dnssec signed_data ArrayList no capacity reservation
+### GAP-0890: dnssec signed_data ArrayList no capacity reservation -- **CLOSED**
 
-- **Issue:** [#341](https://gitlab.com/devnw/zig/dns/-/issues/341)
+- **Issue:** [#341](https://gitlab.com/devnw/zig/dns/-/issues/341) (closed)
 - **Category:** Performance
 - **Severity:** Low
-- **Status:** **Open**
-- **Evidence:** `src/resolver/dnssec.zig:378,397-423`.
-- **Linked findings:** PF-AUD-05
-- **Acceptance criteria:** ensureTotalCapacity before building signed_data; no functional change.
+- **Status:** **Closed** (2026-06-12). ensureTotalCapacity added before building signed_data; no functional change.
+- **Resolution:** Commit b7bb3d5. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0890".
 
 ---
 
-### GAP-0865: Unreachable protobuf CVEs in zig-pkg transitive dep; add SBOM exclude
+### GAP-0865: Unreachable protobuf CVEs in zig-pkg transitive dep; add SBOM exclude -- **CLOSED**
 
-- **Issue:** [#342](https://gitlab.com/devnw/zig/dns/-/issues/342)
+- **Issue:** [#342](https://gitlab.com/devnw/zig/dns/-/issues/342) (closed)
 - **Category:** Security (supply-chain)
 - **Severity:** Info
-- **Status:** **Open**
-- **Evidence:** zig-pkg grpc_zig requirements.txt.
-- **Linked findings:** SEC-SCAN-NEW-01
-- **Acceptance criteria:** SBOM excludes/annotates the unreachable protobuf CVEs with justification.
+- **Status:** **Closed** (2026-06-12). SBOM updated with exclusion annotation for unreachable protobuf CVEs with justification.
+- **Resolution:** Commit a05d5e2. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0865".
 
 ---
 
-### GAP-0874: DnsConfig allows semantically invalid in-range values
+### GAP-0874: DnsConfig allows semantically invalid in-range values -- **CLOSED**
 
-- **Issue:** [#343](https://gitlab.com/devnw/zig/dns/-/issues/343)
+- **Issue:** [#343](https://gitlab.com/devnw/zig/dns/-/issues/343) (closed)
 - **Category:** Security (hardening)
 - **Severity:** Info
-- **Status:** **Open**
-- **Evidence:** `src/config.zig:321-371` -- timeout_ms=0, retries=255, max_ttl=2^32-1 accepted.
-- **Linked findings:** SEC-AUD2-10
-- **Acceptance criteria:** config validation rejects/normalizes semantically invalid values.
+- **Status:** **Closed** (2026-06-12). Config validation added rejecting/normalizing timeout_ms=0, retries=255, and max_ttl overflow values.
+- **Resolution:** Commit 4509ed3. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0874".
 
 ---
 
-### GAP-0886: isAvailable redundant early-return branch
+### GAP-0886: isAvailable redundant early-return branch -- **CLOSED**
 
-- **Issue:** [#344](https://gitlab.com/devnw/zig/dns/-/issues/344)
+- **Issue:** [#344](https://gitlab.com/devnw/zig/dns/-/issues/344) (closed)
 - **Category:** Code Quality (cleanup)
 - **Severity:** Info
-- **Status:** **Open**
-- **Evidence:** `src/resolver/failover.zig:101-109`.
-- **Linked findings:** QR-AUD-12
-- **Acceptance criteria:** redundant branch removed; behavior unchanged.
+- **Status:** **Closed** (2026-06-12). Redundant early-return branch removed; behavior unchanged.
+- **Resolution:** Commit 5f1b681. See `GAP_ANALYSIS_RESOLVED.md` "Gap-Closure Campaign 2026-06-12 / GAP-0886".
 
 ---
 
