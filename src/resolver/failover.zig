@@ -157,6 +157,20 @@ pub const FailoverConfig = struct {
     enable_health_checks: bool = true,
 };
 
+/// Opaque, copyable reference to a server in a `FailoverManager` pool.
+///
+/// Handles remain valid only as long as the server set is unchanged:
+/// `addServer`/`removeServer` bump the manager's generation counter,
+/// invalidating every previously issued handle. Stale handles are
+/// rejected (no-op, `false` result) by `recordSuccess`/`recordFailure`
+/// instead of dereferencing relocated `ServerState` memory (GAP-0876).
+pub const ServerHandle = struct {
+    /// Index into the manager's server list at issue time
+    index: usize,
+    /// Pool generation at issue time
+    generation: u32,
+};
+
 /// Failover and load balancing manager
 pub const FailoverManager = struct {
     /// Upper bound on servers considered per selection. Failover pools are
@@ -167,6 +181,9 @@ pub const FailoverManager = struct {
     config: FailoverConfig,
     /// Server states
     servers: std.ArrayList(ServerState),
+    /// Pool generation; bumped on every addServer/removeServer so that
+    /// outstanding ServerHandles become stale instead of dangling
+    generation: u32 = 0,
     /// Round-robin index
     rr_index: usize = 0,
     /// Weighted round-robin accumulated weights
@@ -218,7 +235,7 @@ pub const FailoverManager = struct {
         self.servers.deinit(self.allocator);
     }
 
-    /// Add a server to the pool
+    /// Add a server to the pool. Invalidates all outstanding ServerHandles.
     pub fn addServer(self: *Self, config: ServerConfig) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -226,9 +243,11 @@ pub const FailoverManager = struct {
         try self.servers.append(self.allocator, ServerState{
             .config = config,
         });
+        self.generation +%= 1;
     }
 
-    /// Remove a server from the pool
+    /// Remove a server from the pool. Invalidates all outstanding
+    /// ServerHandles when a server is removed.
     pub fn removeServer(self: *Self, address: []const u8) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -236,28 +255,46 @@ pub const FailoverManager = struct {
         for (self.servers.items, 0..) |server, i| {
             if (std.mem.eql(u8, server.config.address, address)) {
                 _ = self.servers.swapRemove(i);
+                self.generation +%= 1;
                 return true;
             }
         }
         return false;
     }
 
-    /// Select the next server based on strategy
-    pub fn selectServer(self: *Self) ?*ServerState {
+    /// Resolve a handle to the server's config (copied). Returns null if
+    /// the handle is stale.
+    pub fn serverConfig(self: *Self, handle: ServerHandle) ?ServerConfig {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (handle.generation != self.generation) return null;
+        if (handle.index >= self.servers.items.len) return null;
+        return self.servers.items[handle.index].config;
+    }
+
+    /// Select the next server based on strategy.
+    ///
+    /// Returns an opaque handle rather than a `*ServerState`: the backing
+    /// ArrayList may realloc/relocate on addServer/removeServer, so raw
+    /// pointers must never escape the manager (GAP-0876). The handle stays
+    /// valid until the next addServer/removeServer call.
+    pub fn selectServer(self: *Self) ?ServerHandle {
         self.mutex.lock();
         defer self.mutex.unlock();
 
         const now = timeMilli();
 
-        // Collect available servers into a stack buffer — failover pools are
-        // tiny, so this avoids a heap allocation + free on every selection,
-        // all of it under the mutex (PF-NEW-33, #218).
-        var stack: [max_tracked_servers]*ServerState = undefined;
+        // Collect available server indices into a stack buffer — failover
+        // pools are tiny, so this avoids a heap allocation + free on every
+        // selection, all of it under the mutex (PF-NEW-33, #218). Indices
+        // (not pointers) so nothing aliasing servers.items escapes (GAP-0876).
+        var stack: [max_tracked_servers]usize = undefined;
         var count: usize = 0;
-        for (self.servers.items) |*server| {
+        for (self.servers.items, 0..) |*server, i| {
             if (server.isAvailable(now)) {
                 if (count >= stack.len) break;
-                stack[count] = server;
+                stack[count] = i;
                 count += 1;
             }
         }
@@ -271,128 +308,144 @@ pub const FailoverManager = struct {
             if (self.servers.items.len > 0) {
                 const idx = self.rr_index % self.servers.items.len;
                 self.rr_index +%= 1;
-                return &self.servers.items[idx];
+                return ServerHandle{ .index = idx, .generation = self.generation };
             }
             return null;
         }
 
-        return switch (self.config.strategy) {
+        const selected = switch (self.config.strategy) {
             .round_robin => self.selectRoundRobin(available),
             .weighted => self.selectWeighted(available),
             .least_connections => self.selectLeastConnections(available),
             .latency_based => self.selectLatencyBased(available),
             .random => self.selectRandom(available),
             .primary_secondary => self.selectPrimarySecondary(available),
-        };
+        } orelse return null;
+
+        return ServerHandle{ .index = selected, .generation = self.generation };
     }
 
-    fn selectRoundRobin(self: *Self, servers: []*ServerState) ?*ServerState {
-        if (servers.len == 0) return null;
-        const server = servers[self.rr_index % servers.len];
-        self.rr_index = (self.rr_index + 1) % servers.len;
-        return server;
+    fn selectRoundRobin(self: *Self, indices: []const usize) ?usize {
+        if (indices.len == 0) return null;
+        const idx = indices[self.rr_index % indices.len];
+        self.rr_index = (self.rr_index + 1) % indices.len;
+        return idx;
     }
 
-    fn selectWeighted(self: *Self, servers: []*ServerState) ?*ServerState {
-        if (servers.len == 0) return null;
+    fn selectWeighted(self: *Self, indices: []const usize) ?usize {
+        if (indices.len == 0) return null;
 
         var total_weight: u32 = 0;
-        for (servers) |server| {
-            total_weight += server.config.weight;
+        for (indices) |i| {
+            total_weight += self.servers.items[i].config.weight;
         }
 
-        if (total_weight == 0) return servers[0];
+        if (total_weight == 0) return indices[0];
 
         self.weighted_accumulator = (self.weighted_accumulator + 1) % total_weight;
         var accumulated: u32 = 0;
 
-        for (servers) |server| {
-            accumulated += server.config.weight;
+        for (indices) |i| {
+            accumulated += self.servers.items[i].config.weight;
             if (self.weighted_accumulator < accumulated) {
-                return server;
+                return i;
             }
         }
 
-        return servers[0];
+        return indices[0];
     }
 
-    fn selectLeastConnections(self: *Self, servers: []*ServerState) ?*ServerState {
-        _ = self;
-        if (servers.len == 0) return null;
+    fn selectLeastConnections(self: *Self, indices: []const usize) ?usize {
+        if (indices.len == 0) return null;
 
         var min_conn: u32 = std.math.maxInt(u32);
-        var selected: ?*ServerState = null;
+        var selected: ?usize = null;
 
-        for (servers) |server| {
+        for (indices) |i| {
+            const server = &self.servers.items[i];
             if (server.active_connections < min_conn) {
                 min_conn = server.active_connections;
-                selected = server;
+                selected = i;
             }
         }
 
         return selected;
     }
 
-    fn selectLatencyBased(self: *Self, servers: []*ServerState) ?*ServerState {
-        _ = self;
-        if (servers.len == 0) return null;
+    fn selectLatencyBased(self: *Self, indices: []const usize) ?usize {
+        if (indices.len == 0) return null;
 
         var min_latency: u32 = std.math.maxInt(u32);
-        var selected: ?*ServerState = null;
+        var selected: ?usize = null;
 
-        for (servers) |server| {
+        for (indices) |i| {
+            const server = &self.servers.items[i];
             // Prefer servers with known latency
             const latency = if (server.avg_latency_ms > 0) server.avg_latency_ms else 1000;
             if (latency < min_latency) {
                 min_latency = latency;
-                selected = server;
+                selected = i;
             }
         }
 
         return selected;
     }
 
-    fn selectRandom(self: *Self, servers: []*ServerState) ?*ServerState {
-        if (servers.len == 0) return null;
-        const idx = self.rng.random().intRangeLessThan(usize, 0, servers.len);
-        return servers[idx];
+    fn selectRandom(self: *Self, indices: []const usize) ?usize {
+        if (indices.len == 0) return null;
+        const pick = self.rng.random().intRangeLessThan(usize, 0, indices.len);
+        return indices[pick];
     }
 
-    fn selectPrimarySecondary(self: *Self, servers: []*ServerState) ?*ServerState {
-        _ = self;
-        if (servers.len == 0) return null;
+    fn selectPrimarySecondary(self: *Self, indices: []const usize) ?usize {
+        if (indices.len == 0) return null;
 
         // Sort by priority (lowest first)
-        var best: ?*ServerState = null;
+        var best: ?usize = null;
         var best_priority: u8 = 255;
 
-        for (servers) |server| {
+        for (indices) |i| {
+            const server = &self.servers.items[i];
             if (server.config.priority < best_priority) {
                 best_priority = server.config.priority;
-                best = server;
+                best = i;
             }
         }
 
         return best;
     }
 
-    /// Record a successful request
-    pub fn recordSuccess(self: *Self, server: *ServerState, latency_ms: u32) void {
+    /// Record a successful request.
+    ///
+    /// Returns false (no-op) when the handle is stale, i.e. the server set
+    /// changed since the handle was obtained (GAP-0876).
+    pub fn recordSuccess(self: *Self, handle: ServerHandle, latency_ms: u32) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        if (handle.generation != self.generation) return false;
+        if (handle.index >= self.servers.items.len) return false;
+
         const now = timeMilli();
-        server.recordSuccess(latency_ms, now);
+        self.servers.items[handle.index].recordSuccess(latency_ms, now);
         self.stats.total_queries += 1;
         self.stats.successful_queries += 1;
+        return true;
     }
 
-    /// Record a failed request
-    pub fn recordFailure(self: *Self, server: *ServerState) void {
+    /// Record a failed request.
+    ///
+    /// Returns false (no-op) when the handle is stale, i.e. the server set
+    /// changed since the handle was obtained (GAP-0876).
+    pub fn recordFailure(self: *Self, handle: ServerHandle) bool {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        if (handle.generation != self.generation) return false;
+        if (handle.index >= self.servers.items.len) return false;
+
         const now = timeMilli();
+        const server = &self.servers.items[handle.index];
         const was_healthy = server.status != .unhealthy;
         server.recordFailure(now, self.config.circuit_timeout_ms);
 
@@ -400,6 +453,7 @@ pub const FailoverManager = struct {
             self.stats.circuit_breaker_trips += 1;
         }
         self.stats.failover_events += 1;
+        return true;
     }
 
     /// Mark query as completely failed (all retries exhausted)
@@ -551,7 +605,7 @@ test "FailoverManager round robin selection" {
     try std.testing.expect(s3 != null);
 
     // Should cycle through servers
-    try std.testing.expect(s1 != s2 or manager.servers.items.len == 1);
+    try std.testing.expect(s1.?.index != s2.?.index or manager.servers.items.len == 1);
 }
 
 test "FailoverManager rotates last-resort server when all unhealthy (REL-6)" {
@@ -576,7 +630,7 @@ test "FailoverManager rotates last-resort server when all unhealthy (REL-6)" {
     try std.testing.expect(s2 != null);
     // Before the fix this always returned servers[0]; now the last-resort
     // fallback rotates so it does not hammer a single known-down server.
-    try std.testing.expect(s1 != s2);
+    try std.testing.expect(s1.?.index != s2.?.index);
 }
 
 test "FailoverManager statistics" {
@@ -587,16 +641,52 @@ test "FailoverManager statistics" {
     try manager.addServer(.{ .address = "test" });
     manager.servers.items[0].status = .healthy;
 
-    if (manager.selectServer()) |server| {
-        manager.recordSuccess(server, 50);
-        manager.recordSuccess(server, 60);
-        manager.recordFailure(server);
+    if (manager.selectServer()) |handle| {
+        try std.testing.expect(manager.recordSuccess(handle, 50));
+        try std.testing.expect(manager.recordSuccess(handle, 60));
+        try std.testing.expect(manager.recordFailure(handle));
     }
 
     const stats = manager.getStats();
     try std.testing.expectEqual(@as(u64, 2), stats.total_queries);
     try std.testing.expectEqual(@as(u64, 2), stats.successful_queries);
     try std.testing.expectEqual(@as(u64, 1), stats.failover_events);
+}
+
+test "FailoverManager stale handle rejected after server set mutation (GAP-0876)" {
+    const allocator = std.testing.allocator;
+    var manager = try FailoverManager.init(allocator, .{});
+    defer manager.deinit();
+
+    try manager.addServer(.{ .address = "server1" });
+    manager.servers.items[0].status = .healthy;
+
+    const handle = manager.selectServer();
+    try std.testing.expect(handle != null);
+
+    // A handle obtained before the pool changes must be usable.
+    try std.testing.expect(manager.recordSuccess(handle.?, 10));
+
+    // Mutating the server set (append may realloc; swapRemove relocates)
+    // invalidates all outstanding handles.
+    try manager.addServer(.{ .address = "server2" });
+    try std.testing.expect(!manager.recordSuccess(handle.?, 10));
+    try std.testing.expect(!manager.recordFailure(handle.?));
+
+    // Stale handles must not mutate statistics.
+    const stats = manager.getStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.total_queries);
+    try std.testing.expectEqual(@as(u64, 0), stats.failover_events);
+
+    // A freshly obtained handle works again.
+    const fresh = manager.selectServer();
+    try std.testing.expect(fresh != null);
+    try std.testing.expect(manager.recordSuccess(fresh.?, 10));
+
+    // removeServer also bumps the generation.
+    const fresh2 = manager.selectServer();
+    try std.testing.expect(manager.removeServer("server2"));
+    try std.testing.expect(!manager.recordFailure(fresh2.?));
 }
 
 test "Strategy enum" {
