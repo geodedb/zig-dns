@@ -59,6 +59,14 @@ const tp = @import("thread_pool");
 
 const MAX_CHUNKS = 64;
 
+/// Minimum input count before parallelizing DNSSEC structural validation.
+/// validateDnssec is only a handful of length/field checks (tens of ns, no
+/// crypto or allocation), so thread-pool dispatch (microseconds per chunk)
+/// is a net loss for small batches — a DNS response carries only a few
+/// RRSIGs. Stay sequential until the batch is large enough to amortize the
+/// dispatch (PF-NEW-41, #220).
+const PARALLEL_DNSSEC_THRESHOLD: usize = 256;
+
 inline fn timeSec() i64 {
     const io_inst = std.Io.Threaded.global_single_threaded.io();
     return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toSeconds();
@@ -307,7 +315,7 @@ pub fn parallelDnssecValidate(
 ) void {
     std.debug.assert(inputs.len == results.len);
 
-    if (inputs.len < 2) {
+    if (inputs.len < PARALLEL_DNSSEC_THRESHOLD) {
         for (inputs, 0..) |input, i| {
             results[i] = validateDnssec(input);
         }

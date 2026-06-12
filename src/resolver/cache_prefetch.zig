@@ -55,6 +55,12 @@ pub const PrefetchRequest = struct {
 ///
 /// Tracks which entries need refreshing and provides a queue
 /// of prefetch requests for the resolver to process.
+///
+/// THREAD SAFETY: not thread-safe. `pending` and `in_flight` are plain
+/// StringHashMaps mutated without locking, matching the single-threaded
+/// design of the DNS cache it complements (see PF-14). A caller must serialize
+/// access; before driving prefetch from multiple threads, add a mutex around
+/// the map mutations or give each thread its own instance (PF-NEW-43, #221).
 pub const CachePrefetcher = struct {
     allocator: std.mem.Allocator,
     options: PrefetchOptions,
