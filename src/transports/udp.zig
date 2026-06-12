@@ -131,7 +131,7 @@ test "SEC-AUDIT-02: UDP discard limit prevents CPU pinning" {
 }
 
 test "REL-3: remainingBudgetMs shrinks toward the deadline and then expires" {
-    // 4s elapsed of a 5s budget leaves 4s... (start=1000, now=2000 -> 1s elapsed).
+    // 1s elapsed of a 5s budget leaves 4s (start=1000, now=2000).
     try std.testing.expectEqual(@as(?u32, 4000), remainingBudgetMs(1000, 2000, 5000));
     // 1ms left.
     try std.testing.expectEqual(@as(?u32, 1), remainingBudgetMs(1000, 5999, 5000));

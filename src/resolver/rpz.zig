@@ -291,6 +291,10 @@ pub const RpzManager = struct {
     }
 
     /// Get a zone by name
+    /// Returns an interior pointer into the `zones` ArrayList. The pointer is
+    /// invalidated by any subsequent `addZone` (reallocation) or `check` (which
+    /// may run the deferred priority sort and reorder the array, INC-1). Use it
+    /// before the next such call, or look the zone up again afterwards.
     pub fn getZone(self: *Self, name: []const u8) ?*ResponsePolicyZone {
         for (self.zones.items) |*zone| {
             if (std.mem.eql(u8, zone.name, name)) {
