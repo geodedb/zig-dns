@@ -23,16 +23,10 @@ const net = @import("net_compat");
 // every span site below.
 const observability = @import("observability");
 const clock = @import("clock");
+const random_mod = @import("random");
 
 inline fn timeMilli() i64 {
     return clock.milliTimestamp();
-}
-
-fn systemRandomU16() u16 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    var buf: [2]u8 = undefined;
-    std.Io.randomSecure(io_inst, &buf) catch unreachable;
-    return std.mem.readInt(u16, &buf, .little);
 }
 
 pub const Message = message_mod.Message;
@@ -132,9 +126,9 @@ pub const StubResolver = struct {
     /// Returns error.EntropyUnavailable if secure random is not available
     pub fn init(allocator: std.mem.Allocator, config: StubConfig) InitError!Self {
         // Ensure cryptographically secure entropy is available
+        // (GAP-0851: routed through the shared util/random.zig helper).
         var probe: u64 = undefined;
-        const io_inst = std.Io.Threaded.global_single_threaded.io();
-        std.Io.randomSecure(io_inst, std.mem.asBytes(&probe)) catch {
+        random_mod.fillSecure(std.mem.asBytes(&probe)) catch {
             return error.EntropyUnavailable;
         };
         return Self{
@@ -175,10 +169,12 @@ pub const StubResolver = struct {
     }
 
     /// Generate a unique query ID
-    fn nextId(self: *Self) u16 {
+    ///
+    /// SECURITY: Uses the OS CSPRNG for each ID to avoid predictability
+    /// and fails fast (no weak fallback) if entropy is unavailable.
+    fn nextId(self: *Self) random_mod.RandomError!u16 {
         _ = self;
-        // Use OS CSPRNG for each ID to avoid predictability
-        return systemRandomU16();
+        return random_mod.systemRandomU16();
     }
 
     pub fn responseMatchesQuery(
@@ -216,7 +212,7 @@ pub const StubResolver = struct {
         defer __obs_span.end(null);
         errdefer observability.endQuerySpan(__obs_span, false, "query failed");
 
-        const id = self.nextId();
+        const id = try self.nextId();
 
         // Build query on the stack (max 271 bytes, no heap allocation)
         var query_buf: [message_mod.max_query_size]u8 = undefined;
@@ -449,7 +445,7 @@ test "StubResolver.nextId" {
     var resolver = try StubResolver.init(std.testing.allocator, .{ .servers = &servers });
     defer resolver.deinit();
 
-    const id = resolver.nextId();
+    const id = try resolver.nextId();
     try std.testing.expect(id <= std.math.maxInt(u16));
 }
 

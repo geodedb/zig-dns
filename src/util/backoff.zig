@@ -16,6 +16,7 @@
 //! - Google Cloud Best Practices
 
 const std = @import("std");
+const random_util = @import("random");
 
 /// Block the current thread for `delay_ms` milliseconds using the Zig 0.16
 /// I/O sleep API. (std.Thread.sleep was removed in 0.16.)
@@ -95,11 +96,10 @@ pub const Backoff = struct {
     pub const InitError = error{EntropyUnavailable};
 
     pub fn init(config: Config) InitError!Self {
-        // Use secure random for jitter calculations. (std.posix.getrandom was
-        // removed in Zig 0.16; use the I/O CSPRNG like the rest of the lib.)
+        // Use secure random for jitter calculations (GAP-0851: routed
+        // through the shared util/random.zig entropy helper).
         var seed: u64 = undefined;
-        const io = std.Io.Threaded.global_single_threaded.io();
-        std.Io.randomSecure(io, std.mem.asBytes(&seed)) catch {
+        random_util.fillSecure(std.mem.asBytes(&seed)) catch {
             return error.EntropyUnavailable;
         };
         return Self{

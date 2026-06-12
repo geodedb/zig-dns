@@ -578,6 +578,14 @@ pub fn build(b: *std.Build) void {
     enhanced_metrics_mod.addImport("clock", clock_mod);
     if (parallel_mod) |pm| pm.addImport("clock", clock_mod);
 
+    // GAP-0851: all OS entropy reads go through the shared fail-fast
+    // helpers in src/util/random.zig (no catch-unreachable on entropy).
+    stub_mod.addImport("random", random_mod);
+    recursive_mod.addImport("random", random_mod);
+    backoff_mod.addImport("random", random_mod);
+    zone_transfer_mod.addImport("random", random_mod);
+    if (parallel_mod) |pm| pm.addImport("random", random_mod);
+
     const dns_mod = b.addModule("dns", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
@@ -881,6 +889,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "net_compat", .module = net_compat_mod },
                 .{ .name = "observability", .module = observability_mod },
                 .{ .name = "clock", .module = clock_mod },
+                .{ .name = "random", .module = random_mod },
             },
         },
         .{
@@ -897,6 +906,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "stub", .module = stub_mod },
                 .{ .name = "dns_cache", .module = dns_cache_mod },
                 .{ .name = "clock", .module = clock_mod },
+                .{ .name = "random", .module = random_mod },
                 .{ .name = "cache_protection", .module = cache_protection_mod },
                 .{ .name = "net_compat", .module = net_compat_mod },
                 .{ .name = "observability", .module = observability_mod },
@@ -1117,7 +1127,13 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "clock", .module = clock_mod },
             },
         },
-        .{ .name = "backoff", .source = "src/util/backoff.zig", .imports = &.{} },
+        .{
+            .name = "backoff",
+            .source = "src/util/backoff.zig",
+            .imports = &.{
+                .{ .name = "random", .module = random_mod },
+            },
+        },
     };
 
     for (util_tests) |test_info| {
@@ -1255,6 +1271,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "net_compat", .module = net_compat_mod },
                 .{ .name = "transport_io", .module = transport_io_mod },
                 .{ .name = "clock", .module = clock_mod },
+                .{ .name = "random", .module = random_mod },
             },
         }),
     });
@@ -1417,6 +1434,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "message", .module = message_mod },
                 .{ .name = "sync", .module = sync_mod },
                 .{ .name = "clock", .module = clock_mod },
+                .{ .name = "random", .module = random_mod },
             },
         }),
     });

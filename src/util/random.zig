@@ -39,6 +39,28 @@ pub const RandomError = error{
     EntropyUnavailable,
 };
 
+/// Fill `buf` with cryptographically secure OS entropy.
+///
+/// SECURITY: Fails fast instead of falling back to weak entropy sources
+/// (like timestamps) because predictable random numbers would enable DNS
+/// cache poisoning attacks through transaction ID prediction.
+/// See: RFC 5452, CWE-330. Callers MUST propagate the error — never
+/// `catch unreachable` on entropy (GAP-0851).
+pub fn fillSecure(buf: []u8) RandomError!void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    std.Io.randomSecure(io, buf) catch {
+        return RandomError.EntropyUnavailable;
+    };
+}
+
+/// Draw a uniformly random `u16` from OS entropy (e.g. for DNS
+/// transaction IDs). Fails fast if secure entropy is unavailable.
+pub fn systemRandomU16() RandomError!u16 {
+    var buf: [2]u8 = undefined;
+    try fillSecure(&buf);
+    return std.mem.readInt(u16, &buf, .little);
+}
+
 /// System PRNG using OS entropy
 pub const SystemRandom = struct {
     prng: std.Random.DefaultPrng,
@@ -52,13 +74,7 @@ pub const SystemRandom = struct {
     /// DNS cache poisoning attacks through transaction ID prediction.
     pub fn init() RandomError!Self {
         var seed: u64 = undefined;
-        const io = std.Io.Threaded.global_single_threaded.io();
-        std.Io.randomSecure(io, std.mem.asBytes(&seed)) catch {
-            // SECURITY: Do NOT fall back to timestamp-based seeding.
-            // Predictable seeds enable transaction ID prediction attacks.
-            // See: RFC 5452, CWE-330
-            return RandomError.EntropyUnavailable;
-        };
+        try fillSecure(std.mem.asBytes(&seed));
         return Self{
             .prng = std.Random.DefaultPrng.init(seed),
         };
@@ -68,6 +84,24 @@ pub const SystemRandom = struct {
         return self.prng.random();
     }
 };
+
+test "systemRandomU16 returns ok and varies across calls" {
+    // Must succeed on any system with working OS entropy.
+    _ = try systemRandomU16();
+
+    // 16 consecutive draws must produce at least 2 distinct values.
+    // P(all 16 equal) = (1/65536)^15 — effectively impossible.
+    var values: [16]u16 = undefined;
+    for (&values) |*v| v.* = try systemRandomU16();
+    var distinct: bool = false;
+    for (values[1..]) |v| {
+        if (v != values[0]) {
+            distinct = true;
+            break;
+        }
+    }
+    try std.testing.expect(distinct);
+}
 
 test "MockRandom deterministic" {
     var rng1 = MockRandom.init();

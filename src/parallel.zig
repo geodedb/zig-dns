@@ -75,12 +75,8 @@ inline fn timeSec() i64 {
 /// 0.16.0 shim: std.Thread.Mutex was moved (shared, see src/util/sync.zig).
 const Mutex = @import("sync").Mutex;
 
-fn systemRandomU16() u16 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    var buf: [2]u8 = undefined;
-    std.Io.randomSecure(io_inst, &buf) catch unreachable;
-    return std.mem.readInt(u16, &buf, .little);
-}
+/// Shared fail-fast entropy helper (GAP-0851, see src/util/random.zig).
+const random_util = @import("random");
 
 // ============================================================================
 // Global Thread Pool
@@ -512,8 +508,12 @@ fn executeQuery(query: QuerySpec, server: []const u8, timeout_ms: u32) QueryResu
         return .{ .success = false, .response = null, .error_code = 1 };
     }
 
-    // Generate a random transaction ID for this query
-    const id = systemRandomU16();
+    // Generate a random transaction ID for this query.
+    // SECURITY: fail-fast if OS entropy is unavailable (error_code 3)
+    // rather than continuing with a predictable ID.
+    const id = random_util.systemRandomU16() catch {
+        return .{ .success = false, .response = null, .error_code = 3 };
+    };
 
     // Build the wire-format query message
     const wire_msg = message.buildQuery(
@@ -646,8 +646,12 @@ fn prefetchEntry(entry: PrefetchEntry, server: []const u8) PrefetchResult {
         return .{ .refreshed = false, .new_ttl = remaining };
     }
 
-    // Entry is expired — build a prefetch query message to refresh it
-    const id = systemRandomU16();
+    // Entry is expired — build a prefetch query message to refresh it.
+    // SECURITY: fail-fast if OS entropy is unavailable; report the entry
+    // as not refreshed rather than using a predictable ID.
+    const id = random_util.systemRandomU16() catch {
+        return .{ .refreshed = false, .new_ttl = 0 };
+    };
     const wire_msg = message.buildQuery(
         std.heap.page_allocator,
         id,

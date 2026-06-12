@@ -21,6 +21,7 @@ const parallel = @import("parallel");
 const net = @import("net_compat");
 const io = @import("transport_io");
 const clock = @import("clock");
+const random = @import("random");
 
 // GAP-0877: `std.time.milliTimestamp` does not exist in Zig 0.16.0; the
 // previous direct calls only compiled because the transfer paths were not
@@ -506,15 +507,11 @@ pub const ZoneTransferClient = struct {
         var buffer: std.ArrayList(u8) = .empty;
         errdefer buffer.deinit(self.allocator);
 
-        // Generate random ID
+        // Generate random ID (GAP-0851: routed through util/random.zig)
         // SECURITY: Fail-fast if entropy unavailable - predictable IDs enable cache poisoning
-        var seed: u64 = undefined;
-        const io_inst = std.Io.Threaded.global_single_threaded.io();
-        std.Io.randomSecure(io_inst, std.mem.asBytes(&seed)) catch {
+        const id = random.systemRandomU16() catch {
             return error.EntropyUnavailable;
         };
-        var prng = std.Random.DefaultPrng.init(seed);
-        const id = prng.random().int(u16);
 
         // Header
         try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, id))); // ID
@@ -539,15 +536,11 @@ pub const ZoneTransferClient = struct {
         var buffer: std.ArrayList(u8) = .empty;
         errdefer buffer.deinit(self.allocator);
 
-        // Generate random ID
+        // Generate random ID (GAP-0851: routed through util/random.zig)
         // SECURITY: Fail-fast if entropy unavailable - predictable IDs enable cache poisoning
-        var seed: u64 = undefined;
-        const io_inst = std.Io.Threaded.global_single_threaded.io();
-        std.Io.randomSecure(io_inst, std.mem.asBytes(&seed)) catch {
+        const id = random.systemRandomU16() catch {
             return error.EntropyUnavailable;
         };
-        var prng = std.Random.DefaultPrng.init(seed);
-        const id = prng.random().int(u16);
 
         // Header (with NSCOUNT=1 for our SOA)
         try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, id)));

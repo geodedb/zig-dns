@@ -19,6 +19,7 @@ const question_mod = @import("question");
 const record_mod = @import("record");
 const dns_cache_mod = @import("dns_cache");
 const clock_mod = @import("clock");
+const random_mod = @import("random");
 const stub_mod = @import("stub");
 const net = @import("net_compat");
 // Observability seam (otel). When `-Dwith_otel=false` the seam's
@@ -28,13 +29,6 @@ const observability = @import("observability");
 
 inline fn timeMilli() i64 {
     return clock_mod.milliTimestamp();
-}
-
-fn systemRandomU16() u16 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    var buf: [2]u8 = undefined;
-    std.Io.randomSecure(io_inst, &buf) catch unreachable;
-    return std.mem.readInt(u16, &buf, .little);
 }
 
 pub const Message = message_mod.Message;
@@ -174,22 +168,23 @@ pub const RecursiveResolver = struct {
     /// CSPRNG for security-sensitive operations (transaction IDs, 0x20 randomization).
     /// Uses the OS cryptographic random source directly instead of a seeded PRNG.
     /// This prevents transaction ID prediction attacks (RFC 5452, CWE-330, SEC-C24).
-    fn csprngBytes(buf: []u8) void {
-        const io_inst = std.Io.Threaded.global_single_threaded.io();
-        std.Io.randomSecure(io_inst, buf) catch unreachable;
+    /// GAP-0851: routed through util/random.zig and fails fast (no
+    /// catch-unreachable) if secure entropy is unavailable.
+    fn csprngBytes(buf: []u8) random_mod.RandomError!void {
+        return random_mod.fillSecure(buf);
     }
 
-    fn csprngInt(comptime T: type) T {
+    fn csprngInt(comptime T: type) random_mod.RandomError!T {
         var buf: [@sizeOf(T)]u8 = undefined;
-        csprngBytes(&buf);
+        try csprngBytes(&buf);
         return std.mem.readInt(T, &buf, .little);
     }
 
     /// 0.16.0 compat: produce a std.Random seeded from OS entropy.
     /// Used where APIs require a std.Random (e.g. applyCase0x20).
-    fn csprngRandom(prng: *std.Random.DefaultPrng) std.Random {
+    fn csprngRandom(prng: *std.Random.DefaultPrng) random_mod.RandomError!std.Random {
         var seed: u64 = undefined;
-        csprngBytes(std.mem.asBytes(&seed));
+        try csprngBytes(std.mem.asBytes(&seed));
         prng.* = std.Random.DefaultPrng.init(seed);
         return prng.random();
     }
@@ -577,12 +572,12 @@ pub const RecursiveResolver = struct {
         state: *ResolutionState,
     ) !QueryResult {
         // Generate query ID using OS CSPRNG (SEC-C24: prevents cache poisoning)
-        const id = csprngInt(u16);
+        const id = try csprngInt(u16);
 
         // Apply 0x20 case randomization if enabled (using CSPRNG for unpredictability)
         var local_prng: std.Random.DefaultPrng = undefined;
         const query_name = if (self.config.case_randomization)
-            try name_mod.applyCase0x20(self.allocator, domain, csprngRandom(&local_prng))
+            try name_mod.applyCase0x20(self.allocator, domain, try csprngRandom(&local_prng))
         else
             try self.allocator.dupe(u8, domain);
         defer self.allocator.free(query_name);
@@ -1511,7 +1506,7 @@ test "SEC-C24: transaction IDs use CSPRNG" {
     // 2. They don't panic or fail
     var ids: [16]u16 = undefined;
     for (&ids) |*id| {
-        id.* = RecursiveResolver.csprngInt(u16);
+        id.* = try RecursiveResolver.csprngInt(u16);
     }
 
     // At least 2 different values among 16 samples (probability of all-same: 1/65535^15)
