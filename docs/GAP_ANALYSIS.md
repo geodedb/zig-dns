@@ -1,14 +1,160 @@
 # Gap Analysis
 
-Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/0068 wire-format conversion, SEC-AUDIT-11/12/13 hardening. 525/525 tests passing.)
+Last updated: 2026-06-12 (Application Security + Adversarial + Supply-chain review cycle: 25 new OPEN security findings (SEC-A1..A12, SEC-SR-1..SR-11, SEC-SC-1..SC-2) filed as issues #279-#303; 9 confidential. See "2026-06-12 Application Security + Adversarial Review Cycle" in the Security Findings section. Earlier same-day: Requirements collection + implementation scan: 8 new open gaps (GAP-0070..GAP-0077). 2 prior items regressed: GAP-0023 (Zig version) re-opened as GAP-0075; PF-18 (no benchmarks) reversed -- benchmarks exist but are broken (GAP-0077). The prior "0 open findings / production-ready" claim is superseded. 543/543 tests pass in the default build; `-Dwith_otel=true` build is broken (GAP-0073/GAP-0074).)
 
-> **0 open gap findings** remain. All items are Resolved, Won't Do, or moved to [GAP_ANALYSIS_RESOLVED.md](GAP_ANALYSIS_RESOLVED.md).
->
-> **Common root cause resolved:** GAP-0066, GAP-0067, GAP-0068 shared a root cause -- qname wire-format conversion was missing at NSEC/NSEC3 validation entry points. Fixed by adding `dottedToWire` conversion at all four validation entry points (`validateNodataWithNsec`, `validateNxdomainWithNsec`, `validateNxdomainWithNsec3`, `validateNodataWithNsec3`) and in `computeNsec3Hash`.
+> **8 open gap findings.** New gaps discovered by implementation scan 2026-06-12. Prior zero-gap state was accurate for the code that existed at the time; new gaps were introduced by post-cycle changes (Zig 0.16 migration, benchmark addition, otel seam workaround).
+
+## Gaps
+
+### GAP-0070: DNSSEC validator never invoked from the resolution pipeline (`dnssec=true` only sets the DO bit) -- **OPEN**
+
+- **Issue:** [#207](https://gitlab.com/devnw/zig/dns/-/issues/207)
+- **Category:** Security
+- **Severity:** Critical
+- **Status:** **Open** (2026-06-12). DNSSEC validator module (`src/resolver/dnssec.zig`) is fully implemented and tested in isolation but is **dead code from the pipeline's perspective** -- `src/recursive.zig` does not even import it, and the `dnssec: bool` config flag's only effect is setting the EDNS DO bit on outgoing queries.
+- **Evidence:**
+  - `src/recursive.zig:110` -- `dnssec: bool = false` in `RecursiveConfig`
+  - `src/recursive.zig:594` -- only call site for the flag: `buildQueryBuf(..., self.config.dnssec)` (sets DO bit)
+  - `src/resolver/dnssec.zig:502` -- `validateChainOfTrust` has **no callers** outside its own tests
+  - `grep '@import' src/recursive.zig | grep dnssec` -- empty; `recursive.zig` never imports the validator
+- **Impact:** A caller setting `dnssec=true` receives answers that are never cryptographically validated. Forged or unsigned responses are accepted as `.success`. Directly contradicts the "production-ready for DNSSEC-enabled deployments" claim in the prior gap analysis.
+- **Acceptance criteria:**
+  - [ ] With `dnssec=true`, a response with an invalid RRSIG or broken chain is rejected (not returned as data)
+  - [ ] With `dnssec=true`, a validly-signed response returns `.secure` and the answer
+  - [ ] `recursive.zig` imports and invokes the validator; an end-to-end test exercises the validation path
+  - [ ] Or: the flag is renamed (e.g., `request_dnssec_records`) with a clear doc that no validation occurs, and `docs/SECURITY.md` is updated to document the gap
+
+---
+
+### GAP-0071: EDNS Client Subnet (RFC 7871) type complete but never injected into outgoing queries -- **OPEN**
+
+- **Issue:** [#208](https://gitlab.com/devnw/zig/dns/-/issues/208)
+- **Category:** Feature
+- **Severity:** Medium
+- **Status:** **Open** (2026-06-12). `ClientSubnet` type at `src/edns.zig:272` is fully implemented (parse/encode/buildOption) and unit-tested. No call to `ClientSubnet.buildOption` exists in `src/stub.zig`, `src/recursive.zig`, or `src/client.zig`. Query builders `message.buildQuery`/`buildQueryBuf` take no EDNS-option parameter.
+- **Evidence:**
+  - `src/edns.zig:272` -- `pub const ClientSubnet = struct { ... }` with `parse`/`encode`/`buildOption`
+  - `grep -rn ClientSubnet src/` outside `edns.zig` -- no hits
+  - `src/message.zig:303,318` -- query builders, no EDNS option parameter
+  - Tests at `src/edns.zig:819-880` are unit-only; no integration test injects ECS into a live query
+- **Impact:** "Geo-aware queries (EDNS Client Subnet)" deliverable is non-functional at runtime. ROADMAP Phase 4 claims "Complete -- Full ECS support"; that claim is false.
+- **Acceptance criteria:**
+  - [ ] An optional ECS parameter in `RecursiveConfig` or `ClientOptions` causes the ECS option (code 8) to be appended to outgoing EDNS OPT RRs
+  - [ ] Integration test verifies the encoded query wire bytes contain option code 8 with the configured prefix
+  - [ ] When unset (default), no ECS option is added
+
+---
+
+### GAP-0072: DNS Cookies (RFC 7873) type complete but never wired into query building -- **OPEN**
+
+- **Issue:** [#209](https://gitlab.com/devnw/zig/dns/-/issues/209)
+- **Category:** Feature
+- **Severity:** Medium
+- **Status:** **Open** (2026-06-12). `Cookie` type at `src/edns.zig:366` is fully implemented (parse/encode, option code 10) and unit-tested. No call to cookie injection exists in any resolver code path.
+- **Evidence:**
+  - `src/edns.zig:366` -- `pub const Cookie = struct { ... }` with parse and constants
+  - `grep -rni cookie src/` outside `edns.zig` -- no hits in resolver/transport stack
+  - Tests at `src/edns.zig:888,896` are unit-only; no query-injection test
+- **Impact:** "Replay protection (DNS Cookies)" deliverable is non-functional at runtime. ROADMAP Phase 4 claims "Complete -- SipHash cookie computation"; cookies are never sent on the wire.
+- **Acceptance criteria:**
+  - [ ] Outgoing queries carry an EDNS Cookie option (code 10) with an 8-byte client cookie when enabled
+  - [ ] Server cookie round-trip handled per RFC 7873
+  - [ ] Integration test verifies the wire query contains option code 10
+
+---
+
+### GAP-0073: `-Dwith_otel=true` build broken -- second `lazyDependency("otel")` omits 4 forwarded options (module dedup collision) -- **OPEN**
+
+- **Issue:** [#210](https://gitlab.com/devnw/zig/dns/-/issues/210)
+- **Category:** CI-CD
+- **Severity:** High
+- **Status:** **Open** (2026-06-12). The `observability_enabled_tests` step at `build.zig:1479-1482` resolves `lazyDependency("otel")` with only `.target`/`.optimize` -- omitting `.otel_use_devnw_tls`, `.otel_disabled`, `.otel_profiles`, `.otel_use_devnw_grpc` that the first call site at `build.zig:621-628` passes. Divergent option sets on the same dependency produce an otel/otel0 module dedup collision under Zig 0.16.
+- **Evidence:**
+  - `build.zig:621-628` -- first `lazyDependency("otel", .{ .target, .optimize, .otel_use_devnw_tls, .otel_disabled, .otel_profiles, .otel_use_devnw_grpc })`
+  - `build.zig:1479-1482` -- second call passes only `.target` and `.optimize`
+  - `zig build test -Dwith_otel=true` → compile error: `file exists in modules 'otel' and 'otel0'`
+  - Default build (`zig build test`) unaffected: 543 pass, 0 fail
+- **Acceptance criteria:**
+  - [ ] Both `lazyDependency("otel")` call sites pass identical option sets
+  - [ ] `zig build test -Dwith_otel=true` compiles without errors
+  - [ ] A CI job exercises the `-Dwith_otel=true` path
+
+---
+
+### GAP-0074: OTel seam hardcodes `enabled = false` -- observability is a no-op regardless of build flag -- **OPEN**
+
+- **Issue:** [#206](https://gitlab.com/devnw/zig/dns/-/issues/206), [#210](https://gitlab.com/devnw/zig/dns/-/issues/210)
+- **Category:** Observability
+- **Severity:** Medium
+- **Status:** **Open** (2026-06-12). `src/observability.zig:30` hardcodes `pub const enabled: bool = false;` regardless of `build_options.with_otel`. A code comment (lines 22-29) explains this was a deliberate workaround for a downstream `build_options`/`build_options0` diamond dedup issue.
+- **Evidence:**
+  - `src/observability.zig:30` -- `pub const enabled: bool = false;`
+  - Comment at lines 22-29 -- documents the intentional workaround
+  - `tests/observability_disabled_test.zig:22` -- test asserts `enabled == true` under `-Dwith_otel=true`; this fails
+  - All span/metric helpers short-circuit to zero-sized no-ops regardless of flag
+- **Acceptance criteria:**
+  - [ ] `observability.enabled` reflects `build_options.with_otel` (true when `-Dwith_otel=true`)
+  - [ ] An enabled-mode integration test captures at least one span
+  - [ ] Or: the `-Dwith_otel` flag is documented as currently non-functional with a tracking note
+
+---
+
+### GAP-0075: `minimum_zig_version` and README claim 0.15.1 but 19 source files require Zig 0.16-only `std.Io.*` -- **OPEN**
+
+- **Issue:** [#211](https://gitlab.com/devnw/zig/dns/-/issues/211), [#70](https://gitlab.com/devnw/zig/dns/-/issues/70) (updated)
+- **Category:** Docs
+- **Severity:** High
+- **Status:** **Open** (2026-06-12). Regresses **GAP-0023** (resolved 2026-01-30 -- was README/zon "0.15.1" vs CI "0.15.2"). Now the gap is 0.15.1 (docs/zon) vs 0.16.0 (CI + actual requirement). 19 source files use `std.Io.*` which was introduced in Zig 0.16.0.
+- **Evidence:**
+  - `build.zig.zon:19` -- `.minimum_zig_version = "0.15.1"`
+  - `README.md:10` -- "| Zig Version | 0.15.1+ |"
+  - `README.md:50` -- "Zig 0.15.1 or later"
+  - `.gitlab-ci.yml:27` -- `ZIG_VERSION: "0.16.0"` (authoritative)
+  - `grep -rln 'std\.Io\.' src/` -- 19 files use the 0.16-only `std.Io` namespace
+  - `src/util/net_compat.zig:3` -- comment acknowledges "`std.net` was restructured in 0.16.0 into `std.Io.net.IpAddress`"
+- **Acceptance criteria:**
+  - [ ] `build.zig.zon` `minimum_zig_version` set to `"0.16.0"`
+  - [ ] `README.md` lines 10 and 50 updated to 0.16.0
+  - [ ] CI builds on the declared minimum (no 0.15.x job succeeds with current code)
+
+---
+
+### GAP-0076: Zone-transfer `buildMinimalSoaRdata` emits placeholder MNAME/RNAME/timers -- **OPEN**
+
+- **Issue:** [#12](https://gitlab.com/devnw/zig/dns/-/issues/12)
+- **Category:** Bug
+- **Severity:** Low
+- **Status:** **Open** (2026-06-12). `src/resolver/zone_transfer.zig:506-524` -- `buildMinimalSoaRdata` sets MNAME and RNAME both to the zone name ("use zone name as placeholder") and hardcodes Refresh=3600/Retry=600/Expire=604800/Minimum=86400 with the comment "(placeholder values)".
+- **Evidence:**
+  - `src/resolver/zone_transfer.zig:497` -- single call site for `buildMinimalSoaRdata`
+  - `src/resolver/zone_transfer.zig:506-524` -- MNAME/RNAME use zone name; timers hardcoded with "(placeholder values)" comments
+- **Impact:** Low -- affects only the synthesized/minimal SOA path; real transferred SOAs are unaffected. Incorrect RNAME (admin mailbox) and fabricated timers may cause incorrect secondary-zone timing or negative-cache TTLs where the synthesized record is used.
+- **Acceptance criteria:**
+  - [ ] SOA RNAME is a configurable admin mailbox, not the zone name
+  - [ ] Refresh/Retry/Expire/Minimum are configuration-driven, not hardcoded constants, OR the function is restricted to non-authoritative/test use with explicit documentation
+
+---
+
+### GAP-0077: Benchmark harness (`bench.zig`, `compare.zig`) broken on Zig 0.16 -- regression-detection capability lost -- **OPEN**
+
+- **Issue:** [#216](https://gitlab.com/devnw/zig/dns/-/issues/216)
+- **Category:** CI-CD
+- **Severity:** Medium
+- **Status:** **Open** (2026-06-12). Supersedes and reverses **PF-18 "No benchmarks -- Won't Do"**; benchmarks were added since that prior determination but have regressed on Zig 0.16.
+- **Evidence:**
+  - `zig build bench` → 9 errors: `benchmarks/bench.zig:162,173,193,209,224,263,290,307,332` -- `error: root source file struct 'time' has no member named 'Timer'` (`std.time.Timer` removed in Zig 0.16)
+  - `zig build compare-bench` → 1 error: `benchmarks/compare.zig:152` -- `error: root source file struct 'process' has no member named 'args'` (`std.process.args` removed in Zig 0.16)
+  - Both `bench` and `compare-bench` are registered build steps in `build.zig:714,750`
+  - Rest of codebase migrated to 0.16 (`zig build` succeeds); benchmark entry points were left behind
+- **Acceptance criteria:**
+  - [ ] `zig build bench` compiles and runs on Zig 0.16.0
+  - [ ] `zig build compare-bench` compiles and runs on Zig 0.16.0
+  - [ ] A CI job compiles both benchmark entry points so future toolchain drift fails loudly
 
 ## Gaps
 
 ### GAP-0048: RPZ wildcard boundary bypass test missing -- **RESOLVED**
+
 - **Issue:** (not yet filed)
 - **Category:** Test
 - **Severity:** Low
@@ -19,6 +165,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0049: DNSSEC canonical RRset sorting not implemented (RFC 4034 S6.3) -- **RESOLVED**
+
 - **Issue:** (not yet filed)
 - **Category:** Bug
 - **Severity:** Medium
@@ -29,6 +176,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0050: RFC_COMPLIANCE.md claims "Complete" for RFC 4033/4034 but RSA missing -- **RESOLVED**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Docs
 - **Severity:** Low
@@ -39,6 +187,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0051: DoQ feature gate blocks all DoQ tests in CI -- **WON'T DO**
+
 - **Issue:** (not yet filed)
 - **Category:** CI-CD
 - **Severity:** Low
@@ -48,6 +197,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0015: 24 issues marked Complete in docs but Open in GitLab tracker -- **WON'T DO**
+
 - **Issue:** [#78](https://gitlab.com/devnw/zig/dns/-/issues/78)
 - **Category:** Bug
 - **Severity:** Medium
@@ -57,6 +207,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0017: Functional UDP/TCP transports suppressed from public API -- **WON'T DO**
+
 - **Issue:** [#80](https://gitlab.com/devnw/zig/dns/-/issues/80)
 - **Category:** Feature
 - **Severity:** Medium
@@ -66,6 +217,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0038: README "Zero Dependencies" claim is inaccurate -- **RESOLVED**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Docs
 - **Severity:** Medium
@@ -76,6 +228,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0039: README RFC 4033/4034/4035 says "Complete" -- RSA missing, should say Partial -- **RESOLVED**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Docs
 - **Severity:** Medium
@@ -86,6 +239,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0040: README RFC 7858 DoT listed "Complete" without asterisk -- **RESOLVED**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Docs
 - **Severity:** Low
@@ -96,6 +250,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0041: Convenience API stubs return error.NotImplemented -- **WON'T DO**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Feature
 - **Severity:** Medium
@@ -105,6 +260,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0042: Client API missing lookupSRV/TXT/PTR/NS/SOA methods -- **WON'T DO**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Feature
 - **Severity:** Medium
@@ -114,6 +270,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0043: Cache hit only formats A/AAAA -- MX/SRV/TXT cache hits return empty -- **RESOLVED**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Bug
 - **Severity:** Medium
@@ -124,6 +281,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0044: Transport abstraction not wired into resolvers -- **WON'T DO**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Code Quality
 - **Severity:** Medium
@@ -133,6 +291,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0045: resolveIterative zero test coverage -- 219 lines, 9 nesting levels, untested -- **WON'T DO**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Test
 - **Severity:** High
@@ -142,6 +301,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0046: Zero fuzz testing for wire parsers -- **WON'T DO**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Test
 - **Severity:** High
@@ -151,6 +311,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0047: spice dependency pins main branch -- **WON'T DO**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Security
 - **Severity:** Medium
@@ -160,6 +321,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0057: DNSSEC validation module has compile-time API mismatches -- dead code -- **RESOLVED**
+
 - **Issue:** (not yet filed)
 - **Category:** Bug
 - **Severity:** Critical
@@ -170,6 +332,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0058: LabelIterator first compression pointer hop skips forward check -- **RESOLVED**
+
 - **Issue:** (not yet filed -- confidential)
 - **Category:** Security
 - **Severity:** High
@@ -181,6 +344,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0059: UDP receive loops lack packet discard count limit -- **RESOLVED**
+
 - **Issue:** (not yet filed -- confidential)
 - **Category:** Security
 - **Severity:** Medium
@@ -192,6 +356,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0060: Client.resolve silently returns NoAnswer for non-A/AAAA queries -- **RESOLVED**
+
 - **Issue:** (not yet filed)
 - **Category:** Bug
 - **Severity:** Medium
@@ -202,6 +367,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0061: TSIG MAC recomputation hardcodes error/other fields to zero -- **RESOLVED**
+
 - **Issue:** (not yet filed -- confidential)
 - **Category:** Security
 - **Severity:** Medium
@@ -213,6 +379,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0062: SIG(0) sign() u32 expiration addition can overflow -- **RESOLVED**
+
 - **Issue:** (not yet filed -- confidential)
 - **Category:** Security
 - **Severity:** Medium
@@ -224,6 +391,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0063: NSEC NODATA validation uses case-sensitive name comparison -- **RESOLVED**
+
 - **Issue:** (not yet filed)
 - **Category:** Security
 - **Severity:** Medium
@@ -235,6 +403,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0064: compareDnsNames does left-to-right byte comparison instead of RFC 4034 Section 6.1 canonical label ordering -- **RESOLVED**
+
 - **Issue:** (not yet filed -- skip-issues mode)
 - **Category:** Bug
 - **Severity:** High
@@ -246,6 +415,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0065: extractNsec3OwnerHash returns base32hex-encoded ASCII instead of decoded raw hash bytes -- **RESOLVED**
+
 - **Issue:** (not yet filed -- skip-issues mode)
 - **Category:** Bug
 - **Severity:** High
@@ -257,6 +427,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0066: validateNodataWithNsec wire-format vs dotted-string mismatch -- **RESOLVED**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Bug
 - **Severity:** High
@@ -270,6 +441,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0067: validateNxdomainWithNsec wire-format vs dotted-string mismatch -- **RESOLVED**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Bug
 - **Severity:** High
@@ -283,6 +455,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0068: computeNsec3Hash receives dotted-string instead of wire-format -- **RESOLVED**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Bug
 - **Severity:** Medium
@@ -296,6 +469,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### GAP-0069: TCP fallback parse failure leaks tcp_response memory -- **RESOLVED**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Bug
 - **Severity:** Medium
@@ -309,6 +483,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### SEC-AUDIT-11: validateChainOfTrust ignores target_zone parameter -- **RESOLVED**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Security
 - **Severity:** Medium
@@ -322,6 +497,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### SEC-AUDIT-12: extractWireLabels silently truncates malformed names -- **RESOLVED**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Security
 - **Severity:** Low
@@ -335,6 +511,7 @@ Last updated: 2026-03-25 (All DNSSEC correctness gaps resolved -- GAP-0066/0067/
 ---
 
 ### SEC-AUDIT-13: base32hexDecode does not reject non-zero trailing bits -- **RESOLVED**
+
 - **Issue:** (not filed -- skip-issues mode)
 - **Category:** Security
 - **Severity:** Low
@@ -529,6 +706,7 @@ The following security findings were identified across all review phases. Findin
 ### Phase 3 + Adversarial Review Security Summary
 
 **Previous findings (Phases 1-3):**
+
 - **Critical:** 1 finding -- **1 resolved** (SEC-C22 infinite loop DoS)
 - **High:** 7 findings -- **7 resolved** (SEC-C02 enum panic, SEC-C05 weak PRNG, SEC-C23 key truncation, SEC-C26 partial write, SEC-NEW-01 OOB in extractTsig, SEC-NEW-02 OOB in extractSig0, SEC-AUDIT-01 LabelIterator forward ptr)
 - **Medium:** 16 findings -- **13 resolved**, **3 won't do** (SEC-C29 replay, SEC-C14/C31 supply chain, SEC-SCAN-03 cache thread-safety)
@@ -536,19 +714,87 @@ The following security findings were identified across all review phases. Findin
 - **Info:** 1 finding -- **1 resolved** (SEC-SCAN-07 forward pointer in name.zig)
 
 **New findings (Phase 3 adversarial review, 2026-03-24) -- all resolved in Round 3:**
+
 - **High:** 1 finding -- **1 resolved** (SEC-SCAN-09 trust anchor digest truncation -- exact length + constantTimeEql)
 - **Medium:** 8 findings -- **8 resolved** (SEC-SCAN-08 constantTimeEql, SEC-SCAN-10/11/12/13 bounds checks, SEC-NEW-02b/03b zone transfer bounds, SEC-NEW-04b NSEC3 iterations capped at 150)
 - **Low:** 5 findings -- **5 resolved** (SEC-SCAN-14 query.len check, SEC-SCAN-15 TsigKey.deinit volatile zero, SEC-SCAN-16/17 @max(0,delta), SEC-NEW-01b @max(0,delta))
 
 **New findings (continued audit, 2026-03-25) -- all resolved:**
+
 - **High:** 2 findings -- **2 resolved** (SEC-AUDIT-06/GAP-0064 NSEC name ordering bypass, SEC-AUDIT-07/GAP-0065 NSEC3 hash format mismatch)
 - **Low:** 3 findings -- **3 resolved** (SEC-AUDIT-08 TSIG fudge overflow, SEC-AUDIT-09 source port randomization, SEC-AUDIT-10 TC bit re-validation)
 
 **New findings (deep audit review, 2026-03-25) -- all resolved:**
+
 - **Medium:** 1 finding -- **1 resolved** (SEC-AUDIT-11 validateChainOfTrust now uses target_zone via isNameInZone)
 - **Low:** 2 findings -- **2 resolved** (SEC-AUDIT-12 extractWireLabels error union, SEC-AUDIT-13 base32hexDecode trailing bits)
 
-**Combined totals (unified table): 58 security findings -- 53 resolved, 5 won't do, 0 open**
+**Combined totals (prior cycles, unified table): 58 security findings -- 53 resolved, 5 won't do, 0 open**
+
+---
+
+### 2026-06-12 Application Security + Adversarial Review Cycle (SEC-A / SEC-SR / SEC-SC)
+
+New cycle: 25 security findings tracked from the OWASP 2025 / CIS v8.1.2 appsec review (`docs/APPSEC_REVIEW_2026-06-12.md`, A-series), an adversarial review of `record.zig` / `zone_file.zig` / `edns.zig` / `zdig.zig` / `zone_transfer.zig` (SR-series, all reproduced), and an automated supply-chain scan (SC-series). All 25 filed as GitLab issues; memory-safety/OOB/UB, terminal-injection, and DNSSEC-bypass items filed **confidential**. **All 25 are OPEN.**
+
+Risk Score = Impact(1-5) x Likelihood(1-5) x 4.
+
+| Rank | Severity | Risk Score | Finding | Component | CWE / OWASP | Evidence (file:line) | Issue | SLA | Status |
+|------|----------|------------|---------|-----------|-------------|----------------------|-------|-----|--------|
+| 1 | High | 64 | SEC-A1: DNSSEC security-theater -- `dnssec=true` requests but never validates (false posture) | recursive.zig, dnssec.zig | CWE-325 / A04:2025,A08:2025 | recursive.zig:110,594 | [#290](https://gitlab.com/devnw/zig/dns/-/issues/290) (confidential); x-ref #207/#255/#256 | 30d | **Open** |
+| 2 | High | 64 | SEC-SR-1: parseCAA `2+tag_length` u8 overflow -> OOB read / panic | record.zig | CWE-190,125 / A03:2025 | record.zig:390 | [#279](https://gitlab.com/devnw/zig/dns/-/issues/279) (confidential) | 30d | **Open** |
+| 3 | High | 64 | SEC-SR-2: parseNSEC3PARAM `5+salt_length` u8 overflow -> OOB read / panic | record.zig | CWE-190,125 / A03:2025 | record.zig:1077 | [#280](https://gitlab.com/devnw/zig/dns/-/issues/280) (confidential) | 30d | **Open** |
+| 4 | High | 48 | SEC-SR-3: ClientSubnet `(prefix+7)/8` u8 overflow -> OOB read | edns.zig | CWE-190,125 / A03:2025 | edns.zig:295,310,337,348 | [#281](https://gitlab.com/devnw/zig/dns/-/issues/281) (confidential); x-ref GAP-0071/#208 | 30d | **Open** |
+| 5 | High | 48 | SEC-SR-4: parseTTL unchecked u32 overflow -> panic / silent TTL+SOA-timer wrap | zone_file.zig | CWE-190 / A03:2025 | zone_file.zig:700,710 | [#282](https://gitlab.com/devnw/zig/dns/-/issues/282) (confidential) | 30d | **Open** |
+| 6 | High | 48 | SEC-SR-5: zdig terminal escape injection -- raw TXT/CAA/name bytes in non-JSON output | cmd/zdig.zig | CWE-150,116 / A03:2025 | zdig.zig:707,739,869 | [#283](https://gitlab.com/devnw/zig/dns/-/issues/283) (confidential); x-ref #196 | 30d | **Open** |
+| 7 | High | 48 | SEC-A2: NSEC/NSEC3 denial-of-existence accepted without RRSIG verification | dnssec.zig | CWE-347 / A08:2025 | dnssec.zig:220-354 | [#291](https://gitlab.com/devnw/zig/dns/-/issues/291) (confidential) | 30d | **Open** |
+| 8 | High | 48 | SEC-A3: DS chain trusts unauthenticated DS; `.secure` on key presence -- chain forgery | dnssec.zig | CWE-345 / A08:2025 | dnssec.zig:559-580 | [#292](https://gitlab.com/devnw/zig/dns/-/issues/292) (confidential) | 30d | **Open** |
+| 9 | High | 32 | SEC-A4: DoH backend never receives verification hostname (SNI) | doh.zig | CWE-295 / A02:2025,A04:2025 | doh.zig:102-105,203-206 | [#293](https://gitlab.com/devnw/zig/dns/-/issues/293) | 30d | **Open** |
+| 10 | High | 32 | SEC-A5: DoQ discards `ca_pem`, passes no verification name to backend | doq.zig, channel.zig | CWE-295 / A02:2025,A04:2025 | doq.zig:36-42,179-186 | [#294](https://gitlab.com/devnw/zig/dns/-/issues/294) | 30d | **Open** |
+| 11 | Medium | 36 | SEC-SR-6: AXFR unbounded receive loop; `timeout_ms` not enforced as transfer deadline | zone_transfer.zig | CWE-400,835 / A05:2025 | zone_transfer.zig:299,266,276 | [#284](https://gitlab.com/devnw/zig/dns/-/issues/284) | 90d | **Open** |
+| 12 | Medium | 36 | SEC-SR-7: `verify_serial` dead config -- no RFC 1982 serial validation in AXFR/IXFR | zone_transfer.zig | CWE-345 / A08:2025 | zone_transfer.zig:43 | [#285](https://gitlab.com/devnw/zig/dns/-/issues/285) | 90d | **Open** |
+| 13 | Medium | 36 | SEC-SR-8: ZoneParser leaks `makeAbsolute` owner-name buffer per explicit-owner record | zone_file.zig | CWE-401 / A05:2025 | zone_file.zig:429,462,476 | [#286](https://gitlab.com/devnw/zig/dns/-/issues/286) | 90d | **Open** |
+| 14 | Medium | 36 | SEC-SR-9: parseTransferResponse leaks record name on truncation break | zone_transfer.zig | CWE-401 / A05:2025 | zone_transfer.zig:623,626,634 | [#287](https://gitlab.com/devnw/zig/dns/-/issues/287) | 90d | **Open** |
+| 15 | Medium | 36 | SEC-A7: recursive resolver accepts upward/lateral referrals (no zone-descent check) | recursive.zig | CWE-345 / A06:2025 | recursive.zig:705-719,405-457 | [#296](https://gitlab.com/devnw/zig/dns/-/issues/296); x-ref #214 | 90d | **Open** |
+| 16 | Medium | 36 | SEC-A8: RRSIG verify omits key-tag + signer-bailiwick + labels/wildcard checks | dnssec.zig | CWE-347 / A08:2025 | dnssec.zig:361-394 | [#297](https://gitlab.com/devnw/zig/dns/-/issues/297) (confidential) | 90d | **Open** |
+| 17 | Medium | 24 | SEC-A6: no cert-verified/min-TLS enforcement; CA fail-closed guard only on DoT | dot.zig, doh.zig, doq.zig | CWE-1188,295 / A02:2025 | dot.zig:211-215; doh.zig:172-175 | [#295](https://gitlab.com/devnw/zig/dns/-/issues/295) | 90d | **Open** |
+| 18 | Low | 16 | SEC-SR-10: AXFR off-by-one drops valid final record (`<` should be `<=`) | zone_transfer.zig | CWE-193,345 / A04:2025 | zone_transfer.zig:621 | [#288](https://gitlab.com/devnw/zig/dns/-/issues/288) | 180d | **Open** |
+| 19 | Low | 16 | SEC-A9: SHA-1 DS digests + deprecated algorithms accepted without downgrade policy | dnssec.zig, record.zig | CWE-327 / A04:2025 | dnssec.zig:594-616,785-831 | [#298](https://gitlab.com/devnw/zig/dns/-/issues/298) | 180d | **Open** |
+| 20 | Low | 16 | SEC-A12: DoH accepts response when `Content-Type` header absent | doh.zig | CWE-755 / A10:2025 | doh.zig:234-239,255-260 | [#301](https://gitlab.com/devnw/zig/dns/-/issues/301) | 180d | **Open** |
+| 21 | Low | 8 | SEC-SR-11: Padding.encode up-to-64KiB zero allocation from attacker-influenced length | edns.zig | CWE-789,400 / A05:2025 | edns.zig:557-561 | [#289](https://gitlab.com/devnw/zig/dns/-/issues/289) | 180d | **Open** (suspected) |
+| 22 | Low | 8 | SEC-A10: SystemRandom seeds non-CSPRNG (latent footgun) | util/random.zig | CWE-338,330 / A04:2025 | random.zig:43-70 | [#299](https://gitlab.com/devnw/zig/dns/-/issues/299) | 180d | **Open** |
+| 23 | Low | 8 | SEC-A11: connection-pool key compares host by hash, omits TLS identity | connection_pool.zig | CWE-345 / A01:2025 | connection_pool.zig:213-223 | [#300](https://gitlab.com/devnw/zig/dns/-/issues/300) | 180d | **Open** (suspected) |
+| 24 | Low | 8 | SEC-SC-1: pre-commit hooks tag-pinned, not SHA-pinned | .pre-commit-config.yaml | CWE-829 / A08:2025 | .pre-commit-config.yaml | [#302](https://gitlab.com/devnw/zig/dns/-/issues/302) | 180d | **Open** |
+| 25 | Low | 8 | SEC-SC-2: sync_diamond_deps.py parse_target lacks format validation | scripts/sync_diamond_deps.py | CWE-20 / A08:2025 | sync_diamond_deps.py:353-357 | [#303](https://gitlab.com/devnw/zig/dns/-/issues/303) | 180d | **Open** |
+
+**2026-06-12 cycle totals: 25 findings -- 0 resolved, 0 won't do, 25 open.** By severity: High 10, Medium 7, Low 8. Confidential: 9 (#279-#283, #290-#292, #297).
+
+#### Findings by area (2026-06-12 cycle)
+
+- **DNSSEC (auth/integrity):** SEC-A1 (#290), SEC-A2 (#291), SEC-A3 (#292), SEC-A8 (#297), SEC-A9 (#298). The validator remains unreachable from the pipeline (GAP-0070/#207); A2/A3/A8 are fail-open flaws a consumer hits if wiring it directly.
+- **Wire/RDATA parsers (memory safety):** SEC-SR-1 (#279), SEC-SR-2 (#280), SEC-SR-3 (#281) -- `u8` length-arithmetic overflows defeating bounds checks; SEC-SR-4 (#282) `u32` TTL overflow.
+- **Encrypted transports (TLS verification):** SEC-A4 (#293), SEC-A5 (#294), SEC-A6 (#295) -- library under-provisions verification material to backends; no `peerVerified()`/min-TLS floor.
+- **Zone transfer (AXFR/IXFR):** SEC-SR-6 (#284), SEC-SR-7 (#285), SEC-SR-9 (#287), SEC-SR-10 (#288) -- unbounded loop, dead freshness config, leak on truncation, off-by-one.
+- **Zone-file ingest:** SEC-SR-4 (#282), SEC-SR-8 (#286).
+- **CLI/output:** SEC-SR-5 (#283) -- terminal escape injection in `zdig`.
+- **EDNS:** SEC-SR-3 (#281), SEC-SR-11 (#289).
+- **Referral trust:** SEC-A7 (#296).
+- **Randomness:** SEC-A10 (#299).
+- **Connection pool:** SEC-A11 (#300).
+- **Supply chain / tooling:** SEC-SC-1 (#302), SEC-SC-2 (#303).
+
+#### Remediation roadmap (2026-06-12 cycle)
+
+- **Quick wins (< 1 day each):** SEC-SR-1/#279, SEC-SR-2/#280, SEC-SR-3/#281 (widen length arithmetic to `usize`); SEC-SR-4/#282 (checked `u32` add/mul); SEC-SR-10/#288 (`<` -> `<=`); SEC-A12/#301 (fail closed on missing `Content-Type`); SEC-SR-11/#289 (cap padding); SEC-SR-8/#286 + SEC-SR-9/#287 (add `errdefer`/free); SEC-A10/#299 (CSPRNG-back or delete); SEC-SC-1/#302 (SHA-pin hooks); SEC-SC-2/#303 (validate spec).
+- **Medium (1-5 days):** SEC-SR-5/#283 (output sanitizer); SEC-SR-6/#284 (transfer deadline + caps); SEC-SR-7/#285 (RFC 1982); SEC-A4/#293 + SEC-A5/#294 + SEC-A6/#295 (thread `server_name`/`ca_pem`/`use_system_ca` + `peerVerified()`/`min_tls_version`); SEC-A7/#296 (zone-descent check); SEC-A1/#290 (rename/guard flag or wire validator, gated on #255+#207).
+- **Strategic (> 5 days):** SEC-A2/#291 + SEC-A3/#292 + SEC-A8/#297 -- correct top-down DNSSEC validator (RRSIG-verify NSEC/NSEC3 and DS RRsets; `.secure` only on verified target data; key-tag/signer-bailiwick/labels), prerequisite to safely wiring DNSSEC validation (GAP-0070).
+
+#### Immediate actions
+
+- **No leaked secrets** were found in this cycle; no credential rotation required.
+- **No active RCE.** SEC-SR-1/#279 and SEC-SR-2/#280 are OOB reads that are remotely triggerable and cause a guaranteed panic (DoS) in ReleaseSafe and UB in ReleaseFast -- prioritize within the 30-day SLA for any consumer parsing untrusted CAA/NSEC3PARAM records. SEC-A1/#290 means **`dnssec=true` provides no protection today**; consumers relying on it for integrity should be notified that the control is non-functional (cross-ref GAP-0070).
+
+---
 
 ### Deduplication Notes
 
@@ -571,10 +817,15 @@ The following security findings were identified across all review phases. Findin
 | GAP-0067 / GAP-0064 | GAP-0064 fixed label ordering in compareDnsNames; GAP-0067 identified that qname was passed as dotted-string to the now-correct wire-format comparator | Both resolved: ordering fix (GAP-0064) + format fix (GAP-0067) |
 | GAP-0068 / GAP-0065 | GAP-0065 fixed NSEC3 owner hash decode; GAP-0068 identified that qname hash input was dotted-string instead of wire-format | Both resolved: owner hash (GAP-0065) + query hash (GAP-0068) |
 | GAP-0066 / GAP-0067 / GAP-0068 | All three shared a common root cause: missing dotted-string to wire-format conversion at NSEC/NSEC3 validation entry points | All resolved: dottedToWire conversion added at all entry points |
+| SEC-A1 (#290) | GAP-0070/#207 (validator wiring), #255 (RD vs DO/no OPT), #256 (false advertising) | Cross-referenced, not duplicated -- #290 tracks security posture; functional wiring stays on #207; comments added to #207/#255/#256 |
+| SEC-A7 (#296) | #214 (perf+security glue-to-NS O(glue x NS) CPU-DoS) | Cross-referenced -- same extractReferral region; complementary (A7 = trust/zone-descent, #214 = CPU-DoS); comment added to #214 |
+| SEC-SR-3 (#281) | GAP-0071/#208 (ECS wiring) | Cross-referenced -- overflow becomes actively exploitable once ECS is injected into live queries |
+| SEC-A2/A3/A8 (#291/#292/#297) | Prior SEC-AUDIT-11 (target_zone ownership) | Distinct -- prior fix added zone-ownership check; these are the deeper missing-RRSIG-over-NSEC/DS and key-tag/bailiwick/labels gaps |
 
 ### Remediation Roadmap
 
 **Completed (previous cycles):**
+
 - ~~SEC-C22~~: `outer:` label + `continue :outer` in connection_pool.zig -- **Resolved**
 - ~~SEC-C30~~: Forward pointer rejection in dns_name.zig -- **Resolved**
 - ~~SEC-C33~~: Read loop for 2-byte length prefix in zone_transfer.zig -- **Resolved**
@@ -587,6 +838,7 @@ The following security findings were identified across all review phases. Findin
 - ~~SEC-C06/C25~~: `secureZero` on key material -- **Resolved**
 
 **Completed quick wins (commit 6d42d51):**
+
 - ~~SEC-NEW-01~~: Bounds check added before `message[offset .. offset + rdlength]` in extractTsig -- **Resolved**
 - ~~SEC-NEW-03~~: Bounds check `if (end > data.len) return error.InvalidRR` added in skipRR -- **Resolved**
 - ~~SEC-NEW-06~~: Bounds check `if (offset + 4 > message.len) return error.InvalidMessage` before question skip -- **Resolved**
@@ -596,10 +848,12 @@ The following security findings were identified across all review phases. Findin
 - ~~SEC-C100~~: Fudge clamped to `self.fudge * 2` after MAC verification -- **Resolved**
 
 **Completed quick wins (commit 8fef334):**
+
 - ~~SEC-NEW-02~~: Bounds check added before `message[offset .. offset + rdlength]` in extractSig0 -- **Resolved**
 - ~~SEC-NEW-05~~: Bounds validation before `@intCast(u16)` in EDNS encode/buildOption -- **Resolved**
 
 **Completed quick wins (final gap closure cycle):**
+
 - ~~SEC-SCAN-01~~: `TsigKey.deinit()` with `secureZero` on `.secret` -- **Resolved**
 - ~~SEC-SCAN-02~~: Overflow check before `arcount + 1` in tsig.zig and sig0.zig -- **Resolved**
 - ~~SEC-SCAN-04~~: Bounds check before `@intCast(u16)` on wire_req.len in tcp.zig, dot.zig, connection_pool.zig -- **Resolved**
@@ -611,9 +865,11 @@ The following security findings were identified across all review phases. Findin
 **New findings resolved (Round 3 gap closure, 2026-03-24):**
 
 *High priority (30-day SLA):*
+
 - ~~SEC-SCAN-09~~: Trust anchor digest comparison now uses exact length + `constantTimeEql` -- **Resolved**
 
 *Medium priority (90-day SLA):*
+
 - ~~SEC-SCAN-08~~: All DS digest comparisons use `constantTimeEql` -- **Resolved**
 - ~~SEC-SCAN-10~~: `options.len` checked before `@intCast` -- **Resolved**
 - ~~SEC-SCAN-11~~: Config values clamped via `clampToUnsigned` -- **Resolved**
@@ -624,6 +880,7 @@ The following security findings were identified across all review phases. Findin
 - ~~SEC-NEW-04b~~: NSEC3 iterations capped at 150 (RFC 9276) -- **Resolved**
 
 *Low priority (180-day SLA):*
+
 - ~~SEC-SCAN-14~~: Query length checked before `@intCast` -- **Resolved**
 - ~~SEC-SCAN-15~~: `TsigKey.deinit` with volatile zero -- **Resolved**
 - ~~SEC-SCAN-16~~: `@max(0, delta)` in connection_pool -- **Resolved**
@@ -633,9 +890,11 @@ The following security findings were identified across all review phases. Findin
 **Full audit findings resolved (2026-03-25):**
 
 *High priority (30-day SLA):*
+
 - ~~SEC-AUDIT-01 / GAP-0058~~: Forward pointer check on first hop in LabelIterator -- **Resolved**
 
 *Medium priority (90-day SLA):*
+
 - ~~SEC-AUDIT-02 / GAP-0059~~: max_spurious_discards=1000 in UDP receive loops -- **Resolved**
 - ~~SEC-AUDIT-03 / GAP-0061~~: buildTsigVariables parameterized with error_code/other_data -- **Resolved**
 - ~~SEC-AUDIT-04 / GAP-0062~~: std.math.add(u32,...) with error.TimestampOverflow in SIG(0) -- **Resolved**
@@ -644,10 +903,12 @@ The following security findings were identified across all review phases. Findin
 **Findings resolved (continued audit, 2026-03-25):**
 
 *High priority (30-day SLA):*
+
 - ~~SEC-AUDIT-06 / GAP-0064~~: compareDnsNames rewritten for RFC 4034 S6.1 canonical label ordering; 9 new tests -- **Resolved**
 - ~~SEC-AUDIT-07 / GAP-0065~~: decodeNsec3OwnerHash with base32hex codec replaces extractNsec3OwnerHash; 6 new tests -- **Resolved**
 
 *Low priority (180-day SLA):*
+
 - ~~SEC-AUDIT-08~~: TSIG fudge u16*2 overflow fixed with u32 widening; 2 new tests -- **Resolved**
 - ~~SEC-AUDIT-09~~: Doc comments added about OS-dependent source port randomization (RFC 5452) -- **Resolved**
 - ~~SEC-AUDIT-10~~: TCP fallback response re-validation (TXID + responseMatchesQuery) added -- **Resolved**
@@ -655,15 +916,18 @@ The following security findings were identified across all review phases. Findin
 **New findings (continued audit, 2026-03-25) -- all resolved:**
 
 *High priority (30-day SLA):*
+
 - ~~GAP-0066~~: `validateNodataWithNsec` wire-format -- `dottedToWire` + `wireNamesEqlInsensitive` -- **Resolved** (2026-03-25)
 - ~~GAP-0067~~: `validateNxdomainWithNsec` wire-format -- `dottedToWire` before `nameInNsecRange` -- **Resolved** (2026-03-25)
 
 *Medium priority (90-day SLA):*
+
 - ~~GAP-0068~~: `computeNsec3Hash` wire-format -- `dottedToWire` in both NSEC3 entry points -- **Resolved** (2026-03-25)
 - ~~GAP-0069~~: TCP fallback `Message.parse` failure leaks `tcp_response` memory -- **Resolved** (2026-03-25)
 - ~~SEC-AUDIT-11~~: `validateChainOfTrust` -- `target_zone` used via `isNameInZone` -- **Resolved** (2026-03-25)
 
 *Low priority (180-day SLA):*
+
 - ~~SEC-AUDIT-12~~: `extractWireLabels` returns error union, rejects compression + OOB -- **Resolved** (2026-03-25)
 - ~~SEC-AUDIT-13~~: `base32hexDecode` rejects non-zero trailing bits per RFC 4648 -- **Resolved** (2026-03-25)
 
@@ -715,6 +979,7 @@ The following security findings were identified across all review phases. Findin
 - **Exploit surface:** Internal (recursive resolver, NSEC3 validation path)
 
 **Remaining (Won't Do / deferred):**
+
 - SEC-C29: SIG(0) replay cache -- **Won't Do** (defense-in-depth; requires bounded replay cache data structure; low practical risk)
 - ADV-02: TSIG replay cache -- **Won't Do** (defense-in-depth; complementary to SEC-C29; low practical risk)
 - SEC-C32: SIG(0) timestamp u32 overflow in 2106 -- **Won't Do** (Year 2106 issue; not actionable)
@@ -725,19 +990,34 @@ The following security findings were identified across all review phases. Findin
 
 ## Gap Priority Matrix
 
-| Severity | Total | Resolved | Won't Do | Open | Gap-IDs / SEC-IDs |
-|----------|-------|----------|----------|------|-------------------|
-| Critical | 3 | 3 | 0 | 0 | **Resolved:** GAP-0027/SEC-C26, GAP-0028/SEC-C22, GAP-0057 (DNSSEC compile errors) |
-| High | 17 | 15 | 2 | 0 | **Resolved:** GAP-0026, GAP-0029, GAP-0030, GAP-0033/SEC-C20, GAP-0034/SEC-C21, SEC-C23, SEC-C05/C24, SEC-NEW-01, SEC-NEW-02, SEC-SCAN-09, GAP-0058/SEC-AUDIT-01, GAP-0064/SEC-AUDIT-06, GAP-0065/SEC-AUDIT-07, GAP-0066, GAP-0067. **Won't Do:** GAP-0045, GAP-0046. |
-| Medium | 45 | 39 | 6 | 0 | **Resolved:** +GAP-0038, GAP-0039, GAP-0043, GAP-0049, SEC-SCAN-01, SEC-SCAN-02, SEC-SCAN-08, SEC-SCAN-10, SEC-SCAN-11, SEC-SCAN-12, SEC-SCAN-13, SEC-NEW-02b, SEC-NEW-03b, SEC-NEW-04b, GAP-0059/SEC-AUDIT-02, GAP-0060, GAP-0061/SEC-AUDIT-03, GAP-0062/SEC-AUDIT-04, GAP-0063/SEC-AUDIT-05, GAP-0068, GAP-0069, SEC-AUDIT-11. **Won't Do:** GAP-0015, GAP-0017, GAP-0041, GAP-0042, GAP-0044, GAP-0047, SEC-C29, SEC-SCAN-03, SEC-C14/C31. |
-| Low | 32 | 27 | 3 | 0 | **Resolved:** GAP-0040, GAP-0048, GAP-0050, ADV-05, SEC-SCAN-04, SEC-SCAN-05, SEC-SCAN-06, SEC-SCAN-14, SEC-SCAN-15, SEC-SCAN-16, SEC-SCAN-17, SEC-NEW-01b, SEC-AUDIT-08, SEC-AUDIT-09, SEC-AUDIT-10, SEC-AUDIT-12, SEC-AUDIT-13. **Won't Do:** GAP-0051, SEC-C32, ADV-02. |
+> **Updated 2026-06-12:** 8 new open gaps added (GAP-0070..GAP-0077). Totals below reflect the cumulative state including all prior cycles.
+
+| Severity | Total | Resolved | Won't Do | **Open** | Gap-IDs / SEC-IDs |
+|----------|-------|----------|----------|----------|-------------------|
+| Critical | 4 | 3 | 0 | **1** | **Open:** GAP-0070. **Resolved:** GAP-0027/SEC-C26, GAP-0028/SEC-C22, GAP-0057 |
+| High | 19 | 15 | 2 | **2** | **Open:** GAP-0073, GAP-0075. **Resolved:** GAP-0026, GAP-0029, GAP-0030, GAP-0033/SEC-C20, GAP-0034/SEC-C21, SEC-C23, SEC-C05/C24, SEC-NEW-01, SEC-NEW-02, SEC-SCAN-09, GAP-0058/SEC-AUDIT-01, GAP-0064/SEC-AUDIT-06, GAP-0065/SEC-AUDIT-07, GAP-0066, GAP-0067. **Won't Do:** GAP-0045, GAP-0046. |
+| Medium | 49 | 39 | 6 | **4** | **Open:** GAP-0071, GAP-0072, GAP-0074, GAP-0077. **Resolved:** GAP-0038, GAP-0039, GAP-0043, GAP-0049, SEC-SCAN-01, SEC-SCAN-02, SEC-SCAN-08, SEC-SCAN-10, SEC-SCAN-11, SEC-SCAN-12, SEC-SCAN-13, SEC-NEW-02b, SEC-NEW-03b, SEC-NEW-04b, GAP-0059/SEC-AUDIT-02, GAP-0060, GAP-0061/SEC-AUDIT-03, GAP-0062/SEC-AUDIT-04, GAP-0063/SEC-AUDIT-05, GAP-0068, GAP-0069, SEC-AUDIT-11. **Won't Do:** GAP-0015, GAP-0017, GAP-0041, GAP-0042, GAP-0044, GAP-0047, SEC-C29, SEC-SCAN-03, SEC-C14/C31. |
+| Low | 33 | 27 | 3 | **1** | **Open:** GAP-0076. **Resolved:** GAP-0040, GAP-0048, GAP-0050, ADV-05, SEC-SCAN-04, SEC-SCAN-05, SEC-SCAN-06, SEC-SCAN-14, SEC-SCAN-15, SEC-SCAN-16, SEC-SCAN-17, SEC-NEW-01b, SEC-AUDIT-08, SEC-AUDIT-09, SEC-AUDIT-10, SEC-AUDIT-12, SEC-AUDIT-13. **Won't Do:** GAP-0051, SEC-C32, ADV-02. |
 | Info | 1 | 1 | 0 | 0 | **Resolved:** SEC-SCAN-07 |
 
 ## Production Readiness Assessment
 
-### Remaining Open Items
+### Open Items (2026-06-12)
 
-**0 open findings.** All gaps from the continued audit have been resolved.
+**8 open findings.** The prior "0 open / production-ready" state was accurate for the code at 2026-03-25. Gaps below were introduced by post-cycle changes (Zig 0.16 migration, benchmark addition, otel seam workaround).
+
+| Gap-ID | Severity | Summary | Status |
+|--------|----------|---------|--------|
+| GAP-0070 | **Critical** | DNSSEC validator never invoked from resolution pipeline (`dnssec=true` only sets DO bit) | Open |
+| GAP-0073 | High | `-Dwith_otel=true` build broken -- second `lazyDependency("otel")` omits 4 options | Open |
+| GAP-0075 | High | `minimum_zig_version` / README claim 0.15.1 but 19 source files require Zig 0.16-only `std.Io.*` | Open |
+| GAP-0071 | Medium | ECS (`ClientSubnet`) type complete but never injected into outgoing queries | Open |
+| GAP-0072 | Medium | DNS Cookies (`Cookie`) type complete but never wired into query building | Open |
+| GAP-0074 | Medium | OTel seam hardcodes `enabled = false` regardless of `-Dwith_otel` flag | Open |
+| GAP-0077 | Medium | Benchmark harness (`bench.zig`, `compare.zig`) broken on Zig 0.16 | Open |
+| GAP-0076 | Low | Zone-transfer `buildMinimalSoaRdata` emits placeholder MNAME/RNAME/timers | Open |
+
+### Previously Resolved Items (last cycle, 2026-03-25)
 
 | Gap-ID / SEC-ID | Severity | Risk Score | Summary | Status |
 |-----------------|----------|------------|---------|--------|
@@ -768,9 +1048,13 @@ The following security findings were identified across all review phases. Findin
 
 ### Production Blockers
 
-**0 active production blockers.** All DNSSEC correctness issues have been resolved. The library is DNSSEC production-ready.
+**1 active critical production blocker (2026-06-12).** GAP-0070 invalidates the "DNSSEC production-ready" claim.
 
-All blockers resolved:
+| Blocker | Severity | Status | Impact |
+|---------|----------|--------|--------|
+| **GAP-0070** | Critical | **Open** | `dnssec=true` provides no validation -- validator never called from resolution pipeline |
+
+Previously resolved blockers (2026-03-25):
 
 - ~~**GAP-0066**~~ (High, DNSSEC correctness): **RESOLVED** (2026-03-25). `validateNodataWithNsec` -- `dottedToWire` + `wireNamesEqlInsensitive`. 1 new test.
 - ~~**GAP-0067**~~ (High, DNSSEC correctness): **RESOLVED** (2026-03-25). `validateNxdomainWithNsec` -- `dottedToWire` before `nameInNsecRange`. 1 new test.
@@ -792,11 +1076,11 @@ Remaining production recommendations (non-blocking, Won't Do):
 1. **GAP-0045** (High, test coverage): The core `resolveIterative` function (219 lines, 9 nesting levels) has zero test coverage. Won't Do -- requires mock DNS infrastructure.
 2. **GAP-0046** (High, fuzz testing): Wire parsers have no fuzz testing despite 7 bounds-check bugs found by manual review. Won't Do -- fuzz targets exist but CI integration deferred.
 
-**The library is production-ready for DNSSEC-enabled deployments.** All DNSSEC correctness issues (wire-format conversion, canonical ordering, hash computation, chain-of-trust zone scoping) have been resolved. All four NSEC/NSEC3 validation functions (`validateNodataWithNsec`, `validateNxdomainWithNsec`, `validateNxdomainWithNsec3`, `validateNodataWithNsec3`) are now functional. Input validation hardening (extractWireLabels error unions, base32hexDecode trailing bit rejection) provides defense-in-depth. 525/525 tests pass.
+**The library is NOT production-ready for DNSSEC-enabled deployments until GAP-0070 is resolved.** DNSSEC correctness at the validator level (wire-format conversion, canonical ordering, hash computation, chain-of-trust zone scoping) was fully resolved in the prior cycle. The remaining gap is that the validator is never invoked from the resolution pipeline. All four NSEC/NSEC3 validation functions are functional in isolation; they need to be wired into `recursive.zig`. Default (non-DNSSEC) resolution is unaffected. 543/543 tests pass in the default build.
 
 ---
 
-# Parallelism & Spice Integration GAP Analysis
+## Parallelism & Spice Integration GAP Analysis
 
 Last updated: 2026-03-30
 

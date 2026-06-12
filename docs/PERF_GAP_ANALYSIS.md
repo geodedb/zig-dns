@@ -1,16 +1,43 @@
 # Performance Gap Analysis
 
-Last updated: 2026-03-25 (Audit deep review complete -- DNSSEC-path scan found 4 micro-findings, all negligible vs crypto cost; no new items added. Zero perf regressions from recent commits. 47 Resolved, 21 Won't Do, 0 Open, 1 Blocked.)
+Last updated: 2026-06-12 (Round 5 review -- benchmark harness + resolver/cache/policy scan added 12 new open findings: bench harness broken under Zig 0.16, glue-to-NS CPU-DoS amplification, zone/cache/rpz/failover/parallel hot-path issues. 47 Resolved, 21 Won't Do, 12 Open, 1 Blocked.)
+
+> Previous: 2026-03-25 (Audit deep review complete -- DNSSEC-path scan found 4 micro-findings, all negligible vs crypto cost; no new items added. Zero perf regressions from recent commits. 47 Resolved, 21 Won't Do, 0 Open, 1 Blocked.)
 
 ## Summary
 
 | Status | Count | Items |
 |---|---|---|
 | **Resolved** | 47 | PF-01, PF-02b, PF-04, PF-06, PF-07, PF-08, PF-09, PF-11, PF-12, PF-15, PF-17, PF-19, PF-20, PF-21, PF-22, PF-22-prefetch, PF-23, PF-24, PF-24-dual-cache, PF-25, PF-26, PF-27, PF-28, PF-29, PF-30, PF-31, PF-NEW-01, PF-NEW-02, PF-NEW-03, PF-NEW-04, PF-NEW-05, PF-NEW-06, PF-NEW-07, PF-NEW-08, PF-NEW-09, PF-NEW-10, PF-NEW-12, PF-NEW-13, PF-NEW-14, PF-NEW-15, PF-NEW-21, PF-NEW-23, PF-NEW-24, PF-NEW-25, PF-NEW-29, PF-NEW-30, PF-NEW-31 |
-| **Open** | 0 | |
+| **Open** | 12 | PF-NEW-38, PF-NEW-35, PF-NEW-36, PF-NEW-39, PF-NEW-32, PF-NEW-33, PF-NEW-40, PF-NEW-41, PF-NEW-43, PF-NEW-42, PF-NEW-34, PF-NEW-37 |
 | **Won't Do** | 21 | PF-02, PF-02b-evict, PF-02c, PF-03, PF-03b, PF-03c, PF-05, PF-10, PF-13, PF-14, PF-16, PF-18, PF-NEW-16, PF-NEW-17, PF-NEW-18, PF-NEW-19, PF-NEW-20, PF-NEW-22, PF-NEW-27, PF-NEW-28, PF-21-pool |
 | **Blocked** | 1 | PF-23-spice |
-| **Total** | **69** |
+| **Total** | **81** | |
+
+### Round 5 (2026-06-12) -- New Open Findings
+
+A benchmark-harness and resolver/cache/policy scan surfaced 12 new open items. The benchmark
+harness no longer compiles under Zig 0.16 (regression detection is lost), and `scale_bench`
+measures the legacy O(n) `cache.zig` rather than the production `DnsCache`. The highest-impact
+runtime finding is a glue-to-NS O(glue x NS) join in `extractReferral` that lets a crafted
+referral force ~16.7M case-fold comparisons (CPU-DoS amplification). The rest are O(N) / O(N^2)
+hot-path issues in zone lookup, cache append, RPZ rule scan, failover selection, and an
+over-eager DNSSEC thread-pool threshold.
+
+| Rank | ID | Issue | PerfScore | Severity | Area |
+|---|---|---|---|---|---|
+| 1 | PF-NEW-38 | [#212](https://gitlab.com/devnw/zig/dns/-/issues/212) Bench harness broken (Zig 0.16) | 80 | P1 | ci |
+| 2 | PF-NEW-35 | [#214](https://gitlab.com/devnw/zig/dns/-/issues/214) glue-to-NS O(g x n) CPU-DoS | 64 | P1 | app |
+| 3 | PF-NEW-36 | [#213](https://gitlab.com/devnw/zig/dns/-/issues/213) scale_bench measures legacy cache | 60 | P2 | ci |
+| 4 | PF-NEW-39 | [#215](https://gitlab.com/devnw/zig/dns/-/issues/215) Zone.getRecords 2x O(N) scans | 48 | P2 | app |
+| 5 | PF-NEW-32 | [#217](https://gitlab.com/devnw/zig/dns/-/issues/217) putRecordWithKey O(N^2) rdata copy | 36 | P2 | db |
+| 6 | PF-NEW-33 | [#218](https://gitlab.com/devnw/zig/dns/-/issues/218) selectServer ArrayList alloc under mutex | 36 | P2 | app |
+| 7 | PF-NEW-40 | [#219](https://gitlab.com/devnw/zig/dns/-/issues/219) RPZ linear rule scan per query | 36 | P2 | app |
+| 8 | PF-NEW-41 | [#220](https://gitlab.com/devnw/zig/dns/-/issues/220) parallelDnssec threshold=2 regression | 36 | P2 | app |
+| 9 | PF-NEW-43 | [#221](https://gitlab.com/devnw/zig/dns/-/issues/221) prefetch hashmaps no mutex (latent) | 32 | P2 | app |
+| 10 | PF-NEW-42 | [#222](https://gitlab.com/devnw/zig/dns/-/issues/222) failover weighted recompute per call | 24 | P3 | app |
+| 11 | PF-NEW-34 | [#223](https://gitlab.com/devnw/zig/dns/-/issues/223) RPZ sort-per-append O(N^2 log N) | 16 | P3 | app |
+| 12 | PF-NEW-37 | [#224](https://gitlab.com/devnw/zig/dns/-/issues/224) minimizedName double alloc (no prod callers) | 8 | P3 | app |
 
 ### Audit Deep Review (2026-03-25) -- No New Findings
 
@@ -87,21 +114,44 @@ Note: Many high-scoring items classified as Won't Do (require architectural chan
 
 ### Won't Do (newly classified)
 
-36. **PF-NEW-22 (P3, PerfScore 3):** **Won't Do.** Redundant timestamp syscalls -- auto-fixed by PF-24-dual-cache migration (pass shared `now` timestamp). Status: Won't Do. Reason: Handled via different controls (PF-24-dual-cache migration).
-37. **PF-13 (P2, PerfScore 48):** **Won't Do.** No concurrent query support -- requires PF-14 (cache thread safety) first.
-38. **PF-16 (P3, PerfScore 16):** **Won't Do.** `std.crypto.random` is already OS CSPRNG; no per-call PRNG init overhead.
-39. **PF-10 (P2, PerfScore 24):** **Won't Do.** Remaining 13 allocPrint sites return heap-owned strings to caller; stack buffer not applicable.
-40. **PF-NEW-28 (Info, PerfScore 0.5):** **Won't Do.** MessageBuilder zero-fills 12 bytes overwritten by finish(); <1ns impact.
+1. **PF-NEW-22 (P3, PerfScore 3):** **Won't Do.** Redundant timestamp syscalls -- auto-fixed by PF-24-dual-cache migration (pass shared `now` timestamp). Status: Won't Do. Reason: Handled via different controls (PF-24-dual-cache migration).
+2. **PF-13 (P2, PerfScore 48):** **Won't Do.** No concurrent query support -- requires PF-14 (cache thread safety) first.
+3. **PF-16 (P3, PerfScore 16):** **Won't Do.** `std.crypto.random` is already OS CSPRNG; no per-call PRNG init overhead.
+4. **PF-10 (P2, PerfScore 24):** **Won't Do.** Remaining 13 allocPrint sites return heap-owned strings to caller; stack buffer not applicable.
+5. **PF-NEW-28 (Info, PerfScore 0.5):** **Won't Do.** MessageBuilder zero-fills 12 bytes overwritten by finish(); <1ns impact.
 
 ### Open Items
 
 Remaining items by priority (after deep audit; Won't-Do items classified):
 
+**New from Round 5 review (2026-06-12) -- 12 open findings (P1):**
+
+- **PF-NEW-38 (PerfScore 80):** Benchmark harness broken under Zig 0.16. `benchmarks/bench.zig` has 9 `std.time.Timer.start()` calls (removed) at lines 162,173,193,209,224,263,290,307,332; `benchmarks/compare.zig:152` uses removed `std.process.args()`. `zig build bench` / `compare-bench` fail; regression detection lost. Fix: adopt `nowNs()` pattern from `scale_bench.zig:17-21`; use `std.process.argsAlloc`. Issue [#212](https://gitlab.com/devnw/zig/dns/-/issues/212). **Open.**
+- **PF-NEW-35 (PerfScore 64):** glue-to-NS O(glue x NS) join in `extractReferral` (`src/recursive.zig:742-768`). Crafted referral with 4096 NS + 4096 glue -> ~16.7M `eqlIgnoreCase` comparisons; CPU-DoS amplification. Fix: case-folded `StringHashMap` of NS names for O(1) match. Issue [#214](https://gitlab.com/devnw/zig/dns/-/issues/214). **Open.**
+
+**New from Round 5 review (P2):**
+
+- **PF-NEW-36 (PerfScore 60):** `scale_bench.zig:264,293` benchmarks legacy O(n) `dns.cache.Cache` instead of production `DnsCache` -> misleading baselines (measurement integrity). Fix: add `DnsCache` put/get benches. Issue [#213](https://gitlab.com/devnw/zig/dns/-/issues/213). **Open.**
+- **PF-NEW-39 (PerfScore 48):** `Zone.getRecords` (`src/zone_file.zig:226-247`) does two O(N) linear scans per lookup. Fix: name->indices `StringHashMap` built at parse end. Secondary: parse-time alloc churn at `src/zone_file.zig:462-477` (arena candidate, Low). Issue [#215](https://gitlab.com/devnw/zig/dns/-/issues/215). **Open.**
+- **PF-NEW-32 (PerfScore 36):** `DnsCache.putRecordWithKey` (`src/resolver/dns_cache.zig:511-548`) rewrites the entire packed rdata blob per append -> O(N^2). Fix: `ArrayListUnmanaged` geometric growth. Issue [#217](https://gitlab.com/devnw/zig/dns/-/issues/217). **Open.**
+- **PF-NEW-33 (PerfScore 36):** `failover.selectServer` (`src/resolver/failover.zig:255-262`) heap-allocates an ArrayList per call under mutex. Fix: fixed-size stack array. Issue [#218](https://gitlab.com/devnw/zig/dns/-/issues/218). **Open.**
+- **PF-NEW-40 (PerfScore 36):** RPZ `check()` (`src/resolver/rpz.zig:160-193,252-272`) linear rule scan per query. Fix: hashmap exact-match + suffix trie for wildcards. Issue [#219](https://gitlab.com/devnw/zig/dns/-/issues/219). **Open.**
+- **PF-NEW-41 (PerfScore 36):** `parallelDnssecValidate` (`src/parallel.zig:304-345`) threshold=2 dispatches ns-scale structural work to the thread pool -> net regression under ~100 inputs. Fix: raise threshold to measured crossover / sequential structural pass. Issue [#220](https://gitlab.com/devnw/zig/dns/-/issues/220). **Open.**
+- **PF-NEW-43 (PerfScore 32, confidence::suspected):** `CachePrefetcher` (`src/resolver/cache_prefetch.zig:58-96`) mutates two `StringHashMap`s without a mutex. Latent data race if async-refresh is ever multi-threaded. Fix: document single-thread-only contract or add a mutex. Issue [#221](https://gitlab.com/devnw/zig/dns/-/issues/221). **Open.**
+
+**New from Round 5 review (P3):**
+
+- **PF-NEW-42 (PerfScore 24):** `failover` weighted/least-conn/latency strategies (`src/resolver/failover.zig:289-309`) recompute aggregates per call. Fix: cache `total_weight`; maintain running min for conn/latency. Issue [#222](https://gitlab.com/devnw/zig/dns/-/issues/222). **Open.**
+- **PF-NEW-34 (PerfScore 16):** RPZ `addRule`/`addZone` (`src/resolver/rpz.zig:160-167,244-252`) sort after every append -> O(N^2 log N) bulk load. Fix: bulk-append + sort once. Issue [#223](https://gitlab.com/devnw/zig/dns/-/issues/223). **Open.**
+- **PF-NEW-37 (PerfScore 8):** `Name.minimizedName` (`src/name.zig:595-635`) double-allocates (`toString` + `allocPrint`/`dupe`); no production callers yet (tests at 1223/1228). Fix: stack `toStringBuf` + single `dupe`. Issue [#224](https://gitlab.com/devnw/zig/dns/-/issues/224). **Open.**
+
 **New from deep audit (P2):**
+
 - **PF-NEW-20 (PerfScore 35):** ~~Redundant heap dupe per delegation step~~ **Won't Do.** Correctness risk outweighs micro-optimization.
 - **PF-NEW-21 (PerfScore 18):** ~~buildQuery heap-allocates for bounded-size message~~ **Resolved.** Added `buildQueryBuf` with `[271]u8` stack buffer; stub.zig and recursive.zig migrated.
 
 **New from deep audit (P3):**
+
 - **PF-NEW-14 (PerfScore 32):** ~~extractReferral NS name `toString` uses ArrayList (3-5 allocs per name)~~ **Resolved.** Uses `toStringBuf(&ns_buf, response)` + `allocator.dupe(u8, ns_str)`. Eliminates intermediate ArrayList allocation per NS record.
 - **PF-NEW-27 (PerfScore 12):** ~~Double alloc in 0x20 path~~ **Won't Do.** Same as PF-NEW-20.
 - **PF-NEW-25 (PerfScore 4):** ~~buildCnameChain runs on all resolves even when no CNAMEs~~ **Resolved.** CNAME chain skipped when no CNAMEs.
@@ -110,23 +160,28 @@ Remaining items by priority (after deep audit; Won't-Do items classified):
 - **PF-NEW-23 (PerfScore 1):** ~~ArrayList without capacity hint in extractReferral~~ **Resolved.** `ensureTotalCapacity` added.
 
 **New from deep audit (Info):**
+
 - **PF-NEW-29 (PerfScore 0.5):** ~~DnsCache CacheEntry methods not inline~~ **Resolved.** Added `inline` to `isExpired` and `remainingTtl` matching `cache.zig` pattern
 - **PF-NEW-30 (PerfScore 0.5):** ~~zoneAtDepth uses ArrayList instead of stack buffer~~ **Resolved.** Replaced with `[253]u8` stack buffer + `allocator.dupe`.
 - **PF-NEW-28 (PerfScore 0.5):** ~~MessageBuilder zero-fills header overwritten by finish()~~ **Won't Do.** <1ns; not actionable.
 
 **Resolved (Round 4):**
+
 - **PF-24-dual-cache:** ~~Two cache implementations; hot path uses slower O(n) one~~ **Resolved.** Migrated client.zig and recursive.zig from O(n) Cache to O(1) DnsCache with packed multi-record support.
 - **PF-22-prefetch:** ~~Cache prefetching module exists but not wired into hot path~~ **Resolved.** CachePrefetcher wired into client.zig cache hit path.
 
 **Blocked (Round 4):**
+
 - **PF-23-spice:** spice parallel module not integrated into query dispatch. **Blocked** -- executeQuery stub has no transport.
 
 **Won't Do (Round 4):**
+
 - **PF-13:** Concurrent queries -- requires PF-14 thread safety first.
 - **PF-10:** allocPrint for IP formatting -- remaining 13 sites are justified heap allocs (results returned to caller).
 - **PF-16:** PRNG per call -- `std.crypto.random` is already OS CSPRNG; no per-call init overhead.
 
 **Won't Do (classified in prior cycle):**
+
 - **PF-18:** No benchmarks or perf CI -- infrastructure investment outside scope
 - **PF-03b:** Sequential server dispatch -- requires transport architecture rework
 - **PF-02:** O(n) linear cache -- subsumed by PF-24-dual-cache migration
@@ -319,7 +374,8 @@ Remaining items by priority (after deep audit; Won't-Do items classified):
 **Fix Guidance:** Create `bench/` directory with micro-benchmarks for: cache lookup (PF-02), socket creation (PF-03), full resolution path (PF-05), name comparison, message parsing. Add CI stage that runs benchmarks on merge requests and fails on >10% regression.
 
 **Validation Plan:**
-```
+
+```bash
 # After creating bench suite:
 zig build bench
 # Verify output includes timing for cache, socket, resolution, name ops
@@ -339,6 +395,7 @@ zig build bench
 **Perf Impact:** Every cache lookup in the recursive and client resolvers is O(n) where n = `max_entries` (default 1000). With the DnsCache LRU, lookups would be O(1) amortized. At 1000 entries, this is ~50-100us per lookup vs <1us.
 
 **Evidence:**
+
 - `src/recursive.zig:20`: `const cache_mod = @import("cache");` -- imports O(n) cache
 - `src/client.zig:18`: `const cache_mod = @import("cache");` -- imports O(n) cache
 - `src/resolver/dns_cache.zig`: Full LRU HashMap implementation with `get()`, `putPositive()`, `putNxdomain()`, `putNodata()` -- unused by hot path
@@ -349,7 +406,8 @@ zig build bench
 **Fix Guidance:** Migrate `recursive.zig` and `client.zig` from `cache.zig` to `dns_cache.zig`. This subsumes PF-02 and likely PF-02b-evict and PF-02c as well (DnsCache uses LRU eviction, not linear scan + compaction, and HashMap naturally deduplicates keys).
 
 **Validation Plan:**
-```
+
+```bash
 # Requires PF-18 (benchmarks) to measure properly.
 # Approximate test: time resolution of 1000 unique domains to fill cache,
 # then time 1000 cache-hit lookups.
@@ -371,6 +429,7 @@ zig build test -- --filter "cache"
 **Perf Impact:** Resolution latency equals the sum of per-server timeouts instead of the maximum. With 2 servers and 5s timeout, worst case is 10s instead of 5s. On average, sequential tries add 1 full timeout delay per failed server before reaching one that responds.
 
 **Evidence:**
+
 - `src/recursive.zig:489-508`: The `for (servers[0..max_tries]) |server|` loop sends queries one at a time. The `parallel_queries` field at `src/recursive.zig:96` only limits how many servers to try, not concurrency.
 - `src/recursive.zig:96`: `parallel_queries: u8 = 2` -- the name implies parallelism but the implementation is sequential.
 
@@ -379,7 +438,8 @@ zig build test -- --filter "cache"
 **Fix Guidance:** Use the existing spice `ThreadPool` (already integrated in `src/parallel.zig`) to dispatch queries to `parallel_queries` servers concurrently. Return the first valid response and cancel/ignore the rest. This is closely related to PF-13 (concurrent queries) and PF-23-spice.
 
 **Validation Plan:**
-```
+
+```bash
 # Benchmark resolution latency with 2 servers (one unreachable, one responsive):
 zig build test -- --filter "queryWithRetry"
 # Before: latency ~= timeout_ms + actual_response_time
@@ -399,6 +459,7 @@ zig build test -- --filter "queryWithRetry"
 **Perf Impact:** At 1000 entries (the `max_entries` default), each `get()` scans the full array. With DnsCache migration, lookups become O(1) amortized.
 
 **Evidence:**
+
 - `src/cache.zig:166-200`: `for (self.entries[0..self.count]) |entry|` linear scan
 - Default `max_entries = 1000` at initialization
 
@@ -415,6 +476,7 @@ zig build test -- --filter "queryWithRetry"
 **Summary:** Every DNS query creates a new UDP socket, sets options, sends, receives, and closes -- 5 syscalls per query confirmed in 3 locations.
 
 **Evidence:**
+
 - `src/stub.zig:199-205`: `std.posix.socket()` + `defer std.posix.close(sock)`
 - `src/recursive.zig:518-524`: identical pattern
 - `src/transports/udp.zig:39-44`: identical pattern
@@ -444,6 +506,7 @@ zig build test -- --filter "queryWithRetry"
 **Perf Impact:** At 1000 entries, each insert at capacity triggers a 1000-entry scan + potential array compaction. Under sustained query load with a full cache, this adds significant latency to cache writes.
 
 **Evidence:**
+
 - `src/cache.zig:119-121`: `if (self.count >= self.max_entries) { self.evictExpired(now); }`
 - `src/cache.zig:205-217`: `evictExpired` iterates all entries, compacts non-expired ones via copy
 
@@ -452,7 +515,8 @@ zig build test -- --filter "queryWithRetry"
 **Fix Guidance:** Subsumed by PF-24-dual-cache migration. DnsCache uses LRU with O(1) eviction. If migrating is deferred, add a "last eviction" timestamp to skip eviction if called within a configurable window (e.g., 1s).
 
 **Validation Plan:**
-```
+
+```bash
 # Measure cache put latency at capacity:
 # Fill cache to max_entries, then benchmark put() throughput
 zig build test -- --filter "cache"
@@ -481,6 +545,7 @@ zig build test -- --filter "cache"
 **Summary:** `src/parallel.zig` wraps the spice ThreadPool and provides parallel operation primitives. However, `queryWithRetry` in `recursive.zig` does not use it for concurrent server dispatch.
 
 **Evidence:**
+
 - `src/parallel.zig`: Provides `ThreadPool` integration with `parallelMap`, `parallelForEach`
 - `src/recursive.zig:489-508`: Sequential `for` loop over servers, no import of `parallel`
 
@@ -497,6 +562,7 @@ zig build test -- --filter "cache"
 **Summary:** `src/resolver/cache_prefetch.zig` implements proactive cache refresh near TTL expiry, but no call site exists in the recursive or client resolvers.
 
 **Evidence:**
+
 - `src/resolver/cache_prefetch.zig`: Full implementation exists
 - `src/recursive.zig`: No import of `cache_prefetch`; no prefetch trigger on cache hit
 
@@ -525,6 +591,7 @@ zig build test -- --filter "cache"
 **Perf Impact:** 1 unnecessary heap allocation per cache write. Write path is less frequent than read path, so impact is moderate.
 
 **Evidence:**
+
 - `src/resolver/dns_cache.zig:170`: `const key = try self.makeKey(name, qtype, qclass);` in `putPositive`
 - `src/resolver/dns_cache.zig:190`: same pattern in `putNxdomain`
 - `src/resolver/dns_cache.zig:254`: same pattern in `putNodata`
@@ -535,7 +602,8 @@ zig build test -- --filter "cache"
 **Fix Guidance:** Apply the same `makeKeyBuf` pattern from `get()` to all `put*` methods. Use stack buffer first, fall back to `makeKey` only for names exceeding `max_key_len`. Note: the LRU `put` needs the key to be heap-allocated for ownership transfer to the hash map, so the fix is to use `makeKeyBuf` to format into a stack buffer, then `allocator.dupe` the result -- still 1 alloc but avoids `allocPrint` overhead.
 
 **Validation Plan:**
-```
+
+```bash
 zig build test -- --filter "DnsCache"
 # Verify all tests pass
 # Before: allocPrint per put (format + alloc in one step)
@@ -553,6 +621,7 @@ zig build test -- --filter "DnsCache"
 **Summary:** `src/transports/connection_pool.zig` implements connection pooling with socket reuse but is not used by the stub or recursive resolvers.
 
 **Evidence:**
+
 - `src/transports/connection_pool.zig`: Full implementation with `acquire`/`release` API
 - `src/lib.zig`: Exposes connection_pool module
 - `src/stub.zig:199`, `src/recursive.zig:518`: Create raw sockets directly
@@ -582,6 +651,7 @@ zig build test -- --filter "DnsCache"
 **Summary:** In `recursive.zig` `sendQuery`, `recvfrom` reads into a 4096-byte stack buffer, then the data is heap-allocated + `@memcpy`'d. The caller may then copy or parse from that heap buffer.
 
 **Evidence:**
+
 - `src/recursive.zig:547-561`: `var buffer: [4096]u8 = undefined;` ... `const response = try self.allocator.alloc(u8, recv_len); @memcpy(response, buffer[0..recv_len]);`
 - Same pattern in `src/transports/udp.zig:67-82`
 
@@ -590,7 +660,8 @@ zig build test -- --filter "DnsCache"
 **Fix Guidance:** Could `recvfrom` directly into a heap-allocated buffer (pre-allocate 4096 bytes, `realloc` to `recv_len` after). This eliminates one memcpy. Trade-off: heap alloc even on receive failure.
 
 **Validation Plan:**
-```
+
+```bash
 zig build test -- --filter "sendQuery"
 # Before: stack recv + heap alloc + memcpy
 # After: heap recv + realloc (one fewer memcpy)
@@ -728,6 +799,7 @@ zig build test -- --filter "sendQuery"
 **Perf Impact:** 5-10 unnecessary heap round-trips per resolution (~500ns-2us total).
 
 **Evidence:**
+
 - `src/recursive.zig:214-218`: `getMinimizedQname` returns heap-allocated string, then line 217 `self.allocator.dupe(u8, state.original_qname)` creates another copy when QMIN is disabled. `queryWithRetry` at line 504 copies the name again into the message buffer.
 - `src/recursive.zig:488-491`: `queryWithRetry` dupes the domain unconditionally.
 
@@ -736,7 +808,8 @@ zig build test -- --filter "sendQuery"
 **Fix Guidance:** Have `queryWithRetry` accept the domain as a borrowed slice. The caller already owns the string and keeps it alive for the call duration. Combine with PF-NEW-27.
 
 **Validation Plan:**
-```
+
+```bash
 zig build test --summary all
 # Verify allocation count drops by 1 per delegation step (5-10 per resolution)
 ```
@@ -756,6 +829,7 @@ zig build test --summary all
 **Perf Impact:** 1 wasted alloc per query when 0x20 is enabled.
 
 **Evidence:**
+
 - `src/recursive.zig:488-501`: `applyCase0x20(self.allocator, domain, csprng)` heap-allocates (line 489). Then line 501: `state.last_query_name = try self.allocator.dupe(u8, query_name)`. The `defer free` at line 492 frees the first copy.
 
 **Root Cause:** Defensive copying. The `applyCase0x20` result could be transferred to `last_query_name` instead of duped.
@@ -775,6 +849,7 @@ zig build test --summary all
 **Perf Impact:** 1 heap allocation + 2-3 reallocations per DNS query build. ~100-300ns per query.
 
 **Evidence:**
+
 - `src/recursive.zig:504`: `const query = try message_mod.buildQuery(self.allocator, ...)`
 - `src/stub.zig:163`: same pattern
 - `src/message.zig:229-241`: `initQuery` creates `.buffer = .empty` then `appendNTimes(allocator, 0, header_size)` -- first heap alloc
@@ -784,7 +859,8 @@ zig build test --summary all
 **Fix Guidance:** Add a `buildQueryBuf` variant using a `[512]u8` fixed buffer or `BoundedArray(u8, 512)`.
 
 **Validation Plan:**
-```
+
+```bash
 zig build test --summary all
 # Before: 1 heap alloc per buildQuery
 # After: 0 heap allocs for queries under 512 bytes
@@ -807,6 +883,7 @@ zig build test --summary all
 **Perf Impact:** ~20-100ns wasted per resolution. Marginal.
 
 **Evidence:**
+
 - `src/cache.zig:116`: `const now = std.time.timestamp();` in `put()`
 - `src/cache.zig:170`: `const now = std.time.timestamp();` in `get()`
 - `src/client.zig:145`: `const now = std.time.timestamp();` in `resolve()`
@@ -828,6 +905,7 @@ zig build test --summary all
 **Perf Impact:** ~100-300ns per no-CNAME resolution.
 
 **Evidence:**
+
 - `src/client.zig:197`: `var cname_chain = try buildCnameChain(...)` -- called unconditionally
 - `src/client.zig:390-415`: function allocates ArrayList, iterates all answers
 
@@ -848,6 +926,7 @@ zig build test --summary all
 **Perf Impact:** ~50-200ns wasted per resolve (1-3 reallocations).
 
 **Evidence:**
+
 - `src/client.zig:146`: `var results: std.ArrayList([]const u8) = .empty;`
 - `src/client.zig:205`: same pattern
 
@@ -866,6 +945,7 @@ zig build test --summary all
 **Perf Impact:** ~20-100ns per referral (1-2 reallocations).
 
 **Evidence:**
+
 - `src/recursive.zig:589`: `var ns_names: std.ArrayList([]const u8) = .{};`
 - `src/recursive.zig:344`: `var new_servers: std.ArrayList(ServerAddress) = .{};`
 
@@ -886,6 +966,7 @@ zig build test --summary all
 **Perf Impact:** ~2-5ns per cache get. Marginal; release builds may auto-inline.
 
 **Changes:**
+
 - `src/resolver/dns_cache.zig:84`: `pub inline fn isExpired(self: Self, now: i64) bool {`
 - `src/resolver/dns_cache.zig:89`: `pub inline fn remainingTtl(self: Self, now: i64) u32 {`
 
@@ -904,6 +985,7 @@ zig build test --summary all
 **Perf Impact:** Zero heap allocs on lookup paths; 1 heap alloc only for new insertions.
 
 **Changes:**
+
 - Added `makeKeyBuf(buf, name, qtype, qclass) ?[]const u8` static function using `bufPrint`
 - `needsPrefetch`, `isPending`, `completePrefetch`, `cancelPrefetch`: stack buffer lookups
 - `schedulePrefetch`: stack buffer for duplicate check; heap `makeKey` for `put()` ownership
@@ -919,6 +1001,7 @@ zig build test --summary all
 **Summary:** `MessageBuilder.initQuery` zero-fills 12 header bytes that are immediately overwritten by `finish()`. Cost: <1ns.
 
 **Evidence:**
+
 - `src/message.zig:241`: `try builder.buffer.appendNTimes(allocator, 0, header_mod.header_size);`
 
 **Fix Guidance:** No fix recommended. Documented for completeness.
@@ -934,6 +1017,7 @@ zig build test --summary all
 **Summary:** `Name.zoneAtDepth` uses `ArrayList(u8)` for name assembly. Not on hot path.
 
 **Evidence:**
+
 - `src/name.zig:640-651`: `var result: std.ArrayList(u8) = .empty;`
 
 **Fix Guidance:** Replace with `[253]u8` stack buffer + dupe. Not recommended as standalone fix.
@@ -979,6 +1063,23 @@ zig build test --summary all
 | PF-NEW-03 | HIGH | CNAME double-alloc -- toStringBuf+dupe replaces toString+dupe | **Resolved** |
 | PF-NEW-04 | MEDIUM | getMinimizedQname stack buffer replaces ArrayList(u8) | **Resolved** |
 
+### Round 5 Open Findings (2026-06-12)
+
+| Rank | PerfSeverity | PerfScore | Finding | Component | Evidence | Measurement | Issue | Fix Summary | Owner | SLA/Due | Status |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| R5-1 | P1 | 80 | PF-NEW-38: Benchmark harness broken under Zig 0.16 | `benchmarks/bench.zig`, `benchmarks/compare.zig` | 9x `std.time.Timer.start()` (lines 162,173,193,209,224,263,290,307,332); `compare.zig:152` `std.process.args()` -- both removed in 0.16 | `zig build bench`/`compare-bench` fail to compile; regression detection lost | [#212](https://gitlab.com/devnw/zig/dns/-/issues/212) | Adopt `nowNs()` from scale_bench.zig:17-21; use `argsAlloc` | benjiv | Sprint | **Open** |
+| R5-2 | P1 | 64 | PF-NEW-35: glue-to-NS O(glue x NS) CPU-DoS amplification | `src/recursive.zig:742-768` | Nested `for (servers)` `eqlIgnoreCase` inside glue `while`; 4096x4096=~16.7M compares per crafted referral | Quadratic compare count in attacker-controlled record counts | [#214](https://gitlab.com/devnw/zig/dns/-/issues/214) | Case-folded `StringHashMap` of NS names -> O(1) match | benjiv | Sprint | **Open** |
+| R5-3 | P2 | 60 | PF-NEW-36: scale_bench measures legacy O(n) cache | `benchmarks/scale_bench.zig:264,293` | `dns.cache.Cache.init` in benchCachePut/Get; production uses `DnsCache` | Misleading baselines; real cache perf invisible | [#213](https://gitlab.com/devnw/zig/dns/-/issues/213) | Add `DnsCache` put/get benchmarks | benjiv | Quarter | **Open** |
+| R5-4 | P2 | 48 | PF-NEW-39: Zone.getRecords 2x O(N) scan per lookup | `src/zone_file.zig:226-247` (+462-477) | Count-scan then copy-scan over `records.items`; per-record `dupe` at parse | O(N) per lookup; O(N x Q) when zones query-served | [#215](https://gitlab.com/devnw/zig/dns/-/issues/215) | name->indices `StringHashMap`; arena for parse churn (Low) | benjiv | Quarter | **Open** |
+| R5-5 | P2 | 36 | PF-NEW-32: putRecordWithKey O(N^2) rdata blob copies | `src/resolver/dns_cache.zig:511-548` | `alloc(old.len+seg_len)` + full `@memcpy` of prefix per append | N appends to one key = O(N^2) bytes copied | [#217](https://gitlab.com/devnw/zig/dns/-/issues/217) | `ArrayListUnmanaged` geometric growth | benjiv | Quarter | **Open** |
+| R5-6 | P2 | 36 | PF-NEW-33: selectServer ArrayList alloc under mutex | `src/resolver/failover.zig:255-262` | `std.ArrayList(*ServerState)` alloc+free inside `mutex.lock()` per call | Alloc in critical section; lengthens lock hold time | [#218](https://gitlab.com/devnw/zig/dns/-/issues/218) | Fixed-size stack array | benjiv | Quarter | **Open** |
+| R5-7 | P2 | 36 | PF-NEW-40: RPZ linear rule scan per query | `src/resolver/rpz.zig:160-193,252-272` | `for (rules.items)` `matchPattern` per query; engine scans all zones | O(rules) per query when RPZ enabled | [#219](https://gitlab.com/devnw/zig/dns/-/issues/219) | hashmap exact + suffix trie wildcards | benjiv | Quarter | **Open** |
+| R5-8 | P2 | 36 | PF-NEW-41: parallelDnssec threshold=2 net regression | `src/parallel.zig:304-345` | Pool dispatch for 2+ inputs; `validateDnssec` is ns-scale structural-only | Slower than sequential below ~100 inputs | [#220](https://gitlab.com/devnw/zig/dns/-/issues/220) | Raise threshold to measured crossover / sequential pass | benjiv | Quarter | **Open** |
+| R5-9 | P2 | 32 | PF-NEW-43: prefetch hashmaps mutated without mutex | `src/resolver/cache_prefetch.zig:58-96` | `pending` + `in_flight` `StringHashMap`; no Mutex field | Latent data race if async-refresh goes multi-threaded | [#221](https://gitlab.com/devnw/zig/dns/-/issues/221) | Document single-thread contract or add mutex | benjiv | Quarter | **Open** |
+| R5-10 | P3 | 24 | PF-NEW-42: failover strategies recompute aggregates per call | `src/resolver/failover.zig:289-309` | `selectWeighted`/LeastConn/Latency rescan all servers each call | O(servers) redundant work per selection | [#222](https://gitlab.com/devnw/zig/dns/-/issues/222) | Cache total_weight; running min for conn/latency | benjiv | Backlog | **Open** |
+| R5-11 | P3 | 16 | PF-NEW-34: RPZ sort-per-append O(N^2 log N) bulk load | `src/resolver/rpz.zig:160-167,244-252` | `std.mem.sort` after every `append` in addRule/addZone | Bulk load grows quadratically | [#223](https://gitlab.com/devnw/zig/dns/-/issues/223) | Bulk-append + sort once | benjiv | Backlog | **Open** |
+| R5-12 | P3 | 8 | PF-NEW-37: minimizedName double allocation | `src/name.zig:595-635` | `toString` (alloc) + `allocPrint`/`dupe` (alloc); callers tests-only (1223,1228) | 2 allocs/call; no production callers yet | [#224](https://gitlab.com/devnw/zig/dns/-/issues/224) | Stack `toStringBuf` + single `dupe` | benjiv | Backlog | **Open** |
+
 ### Quick Wins (< 1 day)
 
 | ID | PerfScore | Fix | Status |
@@ -997,6 +1098,9 @@ zig build test --summary all
 | ~~PF-NEW-09~~ | ~~20~~ | ~~Replace getName with toStringBuf + dupe for glue names in extractReferral additional section~~ | **Resolved** |
 | ~~PF-NEW-13~~ | ~~12~~ | ~~Use encodeBuf in question.buildQuery / addQuestion to eliminate intermediate alloc~~ | **Resolved** |
 | ~~PF-NEW-12~~ | ~~8~~ | ~~Transfer query_name ownership to state.last_query_name when 0x20 disabled~~ | **Resolved** (commit 6d42d51) |
+| PF-NEW-42 | 24 | Cache failover total_weight; running min for least-conn/latency strategies | **Open** ([#222](https://gitlab.com/devnw/zig/dns/-/issues/222)) |
+| PF-NEW-34 | 16 | RPZ bulk-append + sort once instead of sort-per-append | **Open** ([#223](https://gitlab.com/devnw/zig/dns/-/issues/223)) |
+| PF-NEW-37 | 8 | Name.minimizedName stack toStringBuf + single dupe (no prod callers yet; cf. PF-NEW-18) | **Open** ([#224](https://gitlab.com/devnw/zig/dns/-/issues/224)) |
 
 ### Medium (1-5 days)
 
@@ -1007,6 +1111,15 @@ zig build test --summary all
 | PF-10 | 24 | Replace allocPrint with bufPrint across 13 remaining IP formatting sites | ~2 days |
 | PF-NEW-19 | 23 | Receive directly into heap buffer in sendQuery; eliminate stack-to-heap memcpy | ~1 day |
 | PF-02c | 20 | Add dedup check in cache.zig put() (if not migrating to DnsCache) | ~1 day |
+| PF-NEW-38 [#212](https://gitlab.com/devnw/zig/dns/-/issues/212) | 80 | Migrate bench harness to Zig 0.16 (`nowNs()` + `argsAlloc`); restore `zig build bench`/`compare-bench` | ~1 day (Open) |
+| PF-NEW-35 [#214](https://gitlab.com/devnw/zig/dns/-/issues/214) | 64 | Case-folded NS-name hash set in extractReferral glue match -> O(g+n) | ~1 day (Open) |
+| PF-NEW-36 [#213](https://gitlab.com/devnw/zig/dns/-/issues/213) | 60 | Add DnsCache put/get benchmarks to scale_bench (replace legacy Cache) | ~1 day (Open) |
+| PF-NEW-39 [#215](https://gitlab.com/devnw/zig/dns/-/issues/215) | 48 | name->indices StringHashMap in Zone.getRecords (+ arena for parse churn) | ~1-2 days (Open) |
+| PF-NEW-32 [#217](https://gitlab.com/devnw/zig/dns/-/issues/217) | 36 | ArrayListUnmanaged geometric growth for DnsCache packed rdata appends | ~1 day (Open) |
+| PF-NEW-33 [#218](https://gitlab.com/devnw/zig/dns/-/issues/218) | 36 | Fixed-size stack array for failover available-server list (drop alloc under mutex) | ~0.5 day (Open) |
+| PF-NEW-40 [#219](https://gitlab.com/devnw/zig/dns/-/issues/219) | 36 | RPZ hashmap exact-match + suffix trie for wildcards (replace linear scan) | ~2-3 days (Open) |
+| PF-NEW-41 [#220](https://gitlab.com/devnw/zig/dns/-/issues/220) | 36 | Raise parallelDnssec threshold to measured crossover / sequential structural pass | ~0.5 day (Open) |
+| PF-NEW-43 [#221](https://gitlab.com/devnw/zig/dns/-/issues/221) | 32 | Document single-thread contract or add mutex to CachePrefetcher maps | ~0.5 day (Open) |
 
 ### Strategic (> 5 days)
 
