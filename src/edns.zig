@@ -569,9 +569,15 @@ pub const Padding = struct {
         return serializeEdnsOption(allocator, .padding, data);
     }
 
-    /// Calculate padding needed to reach a target message size
-    pub fn calculatePadding(current_size: usize, block_size: usize) Self {
+    /// Calculate padding needed to reach a target message size.
+    ///
+    /// Returns error.BlockSizeTooLarge when block_size exceeds the u16
+    /// padding-length range (GAP-0856: the casts below would otherwise
+    /// panic in safe builds). The resulting length never exceeds
+    /// block_size, so bounding block_size bounds both casts.
+    pub fn calculatePadding(current_size: usize, block_size: usize) error{BlockSizeTooLarge}!Self {
         if (block_size == 0) return Self{ .length = 0 };
+        if (block_size > std.math.maxInt(u16)) return error.BlockSizeTooLarge;
 
         const remainder = current_size % block_size;
         if (remainder == 0) return Self{ .length = 0 };
@@ -966,6 +972,27 @@ test "Cookie.computeClientCookie" {
     const different_ip = [_]u8{ 192, 168, 1, 101 };
     const cookie3 = Cookie.computeClientCookie(&different_ip, &server_ip, secret);
     try std.testing.expect(!std.mem.eql(u8, &cookie.client_cookie, &cookie3.client_cookie));
+}
+
+test "GAP-0856: calculatePadding rejects block sizes exceeding u16 range" {
+    // length is u16; a block_size > 65535 would overflow the @intCast
+    // (panic in safe builds). Fail with an explicit error instead.
+    try std.testing.expectError(error.BlockSizeTooLarge, Padding.calculatePadding(100, 70000));
+}
+
+test "GAP-0856: calculatePadding valid block sizes" {
+    // Zero block size and aligned sizes need no padding.
+    try std.testing.expectEqual(@as(u16, 0), (try Padding.calculatePadding(100, 0)).length);
+    try std.testing.expectEqual(@as(u16, 0), (try Padding.calculatePadding(468, 468)).length);
+    // Standard RFC 8467 block sizes (4-byte option header accounted for).
+    try std.testing.expectEqual(@as(u16, 24), (try Padding.calculatePadding(100, 128)).length);
+    try std.testing.expectEqual(@as(u16, 364), (try Padding.calculatePadding(100, 468)).length);
+    // Remainder leaves <= 4 bytes: an extra block absorbs the header.
+    const p2 = try Padding.calculatePadding(126, 128);
+    try std.testing.expectEqual(@as(u16, 126), p2.length);
+    // Largest accepted block size still fits in u16.
+    const p3 = try Padding.calculatePadding(1, 65535);
+    try std.testing.expectEqual(@as(u16, 65530), p3.length);
 }
 
 test "SEC-NEW-05: OptRecord.encode rejects options exceeding u16 max" {
