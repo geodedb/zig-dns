@@ -48,6 +48,11 @@ pub const TransferType = enum(u16) {
 pub const ZoneTransferConfig = struct {
     /// Maximum zone size (number of records)
     max_records: usize = 100000,
+    /// Maximum number of DNS messages accepted in a single transfer
+    /// (GAP-0869). Bounds the AXFR loop against a malicious or broken
+    /// server streaming endless empty (ancount=0) messages, which
+    /// max_records alone cannot catch.
+    max_messages: u32 = 10_000,
     /// Timeout for complete transfer (milliseconds)
     timeout_ms: u32 = 300000, // 5 minutes
     /// TCP receive buffer size
@@ -376,20 +381,16 @@ pub const ZoneTransferClient = struct {
         var first_message = true;
 
         while (!second_soa_seen) {
-            // SEC-SR-6: enforce the transfer-wide deadline and a hard message
-            // cap so a server that never sends the closing SOA (e.g. trickling
-            // empty ancount=0 messages, which never trip max_records) cannot
-            // hang the loop indefinitely.
+            // SEC-SR-6 / GAP-0869: enforce the transfer-wide deadline and a
+            // configurable message cap so a server that never sends the
+            // closing SOA (e.g. trickling empty ancount=0 messages, which
+            // never trip max_records) cannot hang the loop indefinitely.
+            // (errdefer above frees the zone on these error returns)
             if (transferDeadlineExceeded(start_time, timeMilli(), self.config.timeout_ms)) {
-                zone.deinit();
-                return TransferResult{
-                    .success = false,
-                    .zone = null,
-                    .record_count = 0,
-                    .message_count = message_count,
-                    .duration_ms = @intCast(@max(0, timeMilli() - start_time)),
-                    .error_message = "Transfer deadline exceeded",
-                };
+                return error.TransferTimeout;
+            }
+            if (message_count >= self.config.max_messages) {
+                return error.TooManyMessages;
             }
 
             const response = try source.next();
@@ -1562,6 +1563,51 @@ test "GAP-0868: multi-message AXFR with broken MAC chain rejected" {
     };
     const result = client.runAxfrTransfer("example.com", &source, query.macSlice(), timeMilli());
     try std.testing.expectError(error.TsigVerificationFailed, result);
+}
+
+/// Mock source yielding an endless stream of empty (header-only) DNS
+/// messages, simulating a malicious or broken server that never sends
+/// the terminating SOA (GAP-0869).
+const EndlessEmptySource = struct {
+    allocator: std.mem.Allocator,
+
+    pub fn next(self: *EndlessEmptySource) ![]u8 {
+        // 12-byte header: qdcount=0, ancount=0 -- a valid empty response.
+        const msg = try self.allocator.alloc(u8, 12);
+        @memset(msg, 0);
+        return msg;
+    }
+};
+
+test "GAP-0869: endless empty messages bounded by max_messages" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{
+        .require_auth = false,
+        .max_messages = 5,
+    });
+
+    var source = EndlessEmptySource{ .allocator = allocator };
+    const result = client.runAxfrTransfer("example.com", &source, null, timeMilli());
+    try std.testing.expectError(error.TooManyMessages, result);
+}
+
+test "GAP-0869: wall-clock deadline bounds the transfer loop" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{
+        .require_auth = false,
+        .timeout_ms = 1000,
+    });
+
+    var source = EndlessEmptySource{ .allocator = allocator };
+    // Pretend the transfer started 10 seconds ago: the 1s deadline is
+    // already breached, so the loop must abort instead of spinning.
+    const result = client.runAxfrTransfer("example.com", &source, null, timeMilli() - 10_000);
+    try std.testing.expectError(error.TransferTimeout, result);
+}
+
+test "GAP-0869: ZoneTransferConfig max_messages default" {
+    const config = ZoneTransferConfig{};
+    try std.testing.expectEqual(@as(u32, 10_000), config.max_messages);
 }
 
 test "GAP-0868: unauthenticated transfer loop still works when auth disabled" {
