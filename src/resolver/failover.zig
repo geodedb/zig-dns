@@ -93,6 +93,8 @@ pub const ServerState = struct {
     last_failure: i64 = 0,
     /// Circuit breaker open until
     circuit_open_until: i64 = 0,
+    /// Smooth weighted round-robin running weight (GAP-0885)
+    current_weight: i64 = 0,
 
     pub fn isAvailable(self: *const ServerState, now: i64) bool {
         if (self.status == .unhealthy) {
@@ -191,8 +193,6 @@ pub const FailoverManager = struct {
     generation: u32 = 0,
     /// Round-robin index
     rr_index: usize = 0,
-    /// Weighted round-robin accumulated weights
-    weighted_accumulator: u32 = 0,
     /// Random number generator
     rng: random_util.SystemRandom,
     /// Clock seam: real clock by default, mock clock injectable for
@@ -243,7 +243,6 @@ pub const FailoverManager = struct {
             .config = config,
             .servers = .empty,
             .rr_index = 0,
-            .weighted_accumulator = 0,
             .rng = rng,
             .clk = clk,
             .stats = .{},
@@ -352,27 +351,39 @@ pub const FailoverManager = struct {
         return idx;
     }
 
+    /// Smooth weighted round-robin (nginx algorithm, GAP-0885).
+    ///
+    /// Each call adds every healthy server's configured weight to its
+    /// running `current_weight`, picks the server with the highest running
+    /// weight, then subtracts the total weight from the pick. This
+    /// interleaves selections proportionally (A,B,A,B for equal weights)
+    /// instead of producing consecutive batches, and adapts naturally as
+    /// the healthy set changes.
     fn selectWeighted(self: *Self, indices: []const usize) ?usize {
         if (indices.len == 0) return null;
 
-        var total_weight: u32 = 0;
+        var total_weight: i64 = 0;
         for (indices) |i| {
-            total_weight += self.servers.items[i].config.weight;
+            const server = &self.servers.items[i];
+            const weight: i64 = server.config.weight;
+            total_weight += weight;
+            server.current_weight += weight;
         }
 
         if (total_weight == 0) return indices[0];
 
-        self.weighted_accumulator = (self.weighted_accumulator + 1) % total_weight;
-        var accumulated: u32 = 0;
-
-        for (indices) |i| {
-            accumulated += self.servers.items[i].config.weight;
-            if (self.weighted_accumulator < accumulated) {
-                return i;
+        var best = indices[0];
+        var best_weight = self.servers.items[best].current_weight;
+        for (indices[1..]) |i| {
+            const cw = self.servers.items[i].current_weight;
+            if (cw > best_weight) {
+                best_weight = cw;
+                best = i;
             }
         }
 
-        return indices[0];
+        self.servers.items[best].current_weight -= total_weight;
+        return best;
     }
 
     fn selectLeastConnections(self: *Self, indices: []const usize) ?usize {
@@ -865,6 +876,59 @@ test "FailoverManager primary-secondary fails over and returns (GAP-0880)" {
 // fail-fast-on-weak-entropy behavior is a security requirement (GAP-0851,
 // DNS transaction-ID prediction), and adding a fake-entropy seam to the
 // production path would weaken it. The error mapping is a single catch.
+
+test "FailoverManager smooth weighted round-robin interleaves equal weights (GAP-0885)" {
+    const allocator = std.testing.allocator;
+    var mock = clock.MockClock.init();
+    var manager = try FailoverManager.initWithClock(
+        allocator,
+        .{ .strategy = .weighted },
+        mock.clock(),
+    );
+    defer manager.deinit();
+
+    try manager.addServer(.{ .address = "a", .weight = 1 });
+    try manager.addServer(.{ .address = "b", .weight = 1 });
+    for (manager.servers.items) |*server| {
+        server.status = .healthy;
+    }
+
+    // Smooth WRR (nginx algorithm) must interleave equal weights strictly:
+    // A,B,A,B,... -- never batches like the old cumulative-accumulator walk.
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        const handle = manager.selectServer().?;
+        try std.testing.expectEqual(i % 2, handle.index);
+    }
+}
+
+test "FailoverManager smooth weighted round-robin avoids batching at weight 50 (GAP-0885)" {
+    const allocator = std.testing.allocator;
+    var mock = clock.MockClock.init();
+    var manager = try FailoverManager.initWithClock(
+        allocator,
+        .{ .strategy = .weighted },
+        mock.clock(),
+    );
+    defer manager.deinit();
+
+    // Default weight is 50: the old algorithm produced 50 consecutive
+    // picks of A followed by 50 of B. Smooth WRR must never repeat a
+    // server twice in a row when weights are equal.
+    try manager.addServer(.{ .address = "a" });
+    try manager.addServer(.{ .address = "b" });
+    for (manager.servers.items) |*server| {
+        server.status = .healthy;
+    }
+
+    var prev = manager.selectServer().?.index;
+    var i: usize = 0;
+    while (i < 9) : (i += 1) {
+        const next = manager.selectServer().?.index;
+        try std.testing.expect(next != prev);
+        prev = next;
+    }
+}
 
 test "Strategy enum" {
     try std.testing.expectEqual(Strategy.round_robin, Strategy.round_robin);
