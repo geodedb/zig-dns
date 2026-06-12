@@ -381,6 +381,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "types", .module = types_mod },
         },
     });
+    // GAP-0839: the recursive resolver invokes the DNSSEC validator in its
+    // response-processing path. dnssec_mod is declared after recursive_mod,
+    // so wire via addImport.
+    recursive_mod.addImport("dnssec", dnssec_mod);
 
     // ========================================================================
     // Security Modules
@@ -911,6 +915,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "cache", .module = cache_mod },
                 .{ .name = "stub", .module = stub_mod },
                 .{ .name = "dns_cache", .module = dns_cache_mod },
+                .{ .name = "dnssec", .module = dnssec_mod },
                 .{ .name = "clock", .module = clock_mod },
                 .{ .name = "random", .module = random_mod },
                 .{ .name = "cache_protection", .module = cache_protection_mod },
