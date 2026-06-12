@@ -1,0 +1,13 @@
+# GAP-0865: protobuf CVEs reported against an unreachable Python test
+# harness inside the lazy otel transitive dependency
+# (zig-pkg grpc_zig integration_test/requirements.txt). The file is a
+# test-only requirements manifest for an upstream gRPC integration test;
+# there is no execution path from this project's build, tests, or CI.
+
+# protobuf CVE in grpc_zig integration_test/requirements.txt (unreachable
+# Python test harness; never installed or executed by this project).
+CVE-2025-4565
+
+# protobuf CVE in grpc_zig integration_test/requirements.txt (unreachable
+# Python test harness; never installed or executed by this project).
+CVE-2026-0994
