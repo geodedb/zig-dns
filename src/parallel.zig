@@ -82,6 +82,15 @@ const random_util = @import("random");
 // Global Thread Pool
 // ============================================================================
 
+/// Allocator for per-task allocations inside thread-pool workers
+/// (GAP-0860). std.heap.page_allocator issues a raw mmap/munmap syscall
+/// per allocation; smp_allocator is the thread-safe general-purpose
+/// allocator intended for multi-threaded workloads. A per-task arena is
+/// NOT used because batch-query results escape the worker task: ownership
+/// of QueryResult.response crosses the task boundary to the caller, which
+/// must free it with this same allocator.
+pub const task_allocator: std.mem.Allocator = std.heap.smp_allocator;
+
 var global_pool: ?tp.ThreadPool = null;
 var pool_mutex: Mutex = .{};
 
@@ -408,8 +417,8 @@ pub const QuerySpec = struct {
 pub const QueryResult = struct {
     /// Whether the query message was successfully built
     success: bool,
-    /// Built wire-format DNS query message (caller must free with allocator),
-    /// or null on failure
+    /// Built wire-format DNS query message (caller must free with
+    /// `parallel.task_allocator`), or null on failure
     response: ?[]const u8,
     /// Error code: null=success, 1=invalid_input, 2=build_error, 3=entropy_unavailable
     error_code: ?u8,
@@ -515,9 +524,10 @@ fn executeQuery(query: QuerySpec, server: []const u8, timeout_ms: u32) QueryResu
         return .{ .success = false, .response = null, .error_code = 3 };
     };
 
-    // Build the wire-format query message
+    // Build the wire-format query message. The result escapes this task to
+    // the caller, so it uses task_allocator (GAP-0860), not a task arena.
     const wire_msg = message.buildQuery(
-        std.heap.page_allocator,
+        task_allocator,
         id,
         query.domain,
         Type.fromInt(query.qtype),
@@ -654,7 +664,7 @@ fn prefetchEntry(entry: PrefetchEntry, server: []const u8) PrefetchResult {
         return .{ .refreshed = false, .new_ttl = 0 };
     };
     const wire_msg = message.buildQuery(
-        std.heap.page_allocator,
+        task_allocator,
         id,
         entry.domain,
         Type.fromInt(entry.qtype),
@@ -667,7 +677,7 @@ fn prefetchEntry(entry: PrefetchEntry, server: []const u8) PrefetchResult {
     // Free the query message — in a full integration, this would be sent
     // to the server. The parallel module's job is the CPU-bound message
     // construction; actual I/O is handled by the caller.
-    std.heap.page_allocator.free(wire_msg);
+    task_allocator.free(wire_msg);
 
     return .{ .refreshed = true, .new_ttl = 0 };
 }
@@ -834,7 +844,7 @@ test "parallel batch query" {
             // DNS messages are at least 12 bytes (header)
             try std.testing.expect(resp.len >= 12);
             // Free the allocated query message
-            std.heap.page_allocator.free(resp);
+            task_allocator.free(resp);
             result.response = null;
         }
     }
