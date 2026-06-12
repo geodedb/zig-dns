@@ -711,10 +711,14 @@ pub const ResourceRecord = struct {
         privateoid = 254,
         _,
 
+        /// Whether this library can actually verify signatures made with
+        /// this algorithm (GAP-0843). Must stay aligned with
+        /// dnssec.verifySignature: RSA algorithms (5, 8, 10) are NOT
+        /// verifiable because Zig's std.crypto lacks RSA primitives
+        /// (SEC-004), so they must not be advertised as supported.
         pub fn isSupported(self: DnssecAlgorithm) bool {
             return switch (self) {
-                .rsasha256, .ecdsap256sha256, .ed25519 => true,
-                .rsasha1, .rsasha512, .ecdsap384sha384 => true,
+                .ed25519, .ecdsap256sha256, .ecdsap384sha384 => true,
                 else => false,
             };
         }
@@ -1806,11 +1810,28 @@ test "ResourceRecord.calculateKeyTag" {
 }
 
 test "DnssecAlgorithm.isSupported" {
-    try std.testing.expect(ResourceRecord.DnssecAlgorithm.rsasha256.isSupported());
     try std.testing.expect(ResourceRecord.DnssecAlgorithm.ecdsap256sha256.isSupported());
+    try std.testing.expect(ResourceRecord.DnssecAlgorithm.ecdsap384sha384.isSupported());
     try std.testing.expect(ResourceRecord.DnssecAlgorithm.ed25519.isSupported());
     try std.testing.expect(!ResourceRecord.DnssecAlgorithm.rsamd5.isSupported());
     try std.testing.expect(!ResourceRecord.DnssecAlgorithm.dsa.isSupported());
+}
+
+test "GAP-0843: isSupported() reflects actually verifiable algorithms" {
+    // dnssec.verifySignature rejects every RSA algorithm with
+    // error.UnsupportedAlgorithm (SEC-004: no RSA primitives), so
+    // isSupported() must not advertise them as supported.
+    try std.testing.expect(!ResourceRecord.DnssecAlgorithm.rsasha1.isSupported());
+    try std.testing.expect(!ResourceRecord.DnssecAlgorithm.rsasha256.isSupported());
+    try std.testing.expect(!ResourceRecord.DnssecAlgorithm.rsasha512.isSupported());
+    // The verifiable set: Ed25519, ECDSA P-256/SHA-256, ECDSA P-384/SHA-384.
+    try std.testing.expect(ResourceRecord.DnssecAlgorithm.ed25519.isSupported());
+    try std.testing.expect(ResourceRecord.DnssecAlgorithm.ecdsap256sha256.isSupported());
+    try std.testing.expect(ResourceRecord.DnssecAlgorithm.ecdsap384sha384.isSupported());
+    // Never supported: deprecated/unverifiable algorithms.
+    try std.testing.expect(!ResourceRecord.DnssecAlgorithm.ed448.isSupported());
+    try std.testing.expect(!ResourceRecord.DnssecAlgorithm.dsa_nsec3_sha1.isSupported());
+    try std.testing.expect(!ResourceRecord.DnssecAlgorithm.rsasha1_nsec3_sha1.isSupported());
 }
 
 test "ResourceRecord.parseHTTPS with params" {
