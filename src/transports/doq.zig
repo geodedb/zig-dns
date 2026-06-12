@@ -217,23 +217,12 @@ pub const DoQTransport = struct {
         const response_with_prefix = try backend.readStream(stream_id, self.allocator, timeout_ms);
         defer self.allocator.free(response_with_prefix);
 
-        // Strip 2-byte length prefix
-        if (response_with_prefix.len < 2) {
-            return error.InvalidResponse;
-        }
+        // Validate framing, size, and message ID == 0 (RFC 9250).
+        // GAP-0871: the live query path now applies the same checks as
+        // the standalone parseDoQResponse, including the ID check.
+        const msg = try parseDoQResponse(response_with_prefix);
 
-        const msg_len = std.mem.readInt(u16, response_with_prefix[0..2], .big);
-        if (msg_len == 0) {
-            return error.InvalidResponse;
-        }
-        if (msg_len > max_message_size or response_with_prefix.len > max_message_size + 2) {
-            return error.MessageTooLarge;
-        }
-        if (msg_len + 2 > response_with_prefix.len) {
-            return error.InvalidResponse;
-        }
-
-        return try self.allocator.dupe(u8, response_with_prefix[2..][0..msg_len]);
+        return try self.allocator.dupe(u8, msg);
     }
 
     fn closeImpl(ctx: *anyopaque) void {
@@ -582,6 +571,47 @@ test "DoQTransport invalid ALPN" {
 }
 
 test "A6 (#295): DoQ init fails closed with no CA trust configured" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.NoCaTrustConfigured, DoQTransport.init(allocator, .{
+        .server_name = "dns.example.com",
+        .addr = .{ .host = "1.2.3.4", .port = 853 },
+        .ca_pem = "",
+        .alpn_doq = "doq",
+    }, null));
+}
+
+test "GAP-0871: queryImpl enforces response message ID == 0 (RFC 9250)" {
+    if (!feature_doq) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+
+    var mock = MockQuicBackend.init(allocator);
+    defer mock.deinit();
+
+    // Response carrying message ID 0x0007 violates RFC 9250 section 4.2.1.
+    try mock.addResponse(&[_]u8{ 0x00, 0x07, 0x81, 0x80 });
+    // A compliant response with ID 0 must still be accepted.
+    try mock.addResponse(&[_]u8{ 0x00, 0x00, 0x81, 0x80 });
+
+    var doq_transport = try DoQTransport.init(allocator, .{
+        .server_name = "dns.example.com",
+        .addr = .{ .host = "1.2.3.4", .port = 853 },
+        .ca_pem = "test-ca",
+        .alpn_doq = "doq",
+    }, mock.backend());
+    defer doq_transport.deinit();
+
+    var ch = doq_transport.channel();
+    const wire_req = [_]u8{ 0x12, 0x34, 0x01, 0x00 };
+
+    try std.testing.expectError(error.InvalidMessageId, ch.query(&wire_req, 1000));
+
+    const ok = try ch.query(&wire_req, 1000);
+    defer allocator.free(ok);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x00, 0x81, 0x80 }, ok);
+}
+
+test "GAP-0854: DoQ init requires CA trust configuration" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.NoCaTrustConfigured, DoQTransport.init(allocator, .{
         .server_name = "dns.example.com",

@@ -117,12 +117,6 @@ pub const Client = struct {
             // PF-22-prefetch: Schedule proactive cache refresh for entries nearing expiry
             self.prefetcher = CachePrefetcher.init(allocator, .{}, self.system_clock.clock());
         }
-        // GAP-0844: release cache resources if resolver init below fails.
-        errdefer {
-            if (self.prefetcher) |*pf| pf.deinit();
-            if (self.cache) |*cache| cache.deinit();
-        }
-
         // Initialize resolver based on mode
         switch (config.mode) {
             .stub => {
@@ -133,13 +127,6 @@ pub const Client = struct {
                     self.server_addresses = try stub_mod.getSystemServers(allocator);
                 }
                 self.servers_owned = true;
-                // GAP-0844: free the address slice if parsing a server or
-                // StubResolver.init fails.
-                errdefer {
-                    allocator.free(self.server_addresses);
-                    self.server_addresses = &[_]stub_mod.ServerAddress{};
-                    self.servers_owned = false;
-                }
 
                 if (config.servers.len > 0) {
                     for (config.servers, 0..) |server_ip, i| {
