@@ -96,13 +96,9 @@ pub const ServerState = struct {
     /// Smooth weighted round-robin running weight (GAP-0885)
     current_weight: i64 = 0,
 
+    /// A server is available unless it is unhealthy with its circuit
+    /// breaker still open (i.e. the timeout has not yet expired).
     pub fn isAvailable(self: *const ServerState, now: i64) bool {
-        if (self.status == .unhealthy) {
-            // Check if circuit breaker timeout expired
-            if (now < self.circuit_open_until) {
-                return false;
-            }
-        }
         return self.status != .unhealthy or now >= self.circuit_open_until;
     }
 
