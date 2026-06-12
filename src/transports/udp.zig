@@ -15,6 +15,15 @@ inline fn timeMilli() i64 {
     return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
 }
 
+/// Remaining receive budget in milliseconds, or null when the deadline has
+/// already passed. Used to shrink SO_RCVTIMEO after each discarded spurious
+/// packet so a late off-source packet cannot reset the full timeout (REL-3).
+fn remainingBudgetMs(start_ms: i64, now_ms: i64, timeout_ms: u32) ?u32 {
+    const elapsed = now_ms - start_ms;
+    if (elapsed >= @as(i64, timeout_ms)) return null;
+    return @intCast(@as(i64, timeout_ms) - elapsed);
+}
+
 pub const Channel = channel.Channel;
 pub const ChannelKind = channel.ChannelKind;
 
@@ -53,15 +62,6 @@ pub const UdpTransport = struct {
         );
         defer net.close(sock);
 
-        // Set timeout
-        const timeout_sec = timeout_ms / 1000;
-        const timeout_usec = (timeout_ms % 1000) * 1000;
-        const timeout = std.os.linux.timeval{
-            .sec = @intCast(timeout_sec),
-            .usec = @intCast(timeout_usec),
-        };
-        try std.posix.setsockopt(sock, std.os.linux.SOL.SOCKET, std.os.linux.SO.RCVTIMEO, std.mem.asBytes(&timeout));
-
         // Send query
         _ = try net.sendto(sock, wire_req, 0, &self.address.any, self.address.getOsSockLen());
 
@@ -69,9 +69,17 @@ pub const UdpTransport = struct {
         // SEC-AUDIT-02: Limit discarded packets to prevent CPU pinning from flood attacks.
         var discards = types_mod.SpuriousDiscardCounter{};
         while (true) {
-            if (timeMilli() - start_ms >= timeout_ms) {
+            // REL-3: bound each recvfrom by the REMAINING budget, not the full
+            // timeout. Otherwise a spurious off-source packet arriving just
+            // before the deadline lets the next recvfrom block for another full
+            // timeout (~2x the requested budget).
+            const remaining_ms = remainingBudgetMs(start_ms, timeMilli(), timeout_ms) orelse
                 return error.Timeout;
-            }
+            const timeout = std.os.linux.timeval{
+                .sec = @intCast(remaining_ms / 1000),
+                .usec = @intCast((remaining_ms % 1000) * 1000),
+            };
+            try std.posix.setsockopt(sock, std.os.linux.SOL.SOCKET, std.os.linux.SO.RCVTIMEO, std.mem.asBytes(&timeout));
 
             // Receive response (capture source)
             // 4096 bytes matches EDNS default max payload (RFC 6891).
@@ -120,4 +128,16 @@ test "SEC-AUDIT-02: UDP discard limit prevents CPU pinning" {
     // error.TooManySpuriousPackets.
     try std.testing.expect(max_spurious_discards > 0);
     try std.testing.expect(max_spurious_discards <= 10000);
+}
+
+test "REL-3: remainingBudgetMs shrinks toward the deadline and then expires" {
+    // 4s elapsed of a 5s budget leaves 4s... (start=1000, now=2000 -> 1s elapsed).
+    try std.testing.expectEqual(@as(?u32, 4000), remainingBudgetMs(1000, 2000, 5000));
+    // 1ms left.
+    try std.testing.expectEqual(@as(?u32, 1), remainingBudgetMs(1000, 5999, 5000));
+    // Exactly at the deadline is expired (null), never a 0 timeval (which would
+    // mean "block forever" for SO_RCVTIMEO).
+    try std.testing.expectEqual(@as(?u32, null), remainingBudgetMs(1000, 6000, 5000));
+    // Past the deadline is expired.
+    try std.testing.expectEqual(@as(?u32, null), remainingBudgetMs(1000, 9000, 5000));
 }
