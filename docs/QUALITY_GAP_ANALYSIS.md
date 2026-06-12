@@ -1,17 +1,131 @@
 # Quality Gap Analysis
 
-Last updated: 2026-03-25 (All findings resolved or closed. QR-NEW-01/02 resolved, QR-NEW-03/04 won't do. 525/525 tests passing.)
+Last updated: 2026-06-12 (Iterative convergence loop reached a fixpoint -- see "Iterative Convergence Loop" below. New audit round: 26 distinct findings filed as 24 issues #255-#278; 30 prior-run findings #225-#254 confirmed; R-02 folded into #230, B-03 into #210, plus C-05/DOC-4/R-04 dispositioned without new issues. See "Audit Round 2026-06-12" below. Prior cycle: all 88 historical findings resolved/closed/won't-do.)
+
+## Iterative Convergence Loop (2026-06-12)
+
+After the audit round filed the issues below, an iterative review+fix loop ran
+(`/security:appsec-review` + `/codepros:audit`, fixing via TDD) until neither
+review surfaced a new actionable issue. Each iteration re-ran the reviewers
+against the freshly committed fixes:
+
+- **Iteration 2 (quality)** found **Q-NEW-1** (HIGH): `zone_transfer.zig` `axfr`/`ixfr`
+  never compiled -- a Zig-0.16 dormant-compile landmine (used `std.time.milliTimestamp`
+  / `std.net` / `getrandom`, none wired). Fixed: migrated to `net_compat`/`transport_io`
+  - force-reference test (commit `aebc166`).
+- **Iteration 3 (quality)** found **QC-1** (MEDIUM): the three `*Parallel` wrappers
+  (`parseRecordsParallel`, `parallelValidateSignatures`, `prefetchEntriesParallel`)
+  imported `parallel` but the module was not wired into their standalone module/test
+  artifacts -- same dormant-compile class, masked because the functions are unreferenced.
+  Fixed: wired `parallel` into all three modules + test artifacts and added a
+  force-reference test per wrapper (commit `0de1b83`). Security + perf reviewers
+  CONVERGED (no new findings) on the same iteration.
+- **Iteration 4 (convergence check on `0de1b83`)**: security **CONVERGED**, perf
+  **CONVERGED**. Quality surfaced **Q-NEW-2** -- `src/observability_init.zig`
+  (`Otel.init`/`installGlobals`/`deinit`) is a dormant-compile landmine of the same
+  class. **Disposition: NOT a new issue -- maps to already-tracked [#210] (closed,
+  by-design) and [#228] (open).** `observability.enabled` is hardcoded `false`
+  (#210, 2026-05-02) to dodge a Zig-0.16 `otel`/`otel0` `build_options` module-dedup
+  diamond that broke the downstream `geode` build, so `observability_init.zig` is
+  dead-stripped in every config. Force-compiling it (a) re-triggers that diamond and
+  (b) surfaces a genuine upstream otel bug: `otel.sdk.config.resolve` →
+  `captureEnvironment` uses `std.process.Environ.Block.global`, but on Zig 0.16 `Block`
+  is `PosixBlock` (no `.global`; that lives on `GlobalBlock`) -- identical in pinned
+  otel v0.1.7 (config.zig:362) and v0.1.10 (config.zig:531), so NOT a dep-bump
+  regression. Both are **blocked on the upstream Zig module-dedup fix** tracked by
+  #210; full evidence recorded on #228. Two force-reference guard attempts (standalone
+  test artifact; comptime-gated `lib.zig` guard) were reverted -- the first re-triggers
+  the diamond, the second is dead-stripped (`enabled==false`). No code change landed.
+
+**Loop result: CONVERGED.** All actionable findings from iterations 2-3 are fixed and
+committed; iteration 4 found no new actionable security/perf/quality issue. The only
+quality observation (Q-NEW-2) reduces to pre-existing tracked items -- issue #210
+(closed-by-design) and issue #228 (open) -- both blocked on an upstream Zig toolchain fix.
+
+[#210]: https://gitlab.com/devnw/zig/dns/-/issues/210
+[#228]: https://gitlab.com/devnw/zig/dns/-/issues/228
+
+## Audit Round 2026-06-12
+
+This round scored automated-scan and manual-review findings against the existing
+codebase and the open issue tracker. Findings already filed by the interrupted
+prior run (#225-#254) were confirmed and skipped; cross-referenced gap/perf/security
+issues (#206-#224) were not duplicated.
+
+### New Issues Filed This Round (#255-#278)
+
+| ID | Severity | PriorityScore | Category | Finding | Issue | Cross-Ref | Status |
+|----|----------|---------------|----------|---------|-------|-----------|--------|
+| API-1 | Critical | 80 | api-contract | dnssec flag sets RD bit, never emits EDNS OPT/DO -- validation never requested | [#255](https://gitlab.com/devnw/zig/dns/-/issues/255) | #207, #256 | Open |
+| DOC-1/DOC-2 | High | 64 | docs | README/SECURITY/ARCHITECTURE/RFC_COMPLIANCE advertise DNSSEC as Implemented -- false security claim | [#256](https://gitlab.com/devnw/zig/dns/-/issues/256) | #207, #255 | Open |
+| MNT-1 | High | 48 | maintainability | zone_file continuation detection reads line[0] after trim -- silent wrong owner | [#257](https://gitlab.com/devnw/zig/dns/-/issues/257) | -- | Open |
+| M-01 | High | 48 | architecture | Client.initWithConfig has no errdefer for server_addresses -- leak on init failure | [#258](https://gitlab.com/devnw/zig/dns/-/issues/258) | -- | Open |
+| REL-3 | High | 48 | architecture | UDP SO_RCVTIMEO is per-recvfrom -- each spurious packet resets full timeout (Nx) | [#259](https://gitlab.com/devnw/zig/dns/-/issues/259) | #236, #268 | Open |
+| TEST-5 | Medium | 48 | tests | StubResolver has no mock-channel seam -- Client negative paths untestable | [#260](https://gitlab.com/devnw/zig/dns/-/issues/260) | #190, GAP-0045 | Open |
+| TEST-1 | Medium | 36 | tests | client init tests use catch{return} -- silent-green vacuous passes | [#261](https://gitlab.com/devnw/zig/dns/-/issues/261) | #260 | Open |
+| TEST-7 | Medium | 36 | tests | rdata parsers, edns.zig, zone_file.zig unfuzzed (harness covers envelope only) | [#262](https://gitlab.com/devnw/zig/dns/-/issues/262) | #98, #244 | Open |
+| API-8 | Medium | 36 | api-contract | convenience lookupA/lookupAAAA/lookup all return error.NotImplemented | [#263](https://gitlab.com/devnw/zig/dns/-/issues/263) | QH-NEW-01, #272 | Open |
+| TEST-2 | Medium | 36 | tests | parallel validateSignatures asserts only len>=12 -- I/O/result path untested | [#264](https://gitlab.com/devnw/zig/dns/-/issues/264) | #265, #246 | Open |
+| REL-7 | Medium | 36 | architecture | parallel.zig 1-byte error sentinels conflate OutOfMemory with invalid input | [#265](https://gitlab.com/devnw/zig/dns/-/issues/265) | #264, #246 | Open |
+| MNT-8 | Medium | 36 | maintainability | Dual rdata codecs (client.zig:595-700 vs zone_file.zig:480-595) -- drift risk | [#266](https://gitlab.com/devnw/zig/dns/-/issues/266) | #243, #262 | Open |
+| API-6/DOC-6 | Low | 24 | docs | resolve()/result ownership annotations missing on stub & recursive paths | [#271](https://gitlab.com/devnw/zig/dns/-/issues/271) | #252, DOC-01 | Open |
+| TEST-3 | Low | 24 | tests | spurious-discard tests assert the constant, not discard behavior | [#268](https://gitlab.com/devnw/zig/dns/-/issues/268) | #259, QR-R02 | Open |
+| TEST-6 | Low | 24 | tests | global thread-pool state leaks across tests (parallel.zig:811-903) | [#269](https://gitlab.com/devnw/zig/dns/-/issues/269) | #246, #264 | Open |
+| TEST-8 | Low | 24 | tests | assert-nothing tests (convenience.zig:440, udp.zig:110, tcp.zig:94) | [#270](https://gitlab.com/devnw/zig/dns/-/issues/270) | #260 | Open |
+| DC-01 | Low | 24 | tests | rpz/config/convenience/cache_prefetch exported but untested via public API | [#272](https://gitlab.com/devnw/zig/dns/-/issues/272) | QS-NEW-03, #263 | Open |
+| DOC-3 | Low | 24 | docs | lib.zig:23 quick-start omits try + defer deinit -- won't compile / leaks | [#274](https://gitlab.com/devnw/zig/dns/-/issues/274) | #271 | Open |
+| TEST-4 | Low | 16 | tests | DoQ mock failures swallowed via catch return (accept.zig:289, doq.zig:660) | [#267](https://gitlab.com/devnw/zig/dns/-/issues/267) | #261 | Open |
+| DC-02 | Low | 16 | tests | parallelValidateSignatures wrapper has no dedicated test coverage | [#273](https://gitlab.com/devnw/zig/dns/-/issues/273) | #264, #220 | Open |
+| DOC-5 | Low | 16 | docs | Security contact mismatch (<security@codepros.dev> vs <security@devnw.com>) | [#275](https://gitlab.com/devnw/zig/dns/-/issues/275) | -- | Open |
+| DOC-7 | Low | 16 | docs | convenience.zig + dnssec.zig module docs overstate capability | [#276](https://gitlab.com/devnw/zig/dns/-/issues/276) | #263, #255, #256 | Open |
+| MNT-10 | Low | 12 | cleanup | Stale -Dwith_otel comments in lib/client/stub/recursive | [#278](https://gitlab.com/devnw/zig/dns/-/issues/278) | #210, #226, #206 | Open |
+| DOC-8 | Info | 8 | docs | source-port randomization attributed to library; OS provides it | [#277](https://gitlab.com/devnw/zig/dns/-/issues/277) | -- | Open |
+
+### Confirmed Already Filed by Prior Run (#225-#254) -- Not Duplicated
+
+REL-1 (#225; #227 is a closed duplicate of #225), B-01/B-02 (#226), B-04 (#228),
+B-05 (#229), R-01/R-03 (#230), D-01 (#231), D-02 (#232), D-03 (#233), M-02 (#234),
+M-03 (#235), REL-2 (#236), REL-4 (#237), REL-5 (#238), REL-6 (#239), REL-8 (#240),
+REL-9 (#241), REL-10 (#242), MNT-2 (#243), MNT-3 (#244), MNT-4 (#245), MNT-5 (#246),
+MNT-6 (#247), MNT-7 (#248), MNT-9 (#249), MNT-11 (#250), API-2 (#251),
+API-3/API-4 (#252), API-5 (#253), API-7 (#254).
+
+### Deduplicated / Folded (no new issue)
+
+| Finding | Disposition | Where |
+|---------|-------------|-------|
+| R-02 (IP bufPrint catch unreachable x3 production sites) | Folded into umbrella | comment on [#230](https://gitlab.com/devnw/zig/dns/-/issues/230) |
+| R-04 (address-family unreachable x4) | Not filed -- evidence not located in net_compat/transports; **suspected**, needs confirmation of exact sites before filing | -- |
+| B-03 (observability.enabled hardcoded false) | Cross-ref only | comment on [#210](https://gitlab.com/devnw/zig/dns/-/issues/210); also #226, #228 |
+| C-05 (resolveIterative 229 lines / 9-level nesting) | Duplicate of QM-03/#109 + QL-09/#185 (Won't Do) | existing issues |
+| DOC-4 (README Zig 0.15.1+/macOS/Windows stale) | Duplicate of #211 + MNT-11/#250 | existing issues |
+
+### Roadmap (This Round)
+
+**Quick wins (< 1 day):** DOC-5 (#275 reconcile security contact), DOC-3 (#274 fix quick-start), MNT-10 (#278 stale otel comments), DOC-8 (#277 reword source-port claim), DOC-7 (#276 reword module docs), M-01 (#258 add errdefer), MNT-1 (#257 fix continuation detection), TEST-8 (#270), API-6/DOC-6 (#271 ownership docs).
+
+**Medium (1-5 days):** DOC-1/DOC-2 (#256 downgrade DNSSEC claims), REL-3 (#259 deadline-aware UDP timeout), REL-7 (#265 typed parallel results), TEST-5 (#260 mock seam -- unblocks TEST-1/2/3/8, DC-*), TEST-1/2/3/4/6 (behavioral test rewrites), TEST-7 (#262 fuzz rdata/edns/zone_file), API-8 (#263 implement-or-remove convenience), DC-01/DC-02 (#272/#273 public-API tests).
+
+**Strategic (> 5 days):** API-1 (#255 wire EDNS OPT/DO; couples with #207 validator wiring), MNT-8 (#266 unify dual rdata codecs).
 
 ## Summary
 
-| Severity | Open (incl. Deferred) | Resolved/Closed | Won't Do | Total |
-|----------|----------------------|-----------------|----------|-------|
-| Critical | 0 | 5 | 0 | 5 |
-| High | 0 | 14 | 2 | 16 |
-| Medium | 0 | 29 | 6 | 35 |
-| Low | 0 | 17 | 5 | 22 |
-| Info | 0 | 8 | 2 | 10 |
-| **Total** | **0** | **73** | **15** | **88** |
+Counts below cover the historical findings (resolved/won't-do from prior cycles)
+plus the open findings filed in the 2026-06-12 audit round (#255-#278) and the
+prior interrupted run (#225-#254). "Open" = filed and not yet resolved.
+
+| Severity | Open (#225-#278) | Resolved/Closed (historical) | Won't Do (historical) | Total |
+|----------|------------------|------------------------------|-----------------------|-------|
+| Critical | 1 (API-1) | 5 | 0 | 6 |
+| High | 6 | 14 | 2 | 22 |
+| Medium | 23 | 29 | 6 | 58 |
+| Low | 28 | 17 | 5 | 50 |
+| Info | 1 (DOC-8) | 8 | 2 | 11 |
+| **Total** | **59** | **73** | **15** | **147** |
+
+> Of the 59 open: 26 findings filed this round as 24 issues (#255-#278) + 30 prior-run
+> findings (#225-#254; #227 is a closed duplicate). The two bundled rows are DOC-1/DOC-2
+> (#256) and API-6/DOC-6 (#271). All 88 historical findings remain resolved/closed/won't-do.
 
 ### Top Active Risks (after Audit Deep Review)
 
@@ -23,6 +137,7 @@ Last updated: 2026-03-25 (All findings resolved or closed. QR-NEW-01/02 resolved
 4. ~~**QR-NEW-04**~~ (PriorityScore 4, Info) -- **Won't Do.** SEC-AUDIT-09 doc comment duplicated verbatim across stub.zig and recursive.zig. Intentional per-file documentation pattern.
 
 Previously top risks (all Resolved or Won't Do):
+
 - ~~**QR-01** (PriorityScore 36)~~ -- **Resolved.** `followPointer()` helper extracted in name.zig, deduplicating ~75 lines.
 - ~~**QR-02** (PriorityScore 24)~~ -- **Resolved.** `max_spurious_discards` extracted to `types.zig`; imported by 3 files.
 - ~~**MEM-01** (PriorityScore 60)~~ -- **Resolved.** `owns_servers` flag + conditional free in deinit.
@@ -66,7 +181,7 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | 25 | QM-NEW-02 | Medium | 36 | architecture | ResolveResult defined twice with incompatible shapes: client.zig has `addresses: []const []const u8` + `from_cache: bool`; recursive.zig has `status: ResolveStatus` + `answer: ?[]u8` + `from_cache: bool` | client.zig, recursive.zig | `src/client.zig:318-332`, `src/recursive.zig:835-844` | -- | Unify into single type or rename to avoid confusion; client could wrap recursive result | Resolver maintainer | S | **Won't Do** (large refactor; different shapes serve different layers) |
 | 26 | QM-NEW-03 | Medium | 36 | api-contract | Cache hit path in Client.resolve only formats A and AAAA records; MX, SRV, TXT, NS, PTR cache hits silently return empty results | client.zig | `src/client.zig` -- `formatCachedRdata` added covering 9 record types | -- | Added `formatCachedRdata` for A, AAAA, MX, SRV, TXT, PTR, NS, SOA, CNAME | Client maintainer | M | **Resolved** |
 | 27 | QR-01 | Medium | 36 | maintainability | Forward-pointer security logic triplicated in LabelIterator methods next(), nextOrStop(), nextForEql() -- 3 copies of ~25 identical lines; future security fix risks partial application | name.zig | `src/name.zig:98` -- `followPointer()` helper extracted; used by all three methods | -- | Extracted `followPointer()` helper; ~75 lines deduplicated | name.zig maintainer | S | **Resolved** |
-| 28 | AC-02 | Medium | 36 | architecture | client.lookupMX leaks exchange strings on error -- errdefer only calls `results.deinit()` | client.zig | `src/client.zig` -- errdefer now frees exchange strings before deinit | -- | Added `errdefer { for (results.items) |mx| self.allocator.free(mx.exchange); results.deinit(self.allocator); }` | Client maintainer | S | **Resolved** |
+| 28 | AC-02 | Medium | 36 | architecture | client.lookupMX leaks exchange strings on error -- errdefer only calls `results.deinit()` | client.zig | `src/client.zig` -- errdefer now frees exchange strings before deinit | -- | Added `errdefer { for (results.items) \|mx\| self.allocator.free(mx.exchange); results.deinit(self.allocator); }` | Client maintainer | S | **Resolved** |
 | 28 | QM-03 | Medium | 36 | readability | `resolveIterative` is 219 lines with 9 levels of nesting (was 171 at QM-03 filing, 208 at Phase 2, now 219) | recursive.zig | `src/recursive.zig:188-406` | [#109](https://gitlab.com/devnw/zig/dns/-/issues/109) | **Won't Do** -- large refactor of critical resolution path; risks introducing regressions in well-tested code | Resolver maintainer | M | **Won't Do** |
 | 26 | RD-01 | Medium | 30 | maintainability | name.zig compression pointer security checks repeated 7+ times across toString/toStringBuf/labelCount/eql/parent; no shared LabelIterator | name.zig | `src/name.zig` -- LabelIterator extracted and used by 5 functions | [#188](https://gitlab.com/devnw/zig/dns/-/issues/188) | Extracted `LabelIterator` struct; used by toString, toStringBuf, labelCount, eql, parent | name.zig maintainer | M | **Resolved** |
 | 27 | CI-04 | Medium | 30 | tests | cmd/zdig.zig: 1051 lines, zero tests; security-sensitive escapeJsonString and addressMatches untested | zdig.zig | `cmd/zdig.zig` -- 16 tests added for escapeJsonString and addressMatches | [#196](https://gitlab.com/devnw/zig/dns/-/issues/196) | 16 unit tests added covering escapeJsonString and addressMatches | CLI maintainer | M | **Resolved** |
@@ -76,12 +191,12 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 | 31 | RM-04 | Medium | 24 | maintainability | Duplicate MXRecord/MxRecord types: `client.zig:337` defines `MXRecord` (uppercase X) and `convenience.zig:87` defines `MxRecord` (lowercase x) with identical shape | client.zig, convenience.zig | `src/client.zig` -- MxRecord consolidated; duplicate removed | -- | Consolidated MxRecord type; removed duplicate | Resolver maintainer | S | **Resolved** |
 | 32 | RM-07 | Medium | 24 | maintainability | IPv4 formatting pattern `"{d}.{d}.{d}.{d}"` repeated inline in 4+ places | record.zig, recursive.zig, client.zig, convenience.zig | Multiple sites | -- | **Won't Do** (low-risk repetition; format string is idiomatic and unlikely to diverge) | Any contributor | S | **Won't Do** |
 | 33 | QM-NEW-01 | Medium | 24 | maintainability | Duplicate QueryType enum in convenience.zig mirrors types.Type | convenience.zig, types.zig | `src/resolver/convenience.zig` -- QueryType removed; replaced with `types.Type` | -- | Removed duplicate QueryType; now imports and uses types.Type directly | Convenience module maintainer | S | **Resolved** |
-| 34 | QM-NEW-05 | Medium | 24 | architecture | resolveNsAddress catches all errors (including OOM) as null via `catch return null` | recursive.zig | `src/recursive.zig` -- OOM now propagated; other errors return null | -- | `catch |err| switch (err) { error.OutOfMemory => return err, else => return null }` | Resolver maintainer | S | **Resolved** |
+| 34 | QM-NEW-05 | Medium | 24 | architecture | resolveNsAddress catches all errors (including OOM) as null via `catch return null` | recursive.zig | `src/recursive.zig` -- OOM now propagated; other errors return null | -- | `catch \|err\| switch (err) { error.OutOfMemory => return err, else => return null }` | Resolver maintainer | S | **Resolved** |
 | 35 | QR-02 | Low | 24 | maintainability | max_spurious_discards constant and entire UDP receive loop (~35 lines) triplicated across recursive.zig, stub.zig, udp.zig | stub.zig, recursive.zig, udp.zig | `src/types.zig:253` -- `max_spurious_discards` extracted to shared module; imported by 3 files | -- | `max_spurious_discards` and `SpuriousDiscardCounter` extracted to `types.zig` | Transport maintainer | S | **Resolved** |
 | 36 | QS-NEW-08 | Medium | 20 | deps | Spice dependency pinned to main branch tarball; no semver tag | build.zig.zon | `build.zig.zon:29` | -- | **Won't Do** (upstream concern; hash pinning provides integrity; cross-ref GAP-0047, SEC-C14/C31) | Project maintainer | S | **Won't Do** |
 | 37 | QR-R02 | Medium | 20 | tests | SEC-AUDIT-02 tests only verify constant bounds (>0, <=10000), not actual discard enforcement behavior; no test sends spurious packets | recursive.zig, stub.zig, udp.zig | `src/types.zig:289` -- `SpuriousDiscardCounter` struct with 3 new tests verifying increment, limit enforcement, and reset | -- | `SpuriousDiscardCounter` struct in `types.zig` with 3 tests; all 3 discard loops refactored to use it | Transport maintainer | M | **Resolved** |
-| 38 | QS-NEW-05 | Medium | 18 | architecture | stub.zig:170 swallows OOM errors via bare `catch` | stub.zig | `src/stub.zig` -- OOM now propagated via `catch |err| switch (err) { error.OutOfMemory => return err, else => continue }` | -- | Propagate OOM from bare catch in stub.zig | Resolver maintainer | S | **Resolved** |
-| 37 | AC-03 | Medium | 18 | architecture | Cache-hit errdefer in resolve() does not free duped strings on error | client.zig | `src/client.zig` -- errdefer now frees duped strings and ArrayList backing | -- | Added `errdefer { for (results.items) |s| self.allocator.free(s); results.deinit(self.allocator); }` | Client maintainer | S | **Resolved** |
+| 38 | QS-NEW-05 | Medium | 18 | architecture | stub.zig:170 swallows OOM errors via bare `catch` | stub.zig | `src/stub.zig` -- OOM now propagated via `catch \|err\| switch (err) { error.OutOfMemory => return err, else => continue }` | -- | Propagate OOM from bare catch in stub.zig | Resolver maintainer | S | **Resolved** |
+| 37 | AC-03 | Medium | 18 | architecture | Cache-hit errdefer in resolve() does not free duped strings on error | client.zig | `src/client.zig` -- errdefer now frees duped strings and ArrayList backing | -- | Added `errdefer { for (results.items) \|s\| self.allocator.free(s); results.deinit(self.allocator); }` | Client maintainer | S | **Resolved** |
 | 38 | DOC-01 | Medium | 18 | docs | No ownership documentation for Message.data (aliases caller's buffer); use-after-free risk | message.zig | `src/message.zig` -- ownership doc comment added to `data` field | [#198](https://gitlab.com/devnw/zig/dns/-/issues/198) | Added `///` doc comment explaining aliasing/lifetime requirements | message.zig maintainer | S | **Resolved** |
 | 39 | EH-11 | Medium | 18 | architecture | zdig TCP response read loop breaks on recv==0 without validating total_read==response_len; silent truncation | zdig.zig | `cmd/zdig.zig` -- TCP truncation now returns `error.ConnectionClosed` | [#194](https://gitlab.com/devnw/zig/dns/-/issues/194) | TCP truncation now returns `error.ConnectionClosed` instead of silent truncation | CLI maintainer | S | **Resolved** |
 | 40 | QL-03 | Low | 16 | readability | 12 source files exceed 800-line threshold (was 9). New: `connection_pool.zig` (1070), `parallel.zig` (881), `enhanced_metrics.zig` (879). Largest: `record.zig` (1927) | Multiple files | `record.zig:1927`, `recursive.zig:1426`, `name.zig:1345`, `connection_pool.zig:1070`, `edns.zig:973`, `tsig.zig:916`, `zone_transfer.zig:894`, `dnssec.zig:889`, `parallel.zig:881`, `enhanced_metrics.zig:879`, `zone_file.zig:863`, `sig0.zig:814` | [#126](https://gitlab.com/devnw/zig/dns/-/issues/126) | **Won't Do** -- large-scale file splits across 12 files; mechanical but high churn risk for low readability gain | Project maintainer | L | **Won't Do** |
@@ -241,7 +356,7 @@ Note: RE-05, QM-NEW-03 (GAP-0043), AC-02, AC-03, QM-NEW-05, QS-NEW-05, RM-08, QS
 
 | ID | Severity | PriorityScore | Finding | Issue | Status |
 |----|----------|---------------|---------|-------|--------|
-| QR-R01 | Info | 8 | `catch {}` replaced with `catch |err| log.debug(...)` in happy_eyeballs.zig | -- | **Resolved** |
+| QR-R01 | Info | 8 | `catch {}` replaced with `catch \|err\| log.debug(...)` in happy_eyeballs.zig | -- | **Resolved** |
 
 ### Cleanup (9 findings)
 
