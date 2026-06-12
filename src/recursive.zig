@@ -416,6 +416,16 @@ pub const RecursiveResolver = struct {
                             // after we have extracted what we need (PF-NEW-02).
                             defer ref.deinit(self.allocator);
 
+                            // SECURITY (A7, #296): reject upward/lateral referrals.
+                            // The delegated zone must descend from (or equal) the
+                            // zone we are currently asking about. Following a
+                            // referral to an unrelated zone would let a malicious
+                            // or on-path server redirect resolution and poison the
+                            // cache for arbitrary names.
+                            if (!isSubdomainOf(ref.zone, current_zone)) {
+                                return error.OutOfBailiwickReferral;
+                            }
+
                             // Collect addresses for referred NS servers
                             var new_servers: std.ArrayList(ServerAddress) = .empty;
                             errdefer new_servers.deinit(self.allocator);
@@ -1225,6 +1235,24 @@ test "GAP-0020: owned_zone memory lifecycle" {
     }
     try std.testing.expectEqualStrings(".", current_zone);
     try std.testing.expect(owned_zone == null);
+}
+
+test "A7 (#296): referral bailiwick — only downward delegations accepted" {
+    // The recursive loop accepts a referral only when isSubdomainOf(ref.zone,
+    // current_zone) holds. Downward delegations are valid; upward and lateral
+    // referrals (the cache-poisoning vector) must be rejected.
+
+    // Downward delegations (valid):
+    try std.testing.expect(isSubdomainOf("com.", ".")); // root -> com
+    try std.testing.expect(isSubdomainOf("example.com.", "com.")); // com -> example.com
+    try std.testing.expect(isSubdomainOf("example.com.", "example.com.")); // same zone
+
+    // Lateral referral (attacker redirects example.com -> attacker.net):
+    try std.testing.expect(!isSubdomainOf("attacker.net.", "example.com."));
+    // Upward referral (example.com server tries to claim all of com):
+    try std.testing.expect(!isSubdomainOf("com.", "example.com."));
+    // Sibling under the same parent must still be rejected:
+    try std.testing.expect(!isSubdomainOf("evil.com.", "example.com."));
 }
 
 test "RecursiveResolver.getMinimizedQname" {
