@@ -20,6 +20,11 @@ inline fn timeMilli() i64 {
     return clock.milliTimestamp();
 }
 
+/// Shared SystemClock instance used as the default clock seam. SystemClock
+/// holds no state (its vtable impls ignore the instance pointer), so a
+/// single module-level instance is safe to share across managers.
+var default_system_clock: clock.SystemClock = .{};
+
 /// Zig 0.16.0-compatible mutex shim (shared, see src/util/sync.zig).
 const Mutex = @import("sync").Mutex;
 
@@ -190,6 +195,9 @@ pub const FailoverManager = struct {
     weighted_accumulator: u32 = 0,
     /// Random number generator
     rng: random_util.SystemRandom,
+    /// Clock seam: real clock by default, mock clock injectable for
+    /// deterministic circuit-breaker tests (GAP-0880)
+    clk: clock.Clock,
     /// Statistics
     stats: Stats,
     /// Mutex for thread safety
@@ -214,6 +222,17 @@ pub const FailoverManager = struct {
     pub const InitError = error{EntropyUnavailable};
 
     pub fn init(allocator: std.mem.Allocator, config: FailoverConfig) InitError!Self {
+        return initWithClock(allocator, config, default_system_clock.clock());
+    }
+
+    /// Init with an injected clock (GAP-0880). Production callers use
+    /// `init` (real clock); tests inject `clock.MockClock` to exercise
+    /// circuit-breaker timing deterministically.
+    pub fn initWithClock(
+        allocator: std.mem.Allocator,
+        config: FailoverConfig,
+        clk: clock.Clock,
+    ) InitError!Self {
         // Use secure random for server selection (GAP-0851: shared
         // fail-fast entropy helper, no hand-rolled seeding).
         const rng = random_util.SystemRandom.init() catch {
@@ -226,6 +245,7 @@ pub const FailoverManager = struct {
             .rr_index = 0,
             .weighted_accumulator = 0,
             .rng = rng,
+            .clk = clk,
             .stats = .{},
             .mutex = .{},
         };
@@ -283,7 +303,7 @@ pub const FailoverManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = timeMilli();
+        const now = self.clk.nowMs();
 
         // Collect available server indices into a stack buffer — failover
         // pools are tiny, so this avoids a heap allocation + free on every
@@ -426,7 +446,7 @@ pub const FailoverManager = struct {
         if (handle.generation != self.generation) return false;
         if (handle.index >= self.servers.items.len) return false;
 
-        const now = timeMilli();
+        const now = self.clk.nowMs();
         self.servers.items[handle.index].recordSuccess(latency_ms, now);
         self.stats.total_queries += 1;
         self.stats.successful_queries += 1;
@@ -444,7 +464,7 @@ pub const FailoverManager = struct {
         if (handle.generation != self.generation) return false;
         if (handle.index >= self.servers.items.len) return false;
 
-        const now = timeMilli();
+        const now = self.clk.nowMs();
         const server = &self.servers.items[handle.index];
         const was_healthy = server.status != .unhealthy;
         server.recordFailure(now, self.config.circuit_timeout_ms);
@@ -470,7 +490,7 @@ pub const FailoverManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = timeMilli();
+        const now = self.clk.nowMs();
         var count: usize = 0;
         for (self.servers.items) |*server| {
             if (server.isAvailable(now) and server.status == .healthy) {
@@ -499,7 +519,7 @@ pub const FailoverManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        const now = timeMilli();
+        const now = self.clk.nowMs();
 
         for (self.servers.items) |*server| {
             // Reset servers that have been in circuit breaker timeout
@@ -688,6 +708,163 @@ test "FailoverManager stale handle rejected after server set mutation (GAP-0876)
     try std.testing.expect(manager.removeServer("server2"));
     try std.testing.expect(!manager.recordFailure(fresh2.?));
 }
+
+test "FailoverManager circuit opens after 3 failures and recovers via mock clock (GAP-0880)" {
+    const allocator = std.testing.allocator;
+    var mock = clock.MockClock.init();
+    var manager = try FailoverManager.initWithClock(
+        allocator,
+        .{ .circuit_timeout_ms = 30_000 },
+        mock.clock(),
+    );
+    defer manager.deinit();
+
+    try manager.addServer(.{ .address = "primary" });
+    manager.servers.items[0].status = .healthy;
+
+    // Three consecutive failures open the circuit breaker.
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        const handle = manager.selectServer().?;
+        try std.testing.expect(manager.recordFailure(handle));
+    }
+    try std.testing.expectEqual(ServerStatus.unhealthy, manager.servers.items[0].status);
+    try std.testing.expect(!manager.servers.items[0].isAvailable(mock.clock().nowMs()));
+    try std.testing.expectEqual(@as(u64, 1), manager.getStats().circuit_breaker_trips);
+
+    // Just before the circuit timeout the server stays unavailable.
+    mock.advanceMs(29_999);
+    try std.testing.expect(!manager.servers.items[0].isAvailable(mock.clock().nowMs()));
+
+    // After the timeout expires, checkHealth resets the breaker.
+    mock.advanceMs(2);
+    manager.checkHealth();
+    try std.testing.expectEqual(ServerStatus.unknown, manager.servers.items[0].status);
+    try std.testing.expect(manager.servers.items[0].isAvailable(mock.clock().nowMs()));
+    try std.testing.expectEqual(@as(usize, 0), manager.servers.items[0].consecutive_failures);
+}
+
+test "FailoverManager weighted selection proportions over 1000 draws (GAP-0880)" {
+    const allocator = std.testing.allocator;
+    var mock = clock.MockClock.init();
+    var manager = try FailoverManager.initWithClock(
+        allocator,
+        .{ .strategy = .weighted },
+        mock.clock(),
+    );
+    defer manager.deinit();
+
+    try manager.addServer(.{ .address = "light", .weight = 25 });
+    try manager.addServer(.{ .address = "heavy", .weight = 75 });
+    for (manager.servers.items) |*server| {
+        server.status = .healthy;
+    }
+
+    var counts = [_]usize{ 0, 0 };
+    var i: usize = 0;
+    while (i < 1000) : (i += 1) {
+        const handle = manager.selectServer().?;
+        counts[handle.index] += 1;
+    }
+
+    // Expected proportions: 25% / 75% of 1000 draws, +/-10 percentage
+    // points tolerance (the algorithm is deterministic, so this is loose).
+    try std.testing.expect(counts[0] >= 150 and counts[0] <= 350);
+    try std.testing.expect(counts[1] >= 650 and counts[1] <= 850);
+    try std.testing.expectEqual(@as(usize, 1000), counts[0] + counts[1]);
+}
+
+test "FailoverManager least-connections picks lowest active count (GAP-0880)" {
+    const allocator = std.testing.allocator;
+    var mock = clock.MockClock.init();
+    var manager = try FailoverManager.initWithClock(
+        allocator,
+        .{ .strategy = .least_connections },
+        mock.clock(),
+    );
+    defer manager.deinit();
+
+    try manager.addServer(.{ .address = "busy" });
+    try manager.addServer(.{ .address = "idle" });
+    try manager.addServer(.{ .address = "medium" });
+    for (manager.servers.items) |*server| {
+        server.status = .healthy;
+    }
+    manager.servers.items[0].active_connections = 5;
+    manager.servers.items[1].active_connections = 1;
+    manager.servers.items[2].active_connections = 3;
+
+    const handle = manager.selectServer().?;
+    try std.testing.expectEqual(@as(usize, 1), handle.index);
+}
+
+test "FailoverManager latency strategy picks fastest recorded (GAP-0880)" {
+    const allocator = std.testing.allocator;
+    var mock = clock.MockClock.init();
+    var manager = try FailoverManager.initWithClock(
+        allocator,
+        .{ .strategy = .latency_based },
+        mock.clock(),
+    );
+    defer manager.deinit();
+
+    try manager.addServer(.{ .address = "slow" });
+    try manager.addServer(.{ .address = "fast" });
+    try manager.addServer(.{ .address = "unknown-latency" });
+    for (manager.servers.items) |*server| {
+        server.status = .healthy;
+    }
+    manager.servers.items[0].avg_latency_ms = 200;
+    manager.servers.items[1].avg_latency_ms = 50;
+    // servers.items[2] has no recorded latency: treated as 1000ms.
+
+    const handle = manager.selectServer().?;
+    try std.testing.expectEqual(@as(usize, 1), handle.index);
+}
+
+test "FailoverManager primary-secondary fails over and returns (GAP-0880)" {
+    const allocator = std.testing.allocator;
+    var mock = clock.MockClock.init();
+    var manager = try FailoverManager.initWithClock(
+        allocator,
+        .{ .strategy = .primary_secondary, .circuit_timeout_ms = 30_000 },
+        mock.clock(),
+    );
+    defer manager.deinit();
+
+    try manager.addServer(.{ .address = "primary", .priority = 0 });
+    try manager.addServer(.{ .address = "secondary", .priority = 1, .is_backup = true });
+    for (manager.servers.items) |*server| {
+        server.status = .healthy;
+    }
+
+    // Both healthy: primary wins.
+    try std.testing.expectEqual(@as(usize, 0), manager.selectServer().?.index);
+
+    // Trip the primary's circuit breaker.
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        const handle = ServerHandle{ .index = 0, .generation = manager.generation };
+        try std.testing.expect(manager.recordFailure(handle));
+    }
+    try std.testing.expectEqual(ServerStatus.unhealthy, manager.servers.items[0].status);
+
+    // Primary unavailable: secondary is selected.
+    try std.testing.expectEqual(@as(usize, 1), manager.selectServer().?.index);
+
+    // Recover the primary after the circuit timeout.
+    mock.advanceMs(30_001);
+    manager.checkHealth();
+    try std.testing.expectEqual(@as(usize, 0), manager.selectServer().?.index);
+}
+
+// GAP-0880 (f): the InitError.EntropyUnavailable path of FailoverManager.init
+// is intentionally NOT covered by a unit test. SystemRandom.init() fails only
+// when the OS entropy source (getrandom/posix fillSecure) fails, and the
+// random module deliberately exposes no injection seam for that source: the
+// fail-fast-on-weak-entropy behavior is a security requirement (GAP-0851,
+// DNS transaction-ID prediction), and adding a fake-entropy seam to the
+// production path would weaken it. The error mapping is a single catch.
 
 test "Strategy enum" {
     try std.testing.expectEqual(Strategy.round_robin, Strategy.round_robin);
