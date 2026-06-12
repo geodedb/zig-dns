@@ -5,6 +5,10 @@
 default:
   tags:
     - company
+    # The shared "company" tag also matches the Hosted Windows Runners, whose
+    # PowerShell shell executor cannot run these bash job scripts. Pin to the
+    # Linux fleet (OVH / Lab Servers / Company Cluster all carry "linux").
+    - linux
 
 include:
   # Security scanning
