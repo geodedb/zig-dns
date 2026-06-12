@@ -291,12 +291,18 @@ pub const ZoneParser = struct {
         var in_parens = false;
         var continued_line: std.ArrayList(u8) = .empty;
         defer continued_line.deinit(self.allocator);
+        // RFC 1035 §5.1: a record whose line begins with blank inherits the
+        // previous record's owner name. This signal must be captured from the
+        // raw (untrimmed) line BEFORE trimming, or it is lost (MNT-1, #257).
+        // For a multi-line ( ... ) record it is the opening line that counts.
+        var paren_leading_blank = false;
 
         while (lines.next()) |raw_line| {
             self.line_number += 1;
 
             // Remove comments (but not in quoted strings)
             const line = self.stripComment(raw_line);
+            const leading_blank = line.len > 0 and (line[0] == ' ' or line[0] == '\t');
 
             // Skip empty lines
             const trimmed = std.mem.trim(u8, line, " \t\r");
@@ -309,7 +315,7 @@ pub const ZoneParser = struct {
 
                 if (std.mem.indexOfScalar(u8, trimmed, ')') != null) {
                     in_parens = false;
-                    try self.parseLine(&zone, continued_line.items);
+                    try self.parseLine(&zone, continued_line.items, paren_leading_blank);
                     continued_line.clearRetainingCapacity();
                 }
                 continue;
@@ -318,15 +324,16 @@ pub const ZoneParser = struct {
             if (std.mem.indexOfScalar(u8, trimmed, '(') != null) {
                 // Check if closing paren is on same line
                 if (std.mem.indexOfScalar(u8, trimmed, ')') != null) {
-                    try self.parseLine(&zone, trimmed);
+                    try self.parseLine(&zone, trimmed, leading_blank);
                 } else {
                     in_parens = true;
+                    paren_leading_blank = leading_blank;
                     try continued_line.appendSlice(self.allocator, trimmed);
                 }
                 continue;
             }
 
-            try self.parseLine(&zone, trimmed);
+            try self.parseLine(&zone, trimmed, leading_blank);
         }
 
         if (in_parens) {
@@ -362,7 +369,7 @@ pub const ZoneParser = struct {
         return line;
     }
 
-    fn parseLine(self: *Self, zone: *Zone, line: []const u8) !void {
+    fn parseLine(self: *Self, zone: *Zone, line: []const u8, leading_blank: bool) !void {
         var cleaned = std.mem.trim(u8, line, " \t\r");
 
         // Remove parentheses
@@ -378,7 +385,7 @@ pub const ZoneParser = struct {
         }
 
         // Parse resource record
-        try self.parseResourceRecord(zone, cleaned);
+        try self.parseResourceRecord(zone, cleaned, leading_blank);
     }
 
     fn parseDirective(self: *Self, line: []const u8) !void {
@@ -403,7 +410,7 @@ pub const ZoneParser = struct {
         }
     }
 
-    fn parseResourceRecord(self: *Self, zone: *Zone, line: []const u8) !void {
+    fn parseResourceRecord(self: *Self, zone: *Zone, line: []const u8, leading_blank: bool) !void {
         var tokens = Tokenizer.init(line);
 
         // First token could be: name, TTL, or class
@@ -419,9 +426,12 @@ pub const ZoneParser = struct {
         // Determine the name
         const first = tokens.next() orelse return;
 
-        // Check if line starts with whitespace (continuation)
-        if (line[0] == ' ' or line[0] == '\t') {
+        // RFC 1035 §5.1: a leading-blank line has no owner field — the owner is
+        // inherited from the previous record and every token is record data.
+        // `leading_blank` comes from the untrimmed source line (MNT-1, #257).
+        if (leading_blank) {
             name = self.last_name;
+            tokens = Tokenizer.init(line); // first token is data, not an owner
         } else if (std.mem.eql(u8, first, "@")) {
             name = self.origin;
         } else if (Class.fromString(first) != null or parseTTL(first) catch null != null or RecordType.fromString(first) != null) {
@@ -704,11 +714,16 @@ fn parseTTL(s: []const u8) ParseError!u32 {
     const max_ttl = std.math.maxInt(u32);
     var value: u64 = 0;
     var current: u64 = 0;
+    // A unit suffix must be preceded by digits, otherwise a bare run of suffix
+    // letters (e.g. an owner name like "www") would silently parse as 0 and be
+    // mistaken for a TTL field by the record parser (#257-adjacent).
+    var saw_digit = false;
 
     for (s) |c| {
         if (c >= '0' and c <= '9') {
             current = current * 10 + (c - '0');
             if (current > max_ttl) return error.InvalidTTL;
+            saw_digit = true;
         } else {
             const multiplier: u64 = switch (c) {
                 's', 'S' => 1,
@@ -718,9 +733,11 @@ fn parseTTL(s: []const u8) ParseError!u32 {
                 'w', 'W' => 604800,
                 else => return error.InvalidTTL,
             };
+            if (!saw_digit) return error.InvalidTTL; // suffix with no preceding digits
             value += current * multiplier;
             if (value > max_ttl) return error.InvalidTTL;
             current = 0;
+            saw_digit = false;
         }
     }
 
@@ -798,6 +815,17 @@ test "parseTTL rejects values overflowing u32 (SEC-SR-4)" {
     try std.testing.expectError(error.InvalidTTL, parseTTL("4294967295w"));
 }
 
+test "parseTTL rejects bare unit suffixes (owner names like www)" {
+    // A run of suffix letters with no digits must NOT parse as 0, else owner
+    // names get mistaken for TTL fields by the record parser (#257-adjacent).
+    try std.testing.expectError(error.InvalidTTL, parseTTL("www"));
+    try std.testing.expectError(error.InvalidTTL, parseTTL("w"));
+    try std.testing.expectError(error.InvalidTTL, parseTTL("hm"));
+    // Digits-before-suffix still works, including a legitimate zero.
+    try std.testing.expectEqual(@as(u32, 0), try parseTTL("0w"));
+    try std.testing.expectEqual(@as(u32, 604800), try parseTTL("1w"));
+}
+
 test "Class.fromString" {
     try std.testing.expectEqual(Class.in, Class.fromString("IN").?);
     try std.testing.expectEqual(Class.in, Class.fromString("in").?);
@@ -863,6 +891,28 @@ test "ZoneParser does not leak explicit owner names (SEC-SR-8)" {
     var zone = try parser.parse(content);
     defer zone.deinit();
     try std.testing.expectEqual(@as(usize, 3), zone.records.items.len);
+}
+
+test "ZoneParser leading-blank continuation inherits owner (MNT-1, #257)" {
+    const allocator = std.testing.allocator;
+    var parser = ZoneParser.init(allocator);
+    defer parser.deinit();
+
+    // The second record line begins with a tab (no owner field), so per
+    // RFC 1035 §5.1 it inherits the previous owner (www). The leading-blank
+    // signal is read from the untrimmed source line.
+    const content =
+        "$ORIGIN example.com.\n" ++
+        "www IN A 192.168.1.1\n" ++
+        "\tIN A 192.168.1.2\n";
+
+    var zone = try parser.parse(content);
+    defer zone.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), zone.records.items.len);
+    try std.testing.expectEqualStrings("www.example.com.", zone.records.items[0].name);
+    try std.testing.expectEqualStrings("www.example.com.", zone.records.items[1].name);
+    try std.testing.expectEqual([4]u8{ 192, 168, 1, 2 }, zone.records.items[1].rdata.a);
 }
 
 test "ZoneParser SOA record" {
