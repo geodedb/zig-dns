@@ -219,6 +219,25 @@ pub const IxfrChangeset = struct {
     }
 };
 
+/// Hard cap on the number of AXFR response messages, independent of the
+/// per-message and per-record limits, to bound a server that withholds the
+/// closing SOA while trickling empty messages (SEC-SR-6).
+const max_transfer_messages: usize = 1_000_000;
+
+/// True when the wall-clock transfer budget (config.timeout_ms) is exhausted.
+/// The socket RCVTIMEO only bounds a single recv; this bounds the whole
+/// transfer so a slow-drip server cannot hang the loop indefinitely (SEC-SR-6).
+fn transferDeadlineExceeded(start_ms: i64, now_ms: i64, timeout_ms: u32) bool {
+    if (timeout_ms == 0) return false; // 0 == no deadline
+    return now_ms - start_ms > @as(i64, timeout_ms);
+}
+
+/// RFC 1982 serial-number comparison: returns true iff `a` is greater than `b`
+/// in 32-bit serial arithmetic. Used to reject IXFR serial downgrades (SEC-SR-7).
+fn serialGreater(a: u32, b: u32) bool {
+    return a != b and (a -% b) < 0x8000_0000;
+}
+
 /// Zone Transfer Client
 pub const ZoneTransferClient = struct {
     allocator: std.mem.Allocator,
@@ -297,9 +316,37 @@ pub const ZoneTransferClient = struct {
         var second_soa_seen = false;
 
         while (!second_soa_seen) {
+            // SEC-SR-6: enforce the transfer-wide deadline and a hard message
+            // cap so a server that never sends the closing SOA (e.g. trickling
+            // empty ancount=0 messages, which never trip max_records) cannot
+            // hang the loop indefinitely.
+            if (transferDeadlineExceeded(start_time, std.time.milliTimestamp(), self.config.timeout_ms)) {
+                zone.deinit();
+                return TransferResult{
+                    .success = false,
+                    .zone = null,
+                    .record_count = 0,
+                    .message_count = message_count,
+                    .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
+                    .error_message = "Transfer deadline exceeded",
+                };
+            }
+
             const response = try self.receiveTcpMessage(stream);
             defer self.allocator.free(response);
             message_count += 1;
+
+            if (message_count > max_transfer_messages) {
+                zone.deinit();
+                return TransferResult{
+                    .success = false,
+                    .zone = null,
+                    .record_count = 0,
+                    .message_count = message_count,
+                    .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
+                    .error_message = "Too many transfer messages",
+                };
+            }
 
             // Parse response and extract records
             const records = try self.parseTransferResponse(response);
@@ -416,6 +463,17 @@ pub const ZoneTransferClient = struct {
         errdefer changeset.deinit(self.allocator);
 
         try self.parseIxfrChanges(records, &changeset);
+
+        // SEC-SR-7: reject a serial downgrade. A malicious primary must not be
+        // able to roll the zone backwards via IXFR. Only enforced when the
+        // server actually supplied a new SOA serial; an equal serial (already
+        // up to date) is permitted, only a strictly older serial is rejected.
+        if (self.config.verify_serial and
+            records.len > 0 and records[0].rtype == soa_rtype and
+            serialGreater(current_serial, changeset.new_serial))
+        {
+            return error.SerialNotAdvanced;
+        }
 
         return IxfrResult{
             .success = true,
@@ -1027,6 +1085,26 @@ test "SEC-NEW-03b: parseTransferResponse accepts qdcount 0" {
     const records = try client.parseTransferResponse(&response);
     defer allocator.free(records);
     try std.testing.expectEqual(@as(usize, 0), records.len);
+}
+
+test "SEC-SR-6: transferDeadlineExceeded enforces a wall-clock budget" {
+    // Within budget.
+    try std.testing.expect(!transferDeadlineExceeded(1000, 1500, 1000));
+    // Exactly at the budget is not yet exceeded.
+    try std.testing.expect(!transferDeadlineExceeded(1000, 2000, 1000));
+    // Past the budget.
+    try std.testing.expect(transferDeadlineExceeded(1000, 2001, 1000));
+    // 0 means "no deadline" and never trips, even far in the future.
+    try std.testing.expect(!transferDeadlineExceeded(1000, 9_000_000, 0));
+}
+
+test "SEC-SR-7: serialGreater follows RFC 1982 arithmetic" {
+    try std.testing.expect(serialGreater(101, 100));
+    try std.testing.expect(!serialGreater(100, 100)); // equal is not greater
+    try std.testing.expect(!serialGreater(100, 101)); // older is not greater
+    // Wraparound: 0 is "greater than" 0xFFFFFFFF (just wrapped).
+    try std.testing.expect(serialGreater(0, 0xFFFF_FFFF));
+    try std.testing.expect(!serialGreater(0xFFFF_FFFF, 0));
 }
 
 test "SEC-SR-9: parseTransferResponse does not leak record name on truncation" {
