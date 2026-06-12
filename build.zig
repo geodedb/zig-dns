@@ -901,6 +901,24 @@ pub fn build(b: *std.Build) void {
     const run_lib_test = b.addRunArtifact(lib_test);
     test_step.dependOn(&run_lib_test.step);
 
+    // zdig CLI tests (non-Windows; mirrors the zdig executable module so the
+    // CLI's output-sanitization and JSON-escaping tests run in CI).
+    if (!is_windows and cli_mod != null) {
+        const zdig_test_mod = b.createModule(.{
+            .root_source_file = b.path("cmd/zdig.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "dns", .module = dns_mod },
+                .{ .name = "net_compat", .module = net_compat_mod },
+            },
+        });
+        if (cli_mod) |m| zdig_test_mod.addImport("cli", m);
+        const zdig_test = b.addTest(.{ .root_module = zdig_test_mod });
+        const run_zdig_test = b.addRunArtifact(zdig_test);
+        test_step.dependOn(&run_zdig_test.step);
+    }
+
     // ========================================================================
     // RFC Test Vectors
     // ========================================================================

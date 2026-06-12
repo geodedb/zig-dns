@@ -419,6 +419,24 @@ fn asciiUpper(s: []const u8, buf: []u8) []const u8 {
     return buf[0..len];
 }
 
+/// Write attacker-controlled bytes (record names, TXT/CAA character-strings)
+/// to a terminal-bound writer with control and non-ASCII bytes escaped as
+/// `\DDD`, mirroring dig's RFC 1035 §5.1 presentation format. Prevents ANSI/
+/// OSC terminal-escape injection from malicious DNS responses (SEC-SR-5,
+/// CWE-150). The JSON output path uses escapeJsonString instead.
+fn writeSanitized(writer: anytype, bytes: []const u8) !void {
+    for (bytes) |b| {
+        switch (b) {
+            '\\' => try writer.writeAll("\\\\"),
+            '"' => try writer.writeAll("\\\""),
+            // Printable ASCII except '"' (0x22) and '\\' (0x5C), handled above.
+            0x20, 0x21, 0x23...0x5B, 0x5D...0x7E => try writer.writeByte(b),
+            // Control bytes (incl. ESC/BEL), DEL, and non-ASCII -> \DDD decimal.
+            else => try writer.print("\\{d:0>3}", .{b}),
+        }
+    }
+}
+
 /// Escape a string for JSON output (SEC-GAP-054: CWE-117)
 fn escapeJsonString(allocator: Allocator, input: []const u8) ![]u8 {
     var escape_count: usize = 0;
@@ -689,13 +707,14 @@ fn outputRDataShort(allocator: Allocator, writer: anytype, rr: dns.record.Resour
             const name = try rr.parseName(data);
             const name_str = try name.toString(allocator, data);
             defer allocator.free(name_str);
-            try writer.print("{s}", .{name_str});
+            try writeSanitized(writer, name_str);
         },
         .mx => {
             const mx = try rr.parseMX(data);
             const exchange_str = try mx.exchange.toString(allocator, data);
             defer allocator.free(exchange_str);
-            try writer.print("{d} {s}", .{ mx.preference, exchange_str });
+            try writer.print("{d} ", .{mx.preference});
+            try writeSanitized(writer, exchange_str);
         },
         .txt => {
             const txt = try rr.parseTXT(allocator);
@@ -704,7 +723,9 @@ fn outputRDataShort(allocator: Allocator, writer: anytype, rr: dns.record.Resour
                 allocator.free(txt);
             }
             for (txt) |segment| {
-                try writer.print("\"{s}\"", .{segment});
+                try writer.writeByte('"');
+                try writeSanitized(writer, segment);
+                try writer.writeByte('"');
             }
         },
         .soa => {
@@ -713,9 +734,10 @@ fn outputRDataShort(allocator: Allocator, writer: anytype, rr: dns.record.Resour
             defer allocator.free(mname_str);
             const rname_str = try soa.rname.toString(allocator, data);
             defer allocator.free(rname_str);
-            try writer.print("{s} {s} {d} {d} {d} {d} {d}", .{
-                mname_str,
-                rname_str,
+            try writeSanitized(writer, mname_str);
+            try writer.writeByte(' ');
+            try writeSanitized(writer, rname_str);
+            try writer.print(" {d} {d} {d} {d} {d}", .{
                 soa.serial,
                 soa.refresh,
                 soa.retry,
@@ -727,16 +749,20 @@ fn outputRDataShort(allocator: Allocator, writer: anytype, rr: dns.record.Resour
             const srv = try rr.parseSRV(data);
             const target_str = try srv.target.toString(allocator, data);
             defer allocator.free(target_str);
-            try writer.print("{d} {d} {d} {s}", .{
+            try writer.print("{d} {d} {d} ", .{
                 srv.priority,
                 srv.weight,
                 srv.port,
-                target_str,
             });
+            try writeSanitized(writer, target_str);
         },
         .caa => {
             const caa = try rr.parseCAA();
-            try writer.print("{d} {s} \"{s}\"", .{ caa.flags, caa.tag, caa.value });
+            try writer.print("{d} ", .{caa.flags});
+            try writeSanitized(writer, caa.tag);
+            try writer.writeAll(" \"");
+            try writeSanitized(writer, caa.value);
+            try writer.writeByte('"');
         },
         else => {
             // For other types, show raw hex
@@ -797,8 +823,9 @@ fn outputDigStyle(allocator: Allocator, writer: anytype, response: dns.message.M
         while (try q_iter.next()) |q| {
             const q_name = try q.qname.toString(allocator, data);
             defer allocator.free(q_name);
-            try writer.print(";{s}.\t\t\t{s}\t{s}\n", .{
-                q_name,
+            try writer.writeByte(';');
+            try writeSanitized(writer, q_name);
+            try writer.print(".\t\t\t{s}\t{s}\n", .{
                 @tagName(q.qclass),
                 @tagName(q.qtype),
             });
@@ -866,8 +893,8 @@ fn outputResourceRecord(allocator: Allocator, writer: anytype, rr: dns.record.Re
     const rr_name = try rr.name.toString(allocator, data);
     defer allocator.free(rr_name);
 
-    try writer.print("{s}.\t{d}\t{s}\t{s}\t", .{
-        rr_name,
+    try writeSanitized(writer, rr_name);
+    try writer.print(".\t{d}\t{s}\t{s}\t", .{
         rr.ttl,
         @tagName(rr.class),
         @tagName(rr.rtype),
@@ -1137,6 +1164,31 @@ test "escapeJsonString: mixed escapes" {
     const result = try escapeJsonString(testing.allocator, "a\"b\\c\nd\x01e");
     defer testing.allocator.free(result);
     try testing.expectEqualStrings("a\\\"b\\\\c\\nd\\u0001e", result);
+}
+
+test "writeSanitized: printable ASCII passes through (SEC-SR-5)" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeSanitized(&aw.writer, "hello world!");
+    try testing.expectEqualStrings("hello world!", aw.written());
+}
+
+test "writeSanitized: escapes terminal control bytes (SEC-SR-5)" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    // A malicious TXT/CAA/name payload: ESC + OSC window-title injection + BEL.
+    try writeSanitized(&aw.writer, "\x1b]0;pwned\x07");
+    // No raw ESC (0x1b) or BEL (0x07) may reach the terminal.
+    try testing.expect(std.mem.indexOfScalar(u8, aw.written(), 0x1b) == null);
+    try testing.expect(std.mem.indexOfScalar(u8, aw.written(), 0x07) == null);
+    try testing.expectEqualStrings("\\027]0;pwned\\007", aw.written());
+}
+
+test "writeSanitized: escapes quote and backslash (SEC-SR-5)" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try writeSanitized(&aw.writer, "a\"b\\c");
+    try testing.expectEqualStrings("a\\\"b\\\\c", aw.written());
 }
 
 test "addressMatches: IPv4 same address and port matches" {
