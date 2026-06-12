@@ -142,8 +142,10 @@ pub const TlsConnection = struct {
     pub const VTable = struct {
         /// Write data to TLS connection
         write: *const fn (ctx: *anyopaque, data: []const u8) anyerror!usize,
-        /// Read data from TLS connection
-        read: *const fn (ctx: *anyopaque, buffer: []u8) anyerror!usize,
+        /// Read data from TLS connection. Must honor timeout_ms (the remaining
+        /// budget for this read) and return error.Timeout if it elapses, so a
+        /// server that stalls mid-response cannot hang the resolver (REL-1).
+        read: *const fn (ctx: *anyopaque, buffer: []u8, timeout_ms: u32) anyerror!usize,
         /// Close connection
         close: *const fn (ctx: *anyopaque) void,
         /// Check if connection is open
@@ -158,8 +160,8 @@ pub const TlsConnection = struct {
         return self.vtable.write(self.ctx, data);
     }
 
-    pub fn read(self: TlsConnection, buffer: []u8) !usize {
-        return self.vtable.read(self.ctx, buffer);
+    pub fn read(self: TlsConnection, buffer: []u8, timeout_ms: u32) !usize {
+        return self.vtable.read(self.ctx, buffer, timeout_ms);
     }
 
     pub fn close(self: TlsConnection) void {
@@ -313,11 +315,18 @@ pub const DoTTransport = struct {
         try tlsWriteAll(conn, &length_prefix);
         try tlsWriteAll(conn, wire_req);
 
+        // REL-1: bound the whole response read by a wall-clock deadline so a
+        // server that stalls mid-response cannot hang queryImpl forever. Each
+        // read is given the remaining budget.
+        const deadline = timeMilli() + @as(i64, timeout_ms);
+
         // Read response length
         var resp_len_buf: [2]u8 = undefined;
         var len_read: usize = 0;
         while (len_read < 2) {
-            const n = try conn.read(resp_len_buf[len_read..]);
+            const remaining = deadline - timeMilli();
+            if (remaining <= 0) return error.Timeout;
+            const n = try conn.read(resp_len_buf[len_read..], @intCast(remaining));
             if (n == 0) return error.ConnectionClosed;
             len_read += n;
         }
@@ -333,7 +342,9 @@ pub const DoTTransport = struct {
 
         var total_read: usize = 0;
         while (total_read < resp_len) {
-            const n = try conn.read(response[total_read..]);
+            const remaining = deadline - timeMilli();
+            if (remaining <= 0) return error.Timeout;
+            const n = try conn.read(response[total_read..], @intCast(remaining));
             if (n == 0) return error.ConnectionClosed;
             total_read += n;
         }
@@ -463,7 +474,8 @@ pub const MockTlsBackend = struct {
         return data.len;
     }
 
-    fn readImpl(ctx: *anyopaque, buffer: []u8) anyerror!usize {
+    fn readImpl(ctx: *anyopaque, buffer: []u8, timeout_ms: u32) anyerror!usize {
+        _ = timeout_ms; // mock returns immediately
         const self: *Self = @ptrCast(@alignCast(ctx));
 
         if (self.response_index >= self.responses.items.len) {
@@ -670,6 +682,29 @@ test "MockTlsBackend basic" {
     try std.testing.expect(conn.isOpen());
     try std.testing.expectEqualStrings("dot", conn.getAlpn().?);
     try std.testing.expectEqual(TlsVersion.tls_1_3, conn.getTlsVersion());
+}
+
+test "REL-1: DoT query fails fast on an exhausted read budget" {
+    const allocator = std.testing.allocator;
+
+    var mock = MockTlsBackend.init(allocator);
+    defer mock.deinit();
+    const response = [_]u8{ 0x00, 0x02, 0xAA, 0xBB };
+    try mock.addResponse(&response);
+
+    var dot = try DoTTransport.initWithBackend(allocator, .{
+        .server_name = "dns.example.com",
+        .addr = .{ .host = "1.2.3.4", .port = 853 },
+        .ca_pem = "",
+        .use_system_ca = true,
+        .alpn_dot = "dot",
+    }, mock.backend());
+    defer dot.deinit();
+
+    var ch = dot.channel();
+    // With a zero-millisecond budget the response-read deadline guard must trip
+    // immediately rather than block, so a stalled server cannot hang us (REL-1).
+    try std.testing.expectError(error.Timeout, ch.query(&[_]u8{ 0x00, 0x01 }, 0));
 }
 
 test "TlsBackend connect failure" {
