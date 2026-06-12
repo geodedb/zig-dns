@@ -1251,7 +1251,7 @@ Risk Score = Impact(1-5) x Likelihood(1-5) x 4.
 | 22 | Low | 8 | SEC-A10: SystemRandom seeds non-CSPRNG (latent footgun) | util/random.zig | CWE-338,330 / A04:2025 | random.zig:43-70 | [#299](https://gitlab.com/devnw/zig/dns/-/issues/299) | 180d | **Open** |
 | 23 | Low | 8 | SEC-A11: connection-pool key compares host by hash, omits TLS identity | connection_pool.zig | CWE-345 / A01:2025 | connection_pool.zig:213-223 | [#300](https://gitlab.com/devnw/zig/dns/-/issues/300) | 180d | **Open** (suspected) |
 | 24 | Low | 8 | SEC-SC-1: pre-commit hooks tag-pinned, not SHA-pinned | .pre-commit-config.yaml | CWE-829 / A08:2025 | .pre-commit-config.yaml | [#302](https://gitlab.com/devnw/zig/dns/-/issues/302) | 180d | **Open** |
-| 25 | Low | 8 | SEC-SC-2: sync_diamond_deps.py parse_target lacks format validation | scripts/sync_diamond_deps.py | CWE-20 / A08:2025 | sync_diamond_deps.py:353-357 | [#303](https://gitlab.com/devnw/zig/dns/-/issues/303) | 180d | **Open** |
+| 25 | Low | 8 | SEC-SC-2: parse_target lacks format validation -- now validated (name/tag/40-hex-commit) in zig-tool | zig-tool: src/zig_tool/sync_diamond_deps.py:349-362 | CWE-20 / A08:2025 | parse_target (zig-tool) | [#303](https://gitlab.com/devnw/zig/dns/-/issues/303) | 180d | **Resolved** (validation implemented; tooling extracted to zig-tool, vendored copy deleted) |
 
 **2026-06-12 cycle totals: 25 findings -- 0 resolved, 0 won't do, 25 open.** By severity: High 10, Medium 7, Low 8. Confidential: 9 (#279-#283, #290-#292, #297).
 
