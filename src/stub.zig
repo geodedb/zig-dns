@@ -214,7 +214,7 @@ pub const StubResolver = struct {
 
         const id = try self.nextId();
 
-        // Build query on the stack (max 271 bytes, no heap allocation)
+        // Build query on the stack (max 282 bytes, no heap allocation)
         var query_buf: [message_mod.max_query_size]u8 = undefined;
         const query = try message_mod.buildQueryBuf(&query_buf, id, domain, qtype, qclass, true, false);
 

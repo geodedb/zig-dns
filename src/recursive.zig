@@ -113,6 +113,11 @@ pub const RecursiveConfig = struct {
     /// response secure. When false (permissive, the default), insecure and
     /// indeterminate results proceed and are reported on ResolveResult.dnssec;
     /// bogus results always fail closed regardless of this setting.
+    ///
+    /// Scope: validation currently covers the final answer RRsets only.
+    /// CNAME intermediate hops and NXDOMAIN/NODATA denial-of-existence
+    /// (NSEC/NSEC3) are NOT yet validated; those are tracked as follow-up
+    /// gaps.
     dnssec_strict: bool = false,
 
     /// GAP-0839: Trust anchors used to validate DNSSEC responses (zone
@@ -619,11 +624,9 @@ pub const RecursiveResolver = struct {
             state.last_query_name = try self.allocator.dupe(u8, query_name);
         }
 
-        // Build query on the stack (max 271 bytes, no heap allocation).
+        // Build query on the stack (max 282 bytes, no heap allocation).
         // These are iterative queries to authoritative servers, so RD must be
-        // false. (Previously self.config.dnssec was passed here as the `rd`
-        // argument, which both corrupted the RD bit and never requested
-        // DNSSEC; #255/API-1. DNSSEC request/validation is tracked by #207.)
+        // false (#255/API-1); the dnssec flag drives the EDNS DO bit instead.
         var query_buf: [message_mod.max_query_size]u8 = undefined;
         // GAP-0840: the dnssec config flag now drives the EDNS DO bit.
         const query = try message_mod.buildQueryBuf(&query_buf, id, query_name, qtype, .in, false, self.config.dnssec);
@@ -959,6 +962,32 @@ pub const RecursiveResolver = struct {
         return result;
     }
 
+    /// A set of DNSKEYs trusted for validation, each bound to the zone
+    /// (apex owner, dotted string form) it may sign for. `zones[i]` points
+    /// either at config-owned anchor memory or into `zone_bufs[i]`, so the
+    /// set must be filled in place and never copied by value.
+    const TrustedKeySet = struct {
+        keys: [max_dnssec_rrs]ResourceRecord.DnskeyData = undefined,
+        tags: [max_dnssec_rrs]u16 = undefined,
+        zones: [max_dnssec_rrs][]const u8 = undefined,
+        zone_bufs: [max_dnssec_rrs][256]u8 = undefined,
+        count: usize = 0,
+    };
+
+    /// Per-RRset verification outcome (see verifyAnswerRrset).
+    const RrsetVerdict = enum {
+        /// A trusted key verified a covering RRSIG.
+        secure,
+        /// A covering RRSIG failed verification or was malformed.
+        bogus,
+        /// No usable covering RRSIG (unsigned, or signer out of ancestry).
+        no_signature,
+        /// Only signatures with algorithms this library cannot verify.
+        unsupported_alg,
+        /// Signed, but no trusted key available to check against.
+        no_trusted_key,
+    };
+
     /// Validate the answer RRsets of a response against RRSIGs and the
     /// configured trust anchors (GAP-0839, minimum spec-compliant scope).
     ///
@@ -967,9 +996,15 @@ pub const RecursiveResolver = struct {
     /// response that match a DS-type trust anchor. A full iterative
     /// DS-walk from the root (fetching DNSKEY/DS RRsets per delegation,
     /// dnssec.Validator.validateChainOfTrust) is NOT performed here; that
-    /// depth is tracked separately. Signatures using algorithms this
-    /// library cannot verify (e.g. deprecated RSA/SHA-1, GAP-0842) are
-    /// treated as insecure, not bogus.
+    /// depth is tracked separately, as are CNAME intermediate hops and
+    /// NXDOMAIN/NODATA denial-of-existence (NSEC/NSEC3) validation.
+    /// Signatures using algorithms this library cannot verify (e.g.
+    /// deprecated RSA/SHA-1, GAP-0842) are treated as insecure, not bogus.
+    ///
+    /// Zone boundaries (RFC 4035 Section 5.3.1): an RRset is only eligible
+    /// for `secure` when its owner lies within a configured anchor's zone,
+    /// its RRSIG signer is an ancestor (or equal) of the owner, and the
+    /// validating key belongs to the zone named by the signer field.
     fn validateDnssecResponse(
         self: *Self,
         response: []const u8,
@@ -985,7 +1020,12 @@ pub const RecursiveResolver = struct {
         }
 
         // Collect answer RRs (the RRsets to validate) and covering RRSIGs.
+        // Owner names on the wire are usually compressed (a pointer back to
+        // the question name); canonical RRSIG verification requires the
+        // uncompressed owner (RFC 4034 Section 6.2), so decompress each
+        // answer owner up front.
         var answer_rrs: [max_dnssec_rrs]ResourceRecord = undefined;
+        var answer_owner_bufs: [max_dnssec_rrs][name_mod.max_name_length]u8 = undefined;
         var answer_count: usize = 0;
         var rrsig_rrs: [max_dnssec_rrs]ResourceRecord = undefined;
         var rrsig_count: usize = 0;
@@ -994,11 +1034,23 @@ pub const RecursiveResolver = struct {
         while (ans_iter.next() catch return .bogus) |rr| {
             if (rr.rtype == .rrsig) {
                 if (rrsig_count >= max_dnssec_rrs) return .indeterminate;
+                // The RRSIG owner is only ever compared via string form
+                // (which resolves pointers) and its signer name lives
+                // uncompressed inside RDATA (RFC 4034 Section 3.1.7), so
+                // no decompression is needed here.
                 rrsig_rrs[rrsig_count] = rr;
                 rrsig_count += 1;
             } else {
                 if (answer_count >= max_dnssec_rrs) return .indeterminate;
                 answer_rrs[answer_count] = rr;
+                if (rr.name.compressed) {
+                    var str_buf: [256]u8 = undefined;
+                    const owner_str = rr.name.toStringBuf(&str_buf, response) catch return .bogus;
+                    answer_rrs[answer_count].name = Name.encodeBuf(
+                        owner_str,
+                        &answer_owner_bufs[answer_count],
+                    ) catch return .bogus;
+                }
                 answer_count += 1;
             }
         }
@@ -1020,59 +1072,10 @@ pub const RecursiveResolver = struct {
             }
         }
 
-        // Build the trusted-key set.
-        var trusted_keys: [max_dnssec_rrs]ResourceRecord.DnskeyData = undefined;
-        var trusted_tags: [max_dnssec_rrs]u16 = undefined;
-        var trusted_count: usize = 0;
-
-        // (1) DNSKEY-type trust anchors: the anchor data IS DNSKEY RDATA.
-        for (self.config.dnssec_trust_anchors) |anchor| {
-            if (!anchor.is_dnskey or anchor.data.len < 4) continue;
-            if (trusted_count >= max_dnssec_rrs) break;
-            trusted_keys[trusted_count] = .{
-                .flags = .{ .raw = std.mem.readInt(u16, anchor.data[0..2], .big) },
-                .protocol = anchor.data[2],
-                .algorithm = @enumFromInt(anchor.data[3]),
-                .public_key = anchor.data[4..],
-            };
-            trusted_tags[trusted_count] = ResourceRecord.calculateKeyTag(anchor.data);
-            trusted_count += 1;
-        }
-
-        // (2) Response DNSKEYs that match a DS-type trust anchor digest.
-        for (dnskey_rrs[0..dnskey_count]) |key_rr| {
-            if (trusted_count >= max_dnssec_rrs) break;
-            const key_data = key_rr.parseDNSKEY() catch continue;
-
-            // DS digests are computed over the canonical (uncompressed)
-            // wire owner name; re-encode via string form to resolve any
-            // compression pointers.
-            var owner_str_buf: [256]u8 = undefined;
-            const owner_str = key_rr.name.toStringBuf(&owner_str_buf, response) catch continue;
-            var owner_wire_buf: [name_mod.max_name_length]u8 = undefined;
-            const owner_wire = Name.encodeBuf(owner_str, &owner_wire_buf) catch continue;
-
-            for (self.config.dnssec_trust_anchors) |anchor| {
-                if (anchor.is_dnskey) continue;
-                const digest_type = anchor.digest_type orelse continue;
-                const ds = ResourceRecord.DsData{
-                    .key_tag = anchor.key_tag,
-                    .algorithm = anchor.algorithm,
-                    .digest_type = digest_type,
-                    .digest = anchor.data,
-                };
-                const matches = validator.verifyDsMatch(key_data, key_rr.rdata, owner_wire.labels, ds) catch continue;
-                if (matches) {
-                    trusted_keys[trusted_count] = key_data;
-                    trusted_tags[trusted_count] = ResourceRecord.calculateKeyTag(key_rr.rdata);
-                    trusted_count += 1;
-                    break;
-                }
-            }
-        }
+        var trust = TrustedKeySet{};
+        self.buildDnssecTrustSet(&validator, dnskey_rrs[0..dnskey_count], response, &trust);
 
         // Validate each answer RRset.
-        var all_secure = true;
         var any_insecure = false;
         var any_indeterminate = false;
 
@@ -1101,69 +1104,206 @@ pub const RecursiveResolver = struct {
                 member_count += 1;
             }
 
-            var sig_found = false;
-            var rrset_secure = false;
-            var rrset_bogus = false;
-            var rrset_unsupported = false;
-
-            var k: usize = 0;
-            while (k < rrsig_count) : (k += 1) {
-                const sig_rr = rrsig_rrs[k];
-                const sig_name = sig_rr.name.toStringBuf(&name_buf_b, response) catch continue;
-                if (!std.ascii.eqlIgnoreCase(head_name, sig_name)) continue;
-                const sig_data = sig_rr.parseRRSIG(response) catch {
-                    rrset_bogus = true;
-                    continue;
-                };
-                if (sig_data.type_covered != head.rtype) continue;
-                sig_found = true;
-
-                var t: usize = 0;
-                while (t < trusted_count) : (t += 1) {
-                    if (trusted_tags[t] != sig_data.key_tag) continue;
-                    if (trusted_keys[t].algorithm != sig_data.algorithm) continue;
-                    const ok = validator.verifyRrsig(
-                        sig_data,
-                        members[0..member_count],
-                        trusted_keys[t],
-                    ) catch |err| switch (err) {
-                        error.OutOfMemory => return error.OutOfMemory,
-                        // Unverifiable algorithm (e.g. deprecated
-                        // RSA/SHA-1): treated as insecure, not bogus.
-                        error.UnsupportedAlgorithm => {
-                            rrset_unsupported = true;
-                            continue;
-                        },
-                        else => {
-                            rrset_bogus = true;
-                            continue;
-                        },
-                    };
-                    if (ok) {
-                        rrset_secure = true;
-                        break;
-                    }
-                    rrset_bogus = true;
-                }
-                if (rrset_secure) break;
+            // Zone boundary: an RRset whose owner lies outside every
+            // configured anchor's zone is outside our trust scope -- it can
+            // never be proven secure by these anchors (insecure, not bogus).
+            if (!ownerWithinAnyAnchorZone(self.config.dnssec_trust_anchors, head_name)) {
+                any_insecure = true;
+                continue;
             }
 
-            if (rrset_secure) continue;
-            if (rrset_bogus) return .bogus;
-            all_secure = false;
-            if (!sig_found or rrset_unsupported) {
-                any_insecure = true;
-            } else {
-                // Signed, but no trusted key available to check against.
-                any_indeterminate = true;
+            const verdict = try verifyAnswerRrset(
+                &validator,
+                members[0..member_count],
+                head_name,
+                rrsig_rrs[0..rrsig_count],
+                response,
+                &trust,
+            );
+            switch (verdict) {
+                .secure => {},
+                .bogus => return .bogus,
+                .no_signature, .unsupported_alg => any_insecure = true,
+                .no_trusted_key => any_indeterminate = true,
             }
         }
 
+        // Tally precedence: insecure beats indeterminate; secure requires
+        // every RRset to have verified (any bogus already returned above).
         if (any_insecure) return .insecure;
         if (any_indeterminate) return .indeterminate;
-        return if (all_secure) .secure else .insecure;
+        return .secure;
+    }
+
+    /// Build the set of DNSKEYs trusted for this validation pass:
+    /// (1) DNSKEY-type trust anchors (the anchor data IS DNSKEY RDATA),
+    /// bound to the anchor's configured zone; and (2) DNSKEYs present in
+    /// the response that match a DS-type trust anchor digest, bound to
+    /// their owner name (which the DS digest covers) and accepted only
+    /// within the anchor's zone. Keys failing RFC 4034 Section 2.1.1/2.1.2
+    /// sanity (protocol != 3, Zone Key flag clear, or REVOKE set) are
+    /// skipped.
+    fn buildDnssecTrustSet(
+        self: *Self,
+        validator: *dnssec_mod.Validator,
+        dnskey_rrs: []const ResourceRecord,
+        response: []const u8,
+        trust: *TrustedKeySet,
+    ) void {
+        // (1) DNSKEY-type trust anchors.
+        for (self.config.dnssec_trust_anchors) |anchor| {
+            if (!anchor.is_dnskey or anchor.data.len < 4) continue;
+            if (trust.count >= max_dnssec_rrs) break;
+            const key = ResourceRecord.DnskeyData{
+                .flags = .{ .raw = std.mem.readInt(u16, anchor.data[0..2], .big) },
+                .protocol = anchor.data[2],
+                .algorithm = @enumFromInt(anchor.data[3]),
+                .public_key = anchor.data[4..],
+            };
+            if (!dnskeyUsable(key)) continue;
+            trust.keys[trust.count] = key;
+            trust.tags[trust.count] = ResourceRecord.calculateKeyTag(anchor.data);
+            trust.zones[trust.count] = anchor.zone;
+            trust.count += 1;
+        }
+
+        // (2) Response DNSKEYs that match a DS-type trust anchor digest.
+        for (dnskey_rrs) |key_rr| {
+            if (trust.count >= max_dnssec_rrs) break;
+            const key_data = key_rr.parseDNSKEY() catch continue;
+            if (!dnskeyUsable(key_data)) continue;
+
+            // DS digests are computed over the canonical (uncompressed)
+            // wire owner name; re-encode via string form to resolve any
+            // compression pointers.
+            var owner_str_buf: [256]u8 = undefined;
+            const owner_str = key_rr.name.toStringBuf(&owner_str_buf, response) catch continue;
+            var owner_wire_buf: [name_mod.max_name_length]u8 = undefined;
+            const owner_wire = Name.encodeBuf(owner_str, &owner_wire_buf) catch continue;
+
+            for (self.config.dnssec_trust_anchors) |anchor| {
+                if (anchor.is_dnskey) continue;
+                const digest_type = anchor.digest_type orelse continue;
+                // Zone boundary: a DS anchor only vouches for keys at or
+                // below its configured zone.
+                if (!isSubdomainOf(owner_str, anchor.zone)) continue;
+                const ds = ResourceRecord.DsData{
+                    .key_tag = anchor.key_tag,
+                    .algorithm = anchor.algorithm,
+                    .digest_type = digest_type,
+                    .digest = anchor.data,
+                };
+                const matches = validator.verifyDsMatch(key_data, key_rr.rdata, owner_wire.labels, ds) catch continue;
+                if (matches) {
+                    trust.keys[trust.count] = key_data;
+                    trust.tags[trust.count] = ResourceRecord.calculateKeyTag(key_rr.rdata);
+                    // The key's zone is its owner name (zone apex); copy
+                    // the string into stable storage owned by the set.
+                    const zone_buf = &trust.zone_bufs[trust.count];
+                    @memcpy(zone_buf[0..owner_str.len], owner_str);
+                    trust.zones[trust.count] = zone_buf[0..owner_str.len];
+                    trust.count += 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Verify one answer RRset (all `members` share owner/type/class)
+    /// against the covering RRSIGs and the trusted-key set.
+    ///
+    /// `owner_str` is the RRset owner in dotted string form. RRSIGs whose
+    /// signer is not an ancestor (or equal) of the owner are unusable per
+    /// RFC 4035 Section 5.3.1 and are skipped; a trusted key is only
+    /// consulted when its zone equals the RRSIG signer name.
+    fn verifyAnswerRrset(
+        validator: *dnssec_mod.Validator,
+        members: []const ResourceRecord,
+        owner_str: []const u8,
+        rrsigs: []const ResourceRecord,
+        response: []const u8,
+        trust: *const TrustedKeySet,
+    ) error{OutOfMemory}!RrsetVerdict {
+        var sig_found = false;
+        var saw_bogus = false;
+        var saw_unsupported = false;
+        var sig_name_buf: [256]u8 = undefined;
+        var signer_buf: [256]u8 = undefined;
+
+        for (rrsigs) |sig_rr| {
+            const sig_name = sig_rr.name.toStringBuf(&sig_name_buf, response) catch continue;
+            if (!std.ascii.eqlIgnoreCase(owner_str, sig_name)) continue;
+            const sig_data = sig_rr.parseRRSIG(response) catch {
+                saw_bogus = true;
+                continue;
+            };
+            if (sig_data.type_covered != members[0].rtype) continue;
+
+            // RFC 4035 Section 5.3.1: the signer name must be the zone
+            // containing the RRset owner; a signature claiming a signer
+            // outside the owner's ancestry can never be valid.
+            const signer_str = sig_data.signer.toStringBuf(&signer_buf, response) catch continue;
+            if (!isSubdomainOf(owner_str, signer_str)) continue;
+
+            sig_found = true;
+
+            for (trust.keys[0..trust.count], trust.tags[0..trust.count], trust.zones[0..trust.count]) |key, tag, zone| {
+                if (tag != sig_data.key_tag) continue;
+                if (key.algorithm != sig_data.algorithm) continue;
+                // Zone boundary: the validating key must belong to the
+                // zone named by the RRSIG signer field.
+                if (!dnsNamesEqual(signer_str, zone)) continue;
+                const ok = validator.verifyRrsig(sig_data, members, key) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    // Unverifiable algorithm (e.g. deprecated RSA/SHA-1):
+                    // treated as insecure, not bogus.
+                    error.UnsupportedAlgorithm => {
+                        saw_unsupported = true;
+                        continue;
+                    },
+                    else => {
+                        saw_bogus = true;
+                        continue;
+                    },
+                };
+                if (ok) return .secure;
+                saw_bogus = true;
+            }
+        }
+
+        if (saw_bogus) return .bogus;
+        if (!sig_found) return .no_signature;
+        if (saw_unsupported) return .unsupported_alg;
+        return .no_trusted_key;
     }
 };
+
+/// RFC 4034 Section 2.1.1/2.1.2 DNSKEY sanity: usable for validation only
+/// when the protocol field is 3, the Zone Key flag (bit 7) is set, and the
+/// key is not revoked (RFC 5011 REVOKE bit).
+fn dnskeyUsable(key: ResourceRecord.DnskeyData) bool {
+    return key.protocol == 3 and key.flags.isZoneKey() and !key.flags.isRevoked();
+}
+
+/// True if `owner` (dotted string form) lies within at least one configured
+/// trust anchor's zone.
+fn ownerWithinAnyAnchorZone(
+    anchors: []const dnssec_mod.Validator.TrustAnchor,
+    owner: []const u8,
+) bool {
+    for (anchors) |anchor| {
+        if (isSubdomainOf(owner, anchor.zone)) return true;
+    }
+    return false;
+}
+
+/// Case-insensitive DNS name equality on dotted strings, tolerant of a
+/// trailing dot on either side (RFC 4343).
+fn dnsNamesEqual(a: []const u8, b: []const u8) bool {
+    const ca = if (a.len > 0 and a[a.len - 1] == '.') a[0 .. a.len - 1] else a;
+    const cb = if (b.len > 0 and b[b.len - 1] == '.') b[0 .. b.len - 1] else b;
+    return std.ascii.eqlIgnoreCase(ca, cb);
+}
 
 /// Check if `name` is a subdomain of (or equal to) `zone`.
 /// Both names are in dotted string form (e.g., "ns1.example.com" / "example.com").
@@ -2095,6 +2235,234 @@ test "GAP-0839: valid Ed25519 chain to configured trust anchor is secure; tamper
         error.DnssecValidationFailed,
         permissive_resolver.enforceDnssecPolicy(tampered, tampered_msg),
     );
+}
+
+/// Test helper: build RRSIG RDATA over a single A record, Ed25519-signed
+/// per RFC 4034 (signed data = RRSIG RDATA sans signature + canonical
+/// RRset with the UNCOMPRESSED owner name). Caller frees the result.
+fn buildTestRrsigOverA(
+    allocator: std.mem.Allocator,
+    kp: TestEd25519.KeyPair,
+    owner_uncompressed: []const u8,
+    signer: []const u8,
+    labels: u8,
+    key_tag: u16,
+    a_rdata: []const u8,
+) ![]u8 {
+    var signed: std.ArrayList(u8) = .empty;
+    defer signed.deinit(allocator);
+    try appendTestU16(&signed, allocator, 1); // type covered: A
+    try signed.append(allocator, 15); // algorithm: Ed25519
+    try signed.append(allocator, labels);
+    try appendTestU32(&signed, allocator, 3600); // original TTL
+    try appendTestU32(&signed, allocator, 4_000_000_000); // expiration
+    try appendTestU32(&signed, allocator, 1); // inception
+    try appendTestU16(&signed, allocator, key_tag);
+    try signed.appendSlice(allocator, signer);
+    try signed.appendSlice(allocator, owner_uncompressed);
+    try appendTestU16(&signed, allocator, 1); // type A
+    try appendTestU16(&signed, allocator, 1); // class IN
+    try appendTestU32(&signed, allocator, 3600);
+    try appendTestU16(&signed, allocator, @intCast(a_rdata.len));
+    try signed.appendSlice(allocator, a_rdata);
+
+    const sig = try kp.sign(signed.items, null);
+    const sig_bytes = sig.toBytes();
+
+    var rrsig_rdata: std.ArrayList(u8) = .empty;
+    errdefer rrsig_rdata.deinit(allocator);
+    try appendTestU16(&rrsig_rdata, allocator, 1);
+    try rrsig_rdata.append(allocator, 15);
+    try rrsig_rdata.append(allocator, labels);
+    try appendTestU32(&rrsig_rdata, allocator, 3600);
+    try appendTestU32(&rrsig_rdata, allocator, 4_000_000_000);
+    try appendTestU32(&rrsig_rdata, allocator, 1);
+    try appendTestU16(&rrsig_rdata, allocator, key_tag);
+    try rrsig_rdata.appendSlice(allocator, signer);
+    try rrsig_rdata.appendSlice(allocator, &sig_bytes);
+    return rrsig_rdata.toOwnedSlice(allocator);
+}
+
+test "GAP-0839 review: compressed answer owner names validate secure" {
+    const allocator = std.testing.allocator;
+
+    const kp = try TestEd25519.KeyPair.generateDeterministic([_]u8{0x22} ** 32);
+    const dnskey_rdata = [_]u8{ 0x01, 0x00, 0x03, 0x0F } ++ kp.public_key.toBytes();
+    const key_tag = record_mod.ResourceRecord.calculateKeyTag(&dnskey_rdata);
+
+    const owner: []const u8 = "\x01a\x07example\x03com\x00"; // 3 labels
+    const signer: []const u8 = "\x07example\x03com\x00";
+    const a_rdata = [_]u8{ 192, 0, 2, 1 };
+
+    // Signature covers the UNCOMPRESSED canonical owner (RFC 4035 S5.3.2).
+    const rrsig_rdata = try buildTestRrsigOverA(allocator, kp, owner, signer, 3, key_tag, &a_rdata);
+    defer allocator.free(rrsig_rdata);
+
+    // On the wire, the answer/RRSIG owners are compression pointers to the
+    // question name at offset 12 (0xC0 0x0C) -- the common real-world shape.
+    const ptr_owner = [_]u8{ 0xC0, 0x0C };
+    var answers: std.ArrayList(u8) = .empty;
+    defer answers.deinit(allocator);
+    try appendTestRr(&answers, allocator, &ptr_owner, 1, 3600, &a_rdata); // A
+    try appendTestRr(&answers, allocator, &ptr_owner, 46, 3600, rrsig_rdata); // RRSIG
+
+    const response = try buildTestResponseBytes(allocator, owner, 1, 2, answers.items, 0, &.{});
+    defer allocator.free(response);
+    const msg = try Message.parse(response);
+
+    const anchors = [_]dnssec_mod.Validator.TrustAnchor{.{
+        .zone = "example.com",
+        .key_tag = key_tag,
+        .algorithm = .ed25519,
+        .digest_type = null,
+        .data = &dnskey_rdata,
+        .is_dnskey = true,
+    }};
+
+    var resolver = try RecursiveResolver.init(allocator, .{
+        .dnssec = true,
+        .dnssec_strict = true,
+        .dnssec_trust_anchors = &anchors,
+    });
+    defer resolver.deinit();
+
+    const status = try resolver.enforceDnssecPolicy(response, msg);
+    try std.testing.expectEqual(dnssec_mod.ValidationResult.secure, status.?);
+}
+
+test "GAP-0839 review: anchor zone does not validate out-of-zone RRset" {
+    const allocator = std.testing.allocator;
+
+    const kp = try TestEd25519.KeyPair.generateDeterministic([_]u8{0x23} ** 32);
+    const dnskey_rdata = [_]u8{ 0x01, 0x00, 0x03, 0x0F } ++ kp.public_key.toBytes();
+    const key_tag = record_mod.ResourceRecord.calculateKeyTag(&dnskey_rdata);
+
+    // RRset for www.bank.com, validly signed by the anchored key with
+    // signer bank.com -- but the anchor is scoped to corp.example only.
+    const owner: []const u8 = "\x03www\x04bank\x03com\x00"; // 3 labels
+    const signer: []const u8 = "\x04bank\x03com\x00";
+    const a_rdata = [_]u8{ 192, 0, 2, 7 };
+
+    const rrsig_rdata = try buildTestRrsigOverA(allocator, kp, owner, signer, 3, key_tag, &a_rdata);
+    defer allocator.free(rrsig_rdata);
+
+    var answers: std.ArrayList(u8) = .empty;
+    defer answers.deinit(allocator);
+    try appendTestRr(&answers, allocator, owner, 1, 3600, &a_rdata);
+    try appendTestRr(&answers, allocator, owner, 46, 3600, rrsig_rdata);
+
+    const response = try buildTestResponseBytes(allocator, owner, 1, 2, answers.items, 0, &.{});
+    defer allocator.free(response);
+    const msg = try Message.parse(response);
+
+    const anchors = [_]dnssec_mod.Validator.TrustAnchor{.{
+        .zone = "corp.example",
+        .key_tag = key_tag,
+        .algorithm = .ed25519,
+        .digest_type = null,
+        .data = &dnskey_rdata,
+        .is_dnskey = true,
+    }};
+
+    var resolver = try RecursiveResolver.init(allocator, .{
+        .dnssec = true,
+        .dnssec_trust_anchors = &anchors,
+    });
+    defer resolver.deinit();
+
+    // Outside the anchor's zone of trust: insecure, never secure.
+    const status = try resolver.enforceDnssecPolicy(response, msg);
+    try std.testing.expectEqual(dnssec_mod.ValidationResult.insecure, status.?);
+}
+
+test "GAP-0839 review: RRSIG signer outside owner ancestry is rejected" {
+    const allocator = std.testing.allocator;
+
+    const kp = try TestEd25519.KeyPair.generateDeterministic([_]u8{0x24} ** 32);
+    const dnskey_rdata = [_]u8{ 0x01, 0x00, 0x03, 0x0F } ++ kp.public_key.toBytes();
+    const key_tag = record_mod.ResourceRecord.calculateKeyTag(&dnskey_rdata);
+
+    // RRset owner a.example.com is inside the anchor zone, but the RRSIG
+    // claims signer other.com, which is not an ancestor of the owner
+    // (RFC 4035 S5.3.1): the signature must not be usable.
+    const owner: []const u8 = "\x01a\x07example\x03com\x00"; // 3 labels
+    const signer: []const u8 = "\x05other\x03com\x00";
+    const a_rdata = [_]u8{ 192, 0, 2, 9 };
+
+    const rrsig_rdata = try buildTestRrsigOverA(allocator, kp, owner, signer, 3, key_tag, &a_rdata);
+    defer allocator.free(rrsig_rdata);
+
+    var answers: std.ArrayList(u8) = .empty;
+    defer answers.deinit(allocator);
+    try appendTestRr(&answers, allocator, owner, 1, 3600, &a_rdata);
+    try appendTestRr(&answers, allocator, owner, 46, 3600, rrsig_rdata);
+
+    const response = try buildTestResponseBytes(allocator, owner, 1, 2, answers.items, 0, &.{});
+    defer allocator.free(response);
+    const msg = try Message.parse(response);
+
+    const anchors = [_]dnssec_mod.Validator.TrustAnchor{.{
+        .zone = "example.com",
+        .key_tag = key_tag,
+        .algorithm = .ed25519,
+        .digest_type = null,
+        .data = &dnskey_rdata,
+        .is_dnskey = true,
+    }};
+
+    var resolver = try RecursiveResolver.init(allocator, .{
+        .dnssec = true,
+        .dnssec_trust_anchors = &anchors,
+    });
+    defer resolver.deinit();
+
+    const status = try resolver.enforceDnssecPolicy(response, msg);
+    try std.testing.expectEqual(dnssec_mod.ValidationResult.insecure, status.?);
+}
+
+test "GAP-0839 review: DNSKEY anchor with protocol != 3 is ignored" {
+    const allocator = std.testing.allocator;
+
+    const kp = try TestEd25519.KeyPair.generateDeterministic([_]u8{0x25} ** 32);
+    // Protocol byte is 2: invalid per RFC 4034 S2.1.2, key must be skipped.
+    const dnskey_rdata = [_]u8{ 0x01, 0x00, 0x02, 0x0F } ++ kp.public_key.toBytes();
+    const key_tag = record_mod.ResourceRecord.calculateKeyTag(&dnskey_rdata);
+
+    const owner: []const u8 = "\x01a\x07example\x03com\x00"; // 3 labels
+    const signer: []const u8 = "\x07example\x03com\x00";
+    const a_rdata = [_]u8{ 192, 0, 2, 3 };
+
+    const rrsig_rdata = try buildTestRrsigOverA(allocator, kp, owner, signer, 3, key_tag, &a_rdata);
+    defer allocator.free(rrsig_rdata);
+
+    var answers: std.ArrayList(u8) = .empty;
+    defer answers.deinit(allocator);
+    try appendTestRr(&answers, allocator, owner, 1, 3600, &a_rdata);
+    try appendTestRr(&answers, allocator, owner, 46, 3600, rrsig_rdata);
+
+    const response = try buildTestResponseBytes(allocator, owner, 1, 2, answers.items, 0, &.{});
+    defer allocator.free(response);
+    const msg = try Message.parse(response);
+
+    const anchors = [_]dnssec_mod.Validator.TrustAnchor{.{
+        .zone = "example.com",
+        .key_tag = key_tag,
+        .algorithm = .ed25519,
+        .digest_type = null,
+        .data = &dnskey_rdata,
+        .is_dnskey = true,
+    }};
+
+    var resolver = try RecursiveResolver.init(allocator, .{
+        .dnssec = true,
+        .dnssec_trust_anchors = &anchors,
+    });
+    defer resolver.deinit();
+
+    // Signed and in-zone, but the only configured key is unusable:
+    // indeterminate (no trusted key to check against), never secure.
+    const status = try resolver.enforceDnssecPolicy(response, msg);
+    try std.testing.expectEqual(dnssec_mod.ValidationResult.indeterminate, status.?);
 }
 
 test "PF-NEW-02: Referral.deinit with single server and address" {
