@@ -334,12 +334,12 @@ pub const TsigContext = struct {
 
     /// Sign a DNS message with TSIG, returning both the signed message and
     /// the MAC so the caller can chain response verification on it
-    /// (RFC 8945 Section 5.3.1: the request MAC seeds the response MAC).
+    /// (RFC 8945 Section 5.3: the request MAC seeds the response MAC).
     pub fn signWithMac(self: *Self, message: []const u8) !SignOutput {
         return self.signWithPrior(message, null, false);
     }
 
-    /// Sign a response to a TSIG-signed request (RFC 8945 Section 5.3.1).
+    /// Sign a response to a TSIG-signed request (RFC 8945 Section 5.3).
     /// `request_mac` is the MAC of the request being answered; it is
     /// digested (length-prefixed) before the response message.
     pub fn signResponse(self: *Self, message: []const u8, request_mac: []const u8) !SignOutput {
@@ -347,7 +347,7 @@ pub const TsigContext = struct {
     }
 
     /// Sign a subsequent envelope of a multi-message transaction such as
-    /// AXFR (RFC 8945 Section 5.3.2). The MAC covers the prior envelope's
+    /// AXFR (RFC 8945 Section 5.3.1). The MAC covers the prior envelope's
     /// MAC (length-prefixed), this message, and the reduced "TSIG timers"
     /// variables (time signed + fudge) instead of the full TSIG variables.
     pub fn signSubsequent(self: *Self, message: []const u8, prior_mac: []const u8) !SignOutput {
@@ -356,7 +356,7 @@ pub const TsigContext = struct {
 
     /// Shared signing core. `prior_mac` (if any) is digested first with a
     /// 2-octet length prefix; `timers_only` selects the reduced variables
-    /// used for intermediate envelopes (RFC 8945 Section 5.3.2).
+    /// used for intermediate envelopes (RFC 8945 Section 5.3.1).
     fn signWithPrior(self: *Self, message: []const u8, prior_mac: ?[]const u8, timers_only: bool) !SignOutput {
         if (message.len < 12) return error.InvalidMessage;
 
@@ -408,7 +408,7 @@ pub const TsigContext = struct {
         return self.verifyWithPrior(message, null, false);
     }
 
-    /// Verify a response to a TSIG-signed request (RFC 8945 Section 5.3.1).
+    /// Verify a response to a TSIG-signed request (RFC 8945 Section 5.3).
     /// `request_mac` is the MAC of the signed request; it is digested
     /// (length-prefixed) before the response message.
     pub fn verifyResponse(self: *Self, message: []const u8, request_mac: []const u8) !VerifyResult {
@@ -416,7 +416,7 @@ pub const TsigContext = struct {
     }
 
     /// Verify a subsequent envelope of a multi-message transaction such as
-    /// AXFR (RFC 8945 Section 5.3.2). The MAC is verified over the prior
+    /// AXFR (RFC 8945 Section 5.3.1). The MAC is verified over the prior
     /// envelope's MAC (length-prefixed), this message, and the reduced
     /// "TSIG timers" variables (time signed + fudge).
     pub fn verifySubsequent(self: *Self, message: []const u8, prior_mac: []const u8) !VerifyResult {
@@ -538,7 +538,7 @@ pub const TsigContext = struct {
             .original_id = tsig.original_id,
         };
         // Expose the verified MAC so multi-message callers can chain the
-        // next envelope's verification on it (RFC 8945 Section 5.3.2).
+        // next envelope's verification on it (RFC 8945 Section 5.3.1).
         @memcpy(result.mac[0..expected_mac.len], expected_mac);
         result.mac_len = expected_mac.len;
         return result;
@@ -589,7 +589,7 @@ pub const TsigContext = struct {
     }
 
     /// Build the reduced "TSIG timers" variables digested for intermediate
-    /// envelopes of a multi-message transaction (RFC 8945 Section 5.3.2):
+    /// envelopes of a multi-message transaction (RFC 8945 Section 5.3.1):
     /// time signed (48 bits) followed by fudge (16 bits).
     fn buildTsigTimers(self: *Self, time_signed: u48, fudge: u16) ![]u8 {
         var buffer: std.ArrayList(u8) = .empty;
@@ -1329,7 +1329,7 @@ test "GAP-0868: signResponse/verifyResponse bind the request MAC" {
     try std.testing.expectEqualSlices(u8, signed_resp.macSlice(), ok.macSlice());
 
     // Plain verify (no request MAC) must FAIL: the request MAC is part
-    // of the digest per RFC 8945 Section 5.3.1.
+    // of the digest per RFC 8945 Section 5.3.
     const plain = try client_ctx.verify(signed_resp.message);
     try std.testing.expect(!plain.valid);
 
@@ -1369,7 +1369,7 @@ test "GAP-0868: signSubsequent/verifySubsequent chain prior MACs" {
     const s1 = try server_ctx.signResponse(&msg1, signed_req.macSlice());
     defer allocator.free(s1.message);
     // Second envelope: reduced TSIG-timers signature seeded by s1's MAC
-    // (RFC 8945 Section 5.3.2).
+    // (RFC 8945 Section 5.3.1).
     const s2 = try server_ctx.signSubsequent(&msg2, s1.macSlice());
     defer allocator.free(s2.message);
 

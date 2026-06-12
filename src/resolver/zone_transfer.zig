@@ -340,7 +340,7 @@ pub const ZoneTransferClient = struct {
     ///
     /// SECURITY (GAP-0868): when a TSIG key is configured, every received
     /// message MUST carry a TSIG RR and verify against the running MAC
-    /// chain of RFC 8945 Section 5.3.2 (the request MAC seeds the first
+    /// chain of RFC 8945 Section 5.3.1 (the request MAC seeds the first
     /// envelope; each envelope's MAC seeds the next). This is stricter
     /// than the RFC, which permits unsigned intermediate envelopes as long
     /// as a later signed envelope covers them; requiring a signature on
@@ -361,11 +361,14 @@ pub const ZoneTransferClient = struct {
         else
             null;
 
-        // Running MAC chain (RFC 8945 Section 5.3.2), seeded by the
+        // Running MAC chain (RFC 8945 Section 5.3.1), seeded by the
         // request MAC for the first response envelope.
         var prior_mac: [tsig.max_mac_length]u8 = undefined;
         var prior_mac_len: usize = 0;
         if (request_mac) |rm| {
+            // Bounds guard: a request MAC longer than any supported digest
+            // cannot be valid; fail closed instead of overflowing the buffer.
+            if (rm.len > tsig.max_mac_length) return error.TsigVerificationFailed;
             @memcpy(prior_mac[0..rm.len], rm);
             prior_mac_len = rm.len;
         }
@@ -537,7 +540,7 @@ pub const ZoneTransferClient = struct {
         defer self.allocator.free(response);
 
         // SECURITY (GAP-0868): verify the response TSIG against the request
-        // MAC before trusting any record (RFC 8945 Section 5.3.1).
+        // MAC before trusting any record (RFC 8945 Section 5.3).
         if (self.config.tsig_key != null) {
             var ctx = try self.makeTsigContext();
             const request_mac = query.macSlice() orelse return error.TsigVerificationFailed;
@@ -1553,7 +1556,7 @@ test "GAP-0868: multi-message AXFR with broken MAC chain rejected" {
     const s1 = try server_ctx.signResponse(raw1, query.macSlice().?);
     defer allocator.free(s1.message);
     // Chain the second envelope on the REQUEST MAC instead of s1's MAC --
-    // this breaks the RFC 8945 Section 5.3.2 running-MAC chain.
+    // this breaks the RFC 8945 Section 5.3.1 running-MAC chain.
     const s2 = try server_ctx.signSubsequent(raw2, query.macSlice().?);
     defer allocator.free(s2.message);
 

@@ -443,7 +443,6 @@ pub const Sig0Context = struct {
         return VerifyResult{
             .valid = valid,
             .error_reason = if (valid) null else "Signature verification failed",
-            .signer_name = sig0.signer_name,
             .key_tag = sig0.key_tag,
         };
     }
@@ -620,11 +619,16 @@ pub const Sig0Context = struct {
     }
 };
 
-/// Result of SIG(0) verification
+/// Result of SIG(0) verification.
+///
+/// Deliberately does NOT carry the signer name: the parsed Sig0Record (which
+/// owns that allocation) is freed before `verify` returns, so exposing the
+/// slice here would be a use-after-free. Callers already know the trusted
+/// signer -- `verify` only succeeds when the record's signer name matches
+/// `public_key.name` (GAP-0870).
 pub const VerifyResult = struct {
     valid: bool,
     error_reason: ?[]const u8 = null,
-    signer_name: []const u8 = "",
     key_tag: u16 = 0,
 };
 
@@ -768,6 +772,19 @@ test "Sig0Context sign and verify" {
     // Verify
     const result = try ctx.verify(signed, &public_key);
     try std.testing.expect(result.valid);
+
+    // UAF regression: every VerifyResult field must remain readable after
+    // verify() returns (the parsed Sig0Record it was built from is freed
+    // inside verify; std.testing.allocator catches any aliasing of that
+    // freed memory). VerifyResult intentionally has no signer_name field
+    // for this reason.
+    try std.testing.expectEqual(public_key.key_tag, result.key_tag);
+    try std.testing.expectEqual(@as(?[]const u8, null), result.error_reason);
+    comptime {
+        for (std.meta.fieldNames(VerifyResult)) |field| {
+            std.debug.assert(!std.mem.eql(u8, field, "signer_name"));
+        }
+    }
 }
 
 test "GAP-0870: verify rejects signature when signer name differs from trusted key" {
