@@ -595,14 +595,12 @@ fn sendUdp(allocator: Allocator, address: net_compat.Address, query_data: []cons
     var source_addr: std.posix.sockaddr = undefined;
     var source_addr_len: std.posix.socklen_t = @sizeOf(@TypeOf(source_addr));
 
-    const recv_len = net_compat.recvfrom(sock, response_buf, 0, &source_addr, &source_addr_len) catch |err| {
-        allocator.free(response_buf);
-        return err;
-    };
+    // On any error return below, the errdefer above frees response_buf
+    // exactly once; explicit frees here would double-free (GAP-0875).
+    const recv_len = try net_compat.recvfrom(sock, response_buf, 0, &source_addr, &source_addr_len);
 
     // Validate source address matches the server we queried (CWE-345)
     if (!addressMatches(&address.any, &source_addr)) {
-        allocator.free(response_buf);
         return error.SourceAddressMismatch;
     }
 
