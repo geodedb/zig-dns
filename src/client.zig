@@ -117,6 +117,11 @@ pub const Client = struct {
             // PF-22-prefetch: Schedule proactive cache refresh for entries nearing expiry
             self.prefetcher = CachePrefetcher.init(allocator, .{}, self.system_clock.clock());
         }
+        // GAP-0844: release cache resources if resolver init below fails.
+        errdefer {
+            if (self.prefetcher) |*pf| pf.deinit();
+            if (self.cache) |*cache| cache.deinit();
+        }
 
         // Initialize resolver based on mode
         switch (config.mode) {
@@ -124,13 +129,22 @@ pub const Client = struct {
                 // Get server addresses
                 if (config.servers.len > 0) {
                     self.server_addresses = try allocator.alloc(stub_mod.ServerAddress, config.servers.len);
-                    self.servers_owned = true;
+                } else {
+                    self.server_addresses = try stub_mod.getSystemServers(allocator);
+                }
+                self.servers_owned = true;
+                // GAP-0844: free the address slice if parsing a server or
+                // StubResolver.init fails.
+                errdefer {
+                    allocator.free(self.server_addresses);
+                    self.server_addresses = &[_]stub_mod.ServerAddress{};
+                    self.servers_owned = false;
+                }
+
+                if (config.servers.len > 0) {
                     for (config.servers, 0..) |server_ip, i| {
                         self.server_addresses[i] = try stub_mod.ServerAddress.fromIpv4(server_ip, types_mod.dns_port);
                     }
-                } else {
-                    self.server_addresses = try stub_mod.getSystemServers(allocator);
-                    self.servers_owned = true;
                 }
 
                 self.stub = try StubResolver.init(allocator, .{
@@ -1049,4 +1063,37 @@ test "TEST-1: Client.resolve returns mocked A addresses (flagship path)" {
     try std.testing.expect(!result.from_cache);
     try std.testing.expectEqual(@as(usize, 1), result.addresses.len);
     try std.testing.expectEqualStrings("93.184.216.34", result.addresses[0]);
+}
+
+test "GAP-0844: initWithConfig does not leak when a server address is invalid" {
+    // server_addresses is allocated before each entry is parsed; a bad
+    // entry must not leak the slice (std.testing.allocator detects leaks).
+    const result = Client.initWithConfig(std.testing.allocator, .{
+        .servers = &[_][]const u8{ "8.8.8.8", "not-an-ip" },
+        .cache_size = 1000,
+    });
+    try std.testing.expectError(error.InvalidCharacter, result);
+}
+
+test "GAP-0844: initWithConfig does not leak when allocation fails mid-init" {
+    // Fail each allocation in turn; every failure path must release
+    // everything acquired so far (the underlying testing allocator
+    // reports leaks at the end of the test).
+    var fail_index: usize = 0;
+    while (fail_index < 8) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+            .fail_index = fail_index,
+        });
+        var client = Client.initWithConfig(failing.allocator(), .{
+            .servers = &[_][]const u8{ "8.8.8.8", "9.9.9.9" },
+            .cache_size = 1000,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => continue,
+            // Entropy probe failure is environment-dependent; no
+            // allocations may be live either way.
+            error.EntropyUnavailable => continue,
+            else => return err,
+        };
+        client.deinit();
+    }
 }
