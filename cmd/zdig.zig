@@ -317,7 +317,9 @@ fn runQuery(ctx: *cli.Context) !void {
         try ctx.err("Error: No domain name specified\n\n", .{});
         try ctx.err("Usage: zdig [@server] [name] [type] [options]\n", .{});
         try ctx.err("Try 'zdig --help' for more information.\n", .{});
-        return;
+        // GAP-0881: returning an error makes cli.run exit non-zero (1)
+        // instead of silently succeeding with no query performed.
+        return error.MissingQueryName;
     }
 
     // Perform the query
