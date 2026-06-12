@@ -106,8 +106,24 @@ pub const StubResolver = struct {
     allocator: std.mem.Allocator,
     config: StubConfig,
     owns_servers: bool,
+    /// Optional test seam: when set, sendQuery returns this responder's bytes
+    /// instead of doing real UDP socket I/O, so the resolution/response-
+    /// processing path can be unit-tested deterministically (TEST-5). Always
+    /// null in production; set only via setMockResponder in tests.
+    mock_responder: ?MockResponder = null,
+    mock_ctx: ?*anyopaque = null,
 
     const Self = @This();
+
+    /// Test responder signature. Receives the wire query (so it can echo the
+    /// transaction ID) and must return a freshly allocated wire response that
+    /// the caller frees.
+    pub const MockResponder = *const fn (
+        ctx: ?*anyopaque,
+        query: []const u8,
+        server: ServerAddress,
+        allocator: std.mem.Allocator,
+    ) anyerror![]u8;
 
     /// Error returned when secure entropy is unavailable
     pub const InitError = error{EntropyUnavailable};
@@ -149,6 +165,13 @@ pub const StubResolver = struct {
         if (self.owns_servers) {
             self.allocator.free(self.config.servers);
         }
+    }
+
+    /// Install a mock responder (tests only). With one set, sendQuery bypasses
+    /// real socket I/O and returns the responder's bytes (TEST-5).
+    pub fn setMockResponder(self: *Self, responder: MockResponder, ctx: ?*anyopaque) void {
+        self.mock_responder = responder;
+        self.mock_ctx = ctx;
     }
 
     /// Generate a unique query ID
@@ -262,6 +285,11 @@ pub const StubResolver = struct {
     /// embedded systems should verify that the OS provides adequate port entropy
     /// to mitigate DNS cache poisoning attacks (RFC 5452 Section 3).
     fn sendQuery(self: *Self, query: []const u8, server: ServerAddress) ![]u8 {
+        // Test seam: deterministic response without touching the network.
+        if (self.mock_responder) |responder| {
+            return responder(self.mock_ctx, query, server, self.allocator);
+        }
+
         const sock = try net.socket(
             server.address.any.family,
             std.posix.SOCK.DGRAM,
@@ -451,6 +479,71 @@ test "StubResolver.init does not own servers" {
     defer resolver.deinit();
 
     try std.testing.expect(!resolver.owns_servers);
+}
+
+test "TEST-5: StubResolver.resolve processes a mocked A response" {
+    const allocator = std.testing.allocator;
+    var resolver = try StubResolver.initWithServer(allocator, "192.0.2.1");
+    defer resolver.deinit();
+
+    // Mock responder: echo the query (header + question, preserving the
+    // transaction ID and question so validation passes), flip to a response,
+    // and append a single A answer pointing at the question name.
+    const Mock = struct {
+        ip: [4]u8,
+        fn respond(ctx: ?*anyopaque, query: []const u8, server: ServerAddress, alloc: std.mem.Allocator) anyerror![]u8 {
+            _ = server;
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            var resp: std.ArrayList(u8) = .empty;
+            errdefer resp.deinit(alloc);
+            try resp.appendSlice(alloc, query); // header + question, keeps the ID
+            resp.items[2] = 0x81; // QR=1, RD=1
+            resp.items[3] = 0x80; // RA=1
+            resp.items[6] = 0x00; // ANCOUNT hi
+            resp.items[7] = 0x01; // ANCOUNT lo = 1
+            // Answer: ptr->qname(0xC00C), A, IN, ttl=60, rdlen=4, ip
+            try resp.appendSlice(alloc, &[_]u8{ 0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04 });
+            try resp.appendSlice(alloc, &self.ip);
+            return resp.toOwnedSlice(alloc);
+        }
+    };
+    var mock = Mock{ .ip = .{ 93, 184, 216, 34 } };
+    resolver.setMockResponder(Mock.respond, &mock);
+
+    const msg = try resolver.resolve("example.com", .a);
+    defer allocator.free(msg.data);
+
+    try std.testing.expectEqual(@as(u16, 1), msg.header.ancount);
+    var answers = msg.answers();
+    const rr = (try answers.next()).?;
+    try std.testing.expectEqual(Type.a, rr.rtype);
+    try std.testing.expectEqual([4]u8{ 93, 184, 216, 34 }, try rr.parseA());
+}
+
+test "TEST-5: StubResolver.resolve surfaces NXDOMAIN from a mocked response" {
+    const allocator = std.testing.allocator;
+    var resolver = try StubResolver.initWithServer(allocator, "192.0.2.1");
+    defer resolver.deinit();
+
+    const Mock = struct {
+        fn respond(ctx: ?*anyopaque, query: []const u8, server: ServerAddress, alloc: std.mem.Allocator) anyerror![]u8 {
+            _ = ctx;
+            _ = server;
+            var resp: std.ArrayList(u8) = .empty;
+            errdefer resp.deinit(alloc);
+            try resp.appendSlice(alloc, query);
+            resp.items[2] = 0x81; // QR=1, RD=1
+            resp.items[3] = 0x83; // RA=1, RCODE=3 (NXDOMAIN)
+            return resp.toOwnedSlice(alloc);
+        }
+    };
+    resolver.setMockResponder(Mock.respond, null);
+
+    const msg = try resolver.resolve("nope.example.com", .a);
+    defer allocator.free(msg.data);
+
+    try std.testing.expect(msg.header.rcode == .name_error);
+    try std.testing.expectEqual(@as(u16, 0), msg.header.ancount);
 }
 
 test "GAP-0069: heap-allocated response freed on Message.parse failure" {
