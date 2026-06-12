@@ -19,18 +19,8 @@ inline fn timeMilli() i64 {
     return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
 }
 
-/// Zig 0.16.0-compatible mutex shim with 0.15.x-style lock/unlock API.
-const Mutex = struct {
-    inner: std.Io.Mutex = .init,
-
-    pub fn lock(self: *Mutex) void {
-        self.inner.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
-    }
-
-    pub fn unlock(self: *Mutex) void {
-        self.inner.unlock(std.Io.Threaded.global_single_threaded.io());
-    }
-};
+/// Zig 0.16.0-compatible mutex shim (shared, see src/util/sync.zig).
+const Mutex = @import("sync").Mutex;
 
 /// Load balancing strategy
 pub const Strategy = enum {

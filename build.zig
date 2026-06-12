@@ -290,6 +290,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    // Internal -- Zig 0.16 synchronization shims (shared Mutex wrapper).
+    // GAP-0878: single source of truth for the std.Io.Mutex lock/unlock shim.
+    const sync_mod = b.addModule("util_sync", .{
+        .root_source_file = b.path("src/util/sync.zig"),
+        .target = target,
+    });
+    // parallel_mod is declared earlier (before the utility section), so the
+    // sync shim is wired via addImport instead of its imports list.
+    if (parallel_mod) |pm| pm.addImport("sync", sync_mod);
+
     // Internal -- LRU Cache implementation (used by dns_cache)
     const lru_mod = b.addModule("util_lru", .{
         .root_source_file = b.path("src/util/lru.zig"),
@@ -422,6 +432,9 @@ pub fn build(b: *std.Build) void {
     const failover_mod = b.addModule("failover", .{
         .root_source_file = b.path("src/resolver/failover.zig"),
         .target = target,
+        .imports = &.{
+            .{ .name = "sync", .module = sync_mod },
+        },
     });
 
     // Public API -- Split DNS / Policy Routing
@@ -518,6 +531,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "transport_io", .module = transport_io_mod },
             .{ .name = "net_compat", .module = net_compat_mod },
+            .{ .name = "sync", .module = sync_mod },
         },
     });
 
@@ -1067,6 +1081,7 @@ pub fn build(b: *std.Build) void {
     const test_util_step = b.step("test-util", "Run utility module tests");
 
     const util_tests = [_][]const u8{
+        "src/util/sync.zig",
         "src/util/clock.zig",
         "src/util/random.zig",
         "src/util/lru.zig",
@@ -1133,6 +1148,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "transport_io", .module = transport_io_mod },
                 .{ .name = "net_compat", .module = net_compat_mod },
+                .{ .name = "sync", .module = sync_mod },
             },
         }),
     });
@@ -1271,6 +1287,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/resolver/failover.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "sync", .module = sync_mod },
+            },
         }),
     });
     const run_failover_test = b.addRunArtifact(failover_test);
@@ -1350,6 +1369,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "message", .module = message_mod },
+                .{ .name = "sync", .module = sync_mod },
             },
         }),
     });

@@ -72,18 +72,8 @@ inline fn timeSec() i64 {
     return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toSeconds();
 }
 
-/// 0.16.0 shim: std.Thread.Mutex was moved.
-const Mutex = struct {
-    inner: std.Io.Mutex = std.Io.Mutex.init,
-    pub fn lock(self: *Mutex) void {
-        const io_inst = std.Io.Threaded.global_single_threaded.io();
-        self.inner.lockUncancelable(io_inst);
-    }
-    pub fn unlock(self: *Mutex) void {
-        const io_inst = std.Io.Threaded.global_single_threaded.io();
-        self.inner.unlock(io_inst);
-    }
-};
+/// 0.16.0 shim: std.Thread.Mutex was moved (shared, see src/util/sync.zig).
+const Mutex = @import("sync").Mutex;
 
 fn systemRandomU16() u16 {
     const io_inst = std.Io.Threaded.global_single_threaded.io();

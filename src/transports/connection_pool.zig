@@ -23,21 +23,8 @@ inline fn timeMilli() i64 {
     return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
 }
 
-/// 0.16.0 shim: Mutex was moved. Use std.Io.Mutex via wrapper.
-const Mutex = struct {
-    inner: std.Io.Mutex = std.Io.Mutex.init,
-    pub fn lock(self: *Mutex) void {
-        const io_inst = std.Io.Threaded.global_single_threaded.io();
-        self.inner.lockUncancelable(io_inst);
-    }
-    pub fn unlock(self: *Mutex) void {
-        const io_inst = std.Io.Threaded.global_single_threaded.io();
-        self.inner.unlock(io_inst);
-    }
-    pub fn tryLock(self: *Mutex) bool {
-        return self.inner.tryLock();
-    }
-};
+/// 0.16.0 shim: Mutex was moved (shared, see src/util/sync.zig).
+const Mutex = @import("sync").Mutex;
 
 /// Cross-platform dummy fd for testing (not a real connection)
 /// On Windows fd_t is *anyopaque, on POSIX it's an integer
