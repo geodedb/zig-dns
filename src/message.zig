@@ -14,6 +14,7 @@ const header_mod = @import("header");
 const question_mod = @import("question");
 const record_mod = @import("record");
 const types_mod = @import("types");
+const edns_mod = @import("edns");
 
 pub const Name = name_mod.Name;
 pub const Header = header_mod.Header;
@@ -299,26 +300,39 @@ pub const MessageBuilder = struct {
     }
 };
 
-/// Build a simple DNS query message
-pub fn buildQuery(allocator: std.mem.Allocator, id: u16, domain: []const u8, qtype: Type, qclass: Class, rd: bool) ![]u8 {
-    var builder = try MessageBuilder.initQuery(allocator, id, rd);
-    errdefer builder.deinit();
-
-    try builder.addQuestion(domain, qtype, qclass);
-
-    return builder.finish();
+/// Build a simple DNS query message.
+///
+/// `rd` sets the Recursion Desired header flag; `do` (GAP-0840) appends an
+/// EDNS OPT pseudo-RR with the DNSSEC OK bit set (RFC 4035 Section 4.1).
+/// The two flags are independent: a DNSSEC query to an authoritative server
+/// typically uses rd=false, do=true.
+pub fn buildQuery(allocator: std.mem.Allocator, id: u16, domain: []const u8, qtype: Type, qclass: Class, rd: bool, do: bool) ![]u8 {
+    var buf: [max_query_size]u8 = undefined;
+    const query = try buildQueryBuf(&buf, id, domain, qtype, qclass, rd, do);
+    return allocator.dupe(u8, query);
 }
 
-/// Maximum size of a single-question DNS query: 12 (header) + 255 (name) + 4 (qtype/qclass).
-pub const max_query_size = header_mod.header_size + name_mod.max_name_length + 4;
+/// Wire size of an EDNS OPT pseudo-RR with no options (RFC 6891):
+/// root name (1) + type (2) + class (2) + TTL (4) + RDLENGTH (2).
+pub const opt_rr_size = 11;
+
+/// Maximum size of a single-question DNS query:
+/// 12 (header) + 255 (name) + 4 (qtype/qclass) + 11 (optional EDNS OPT RR).
+pub const max_query_size = header_mod.header_size + name_mod.max_name_length + 4 + opt_rr_size;
 
 /// Build a simple DNS query into a caller-provided buffer (zero heap allocation).
-/// Buffer must be at least max_query_size (271) bytes.
+/// Buffer must be at least max_query_size bytes.
 /// Returns a slice of `buf` containing the encoded query.
-pub fn buildQueryBuf(buf: *[max_query_size]u8, id: u16, domain: []const u8, qtype: Type, qclass: Class, rd: bool) ![]u8 {
+///
+/// When `do` is true, an EDNS OPT pseudo-RR is appended to the additional
+/// section with the DNSSEC OK bit set and the default UDP payload size
+/// (4096, RFC 6891), signalling that the responder should include DNSSEC
+/// records (GAP-0840, RFC 4035 Section 4.1).
+pub fn buildQueryBuf(buf: *[max_query_size]u8, id: u16, domain: []const u8, qtype: Type, qclass: Class, rd: bool, do: bool) ![]u8 {
     // Encode header
     var header = Header.newQuery(id, rd);
     header.qdcount = 1;
+    if (do) header.arcount = 1;
     try header.encode(buf[0..header_mod.header_size]);
 
     // Encode question name directly into buffer after header
@@ -327,7 +341,15 @@ pub fn buildQueryBuf(buf: *[max_query_size]u8, id: u16, domain: []const u8, qtyp
     std.mem.writeInt(u16, buf[q_start..][0..2], qtype.toInt(), .big);
     std.mem.writeInt(u16, buf[q_start + 2 ..][0..2], qclass.toInt(), .big);
 
-    return buf[0 .. q_start + 4];
+    var end = q_start + 4;
+
+    // Append EDNS OPT pseudo-RR with DO=1 when DNSSEC is requested
+    if (do) {
+        const opt = edns_mod.OptRecord.withDnssec();
+        end += try opt.encode(buf[end..]);
+    }
+
+    return buf[0..end];
 }
 
 test "Message.parse simple query" {
@@ -410,7 +432,7 @@ test "Message.parse response with answer" {
 
 test "buildQuery" {
     const allocator = std.testing.allocator;
-    const query = try buildQuery(allocator, 0x1234, "example.com", .a, .in, true);
+    const query = try buildQuery(allocator, 0x1234, "example.com", .a, .in, true, false);
     defer allocator.free(query);
 
     const msg = try Message.parse(query);
@@ -418,6 +440,53 @@ test "buildQuery" {
     try std.testing.expect(!msg.header.qr);
     try std.testing.expect(msg.header.rd);
     try std.testing.expectEqual(@as(u16, 1), msg.header.qdcount);
+    try std.testing.expectEqual(@as(u16, 0), msg.header.arcount);
+}
+
+test "GAP-0840: buildQueryBuf appends EDNS OPT with DO bit when do=true" {
+    var buf: [max_query_size]u8 = undefined;
+    // rd=false, do=true: the two flags must be independently controllable.
+    const query = try buildQueryBuf(&buf, 0x1234, "example.com", .a, .in, false, true);
+
+    const msg = try Message.parse(query);
+    try std.testing.expect(!msg.header.rd);
+    try std.testing.expectEqual(@as(u16, 1), msg.header.qdcount);
+    try std.testing.expectEqual(@as(u16, 1), msg.header.arcount);
+
+    var add_iter = msg.additional();
+    const opt = (try add_iter.next()).?;
+    // OPT pseudo-RR (type 41) at the root name
+    try std.testing.expectEqual(Type.opt, opt.rtype);
+    // CLASS field carries the requestor's UDP payload size (RFC 6891)
+    try std.testing.expectEqual(@as(u16, 4096), opt.class.toInt());
+    // DO bit is bit 15 of the TTL field (RFC 4035 Section 4.1)
+    try std.testing.expect((opt.ttl & 0x8000) != 0);
+    // No EDNS options in a plain DO query
+    try std.testing.expectEqual(@as(u16, 0), opt.rdlength);
+}
+
+test "GAP-0840: buildQueryBuf with do=false emits no OPT record" {
+    var buf: [max_query_size]u8 = undefined;
+    const query = try buildQueryBuf(&buf, 0x5678, "example.com", .a, .in, true, false);
+
+    const msg = try Message.parse(query);
+    try std.testing.expect(msg.header.rd);
+    try std.testing.expectEqual(@as(u16, 0), msg.header.arcount);
+}
+
+test "GAP-0840: buildQuery (heap) parity with buildQueryBuf for DO bit" {
+    const allocator = std.testing.allocator;
+    const query = try buildQuery(allocator, 0xABCD, "example.com", .aaaa, .in, true, true);
+    defer allocator.free(query);
+
+    const msg = try Message.parse(query);
+    try std.testing.expect(msg.header.rd);
+    try std.testing.expectEqual(@as(u16, 1), msg.header.arcount);
+
+    var add_iter = msg.additional();
+    const opt = (try add_iter.next()).?;
+    try std.testing.expectEqual(Type.opt, opt.rtype);
+    try std.testing.expect((opt.ttl & 0x8000) != 0);
 }
 
 test "Message section offsets are cached - multiple calls yield same results" {

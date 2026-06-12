@@ -500,7 +500,7 @@ fn performQuery(allocator: Allocator, options: *const QueryOptions) !void {
     const id: u16 = csprngInt(u16);
 
     // Build the query message using the library's buildQuery function
-    const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, options.qclass, !options.no_recurse);
+    const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, options.qclass, !options.no_recurse, options.dnssec);
     defer allocator.free(query_data);
 
     // Send query and get response
@@ -1011,7 +1011,7 @@ fn performTrace(allocator: Allocator, options: *const QueryOptions) !void {
         const id: u16 = csprngInt(u16);
 
         // Build non-recursive query
-        const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, options.qclass, false);
+        const query_data = try dns.message.buildQuery(allocator, id, options.name, options.qtype, options.qclass, false, options.dnssec);
         defer allocator.free(query_data);
 
         // Parse server address

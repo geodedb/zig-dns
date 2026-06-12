@@ -605,7 +605,8 @@ pub const RecursiveResolver = struct {
         // argument, which both corrupted the RD bit and never requested
         // DNSSEC; #255/API-1. DNSSEC request/validation is tracked by #207.)
         var query_buf: [message_mod.max_query_size]u8 = undefined;
-        const query = try message_mod.buildQueryBuf(&query_buf, id, query_name, qtype, .in, false);
+        // GAP-0840: the dnssec config flag now drives the EDNS DO bit.
+        const query = try message_mod.buildQueryBuf(&query_buf, id, query_name, qtype, .in, false, self.config.dnssec);
 
         // Try servers in order
         const max_tries = @min(servers.len, self.config.max_server_attempts);
@@ -1529,7 +1530,7 @@ test "PF-19: responseMatchesQuery accepts pre-parsed Message" {
 
     // Build a valid DNS query and a matching response.
     // Use buildQuery + modify to create a response-like message.
-    const query = try message_mod.buildQuery(allocator, 0xABCD, "example.com", .a, .in, false);
+    const query = try message_mod.buildQuery(allocator, 0xABCD, "example.com", .a, .in, false, false);
     defer allocator.free(query);
 
     // Create a response by copying the query and flipping the QR bit

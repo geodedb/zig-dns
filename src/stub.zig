@@ -216,7 +216,7 @@ pub const StubResolver = struct {
 
         // Build query on the stack (max 271 bytes, no heap allocation)
         var query_buf: [message_mod.max_query_size]u8 = undefined;
-        const query = try message_mod.buildQueryBuf(&query_buf, id, domain, qtype, qclass, true);
+        const query = try message_mod.buildQueryBuf(&query_buf, id, domain, qtype, qclass, true, false);
 
         // Try each server
         for (self.config.servers) |server| {

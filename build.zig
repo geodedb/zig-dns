@@ -189,6 +189,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "types", .module = types_mod },
         },
     });
+    // GAP-0840: message builds the EDNS OPT pseudo-RR (DO bit) via the edns
+    // helper. edns_mod is declared after message_mod, so wire via addImport.
+    message_mod.addImport("edns", edns_mod);
 
     // Internal -- Cache poisoning protection used by cache module (RFC 5452)
     const cache_protection_mod = b.addModule("cache_protection", .{
@@ -857,6 +860,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "question", .module = question_mod },
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "types", .module = types_mod },
+                .{ .name = "edns", .module = edns_mod },
             },
         },
         .{

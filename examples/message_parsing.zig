@@ -63,7 +63,7 @@ pub fn main() !void {
         const domain = "example.com";
         const rd = true; // Recursion Desired
 
-        const query = try dns.message.buildQuery(allocator, query_id, domain, .a, .in, rd);
+        const query = try dns.message.buildQuery(allocator, query_id, domain, .a, .in, rd, false);
         defer allocator.free(query);
 
         std.debug.print("    Built query for: {s}\n", .{domain});

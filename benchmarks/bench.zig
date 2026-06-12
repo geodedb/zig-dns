@@ -181,7 +181,7 @@ fn benchMessageBuild(allocator: std.mem.Allocator) BenchResult {
     const start_ns = nowNs();
     for (0..MSG_BUILD_COUNT) |i| {
         const id: u16 = @truncate(i);
-        const query = dns.message.buildQuery(allocator, id, "example.com", .a, .in, true) catch continue;
+        const query = dns.message.buildQuery(allocator, id, "example.com", .a, .in, true, false) catch continue;
         std.mem.doNotOptimizeAway(query.ptr);
         allocator.free(query);
     }

@@ -523,6 +523,7 @@ fn executeQuery(query: QuerySpec, server: []const u8, timeout_ms: u32) QueryResu
         Type.fromInt(query.qtype),
         Class.fromInt(query.qclass),
         true, // RD (recursion desired)
+        false, // DO (DNSSEC OK) not requested
     ) catch {
         return .{ .success = false, .response = null, .error_code = 2 };
     };
@@ -659,6 +660,7 @@ fn prefetchEntry(entry: PrefetchEntry, server: []const u8) PrefetchResult {
         Type.fromInt(entry.qtype),
         Class.fromInt(1), // IN class
         true,
+        false, // DO (DNSSEC OK) not requested
     ) catch {
         return .{ .refreshed = false, .new_ttl = 0 };
     };
