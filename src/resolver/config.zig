@@ -326,6 +326,21 @@ fn clampToUnsigned(comptime T: type, val: i64) T {
 
 /// DNS-specific configuration
 pub const DnsConfig = struct {
+    /// Semantic bounds (GAP-0874). Values inside the integer range can
+    /// still be semantically invalid (e.g. a zero timeout never fires).
+    /// fromConfig has no error path, so following the module's existing
+    /// convention these are clamped rather than rejected.
+    /// Minimum query timeout: a zero/near-zero timeout makes every query
+    /// fail immediately.
+    pub const min_timeout_ms: u32 = 100;
+    /// Maximum retry attempts: unbounded retries amplify load on
+    /// upstream servers.
+    pub const max_retries: u8 = 10;
+    /// Hard cap on cache max_ttl: one week (604800 s, the "1w" unit in
+    /// zone files; cache_protection applies its own per-answer clamping
+    /// on top of this).
+    pub const max_ttl_cap_s: u32 = 7 * 86400;
+
     /// Upstream servers
     servers: []const []const u8 = &[_][]const u8{"8.8.8.8"},
     /// Server port
@@ -356,15 +371,15 @@ pub const DnsConfig = struct {
     pub fn fromConfig(config: *Config) DnsConfig {
         return DnsConfig{
             .port = clampToUnsigned(u16, config.getInt("dns", "port", 53)),
-            .timeout_ms = clampToUnsigned(u32, config.getInt("dns", "timeout_ms", 5000)),
-            .retries = clampToUnsigned(u8, config.getInt("dns", "retries", 3)),
+            .timeout_ms = @max(min_timeout_ms, clampToUnsigned(u32, config.getInt("dns", "timeout_ms", 5000))),
+            .retries = @min(max_retries, clampToUnsigned(u8, config.getInt("dns", "retries", 3))),
             .use_tcp = config.getBool("dns", "use_tcp", false),
             .use_tls = config.getBool("dns", "use_tls", false),
             .dnssec = config.getBool("dns", "dnssec", false),
             .cache_enabled = config.getBool("cache", "enabled", true),
             .cache_size = clampToUnsigned(u32, config.getInt("cache", "size", 10000)),
             .min_ttl = clampToUnsigned(u32, config.getInt("cache", "min_ttl", 60)),
-            .max_ttl = clampToUnsigned(u32, config.getInt("cache", "max_ttl", 86400)),
+            .max_ttl = @min(max_ttl_cap_s, clampToUnsigned(u32, config.getInt("cache", "max_ttl", 86400))),
             .logging_enabled = config.getBool("logging", "enabled", true),
             .log_level = config.getString("logging", "level", "info"),
         };
@@ -512,7 +527,9 @@ test "DnsConfig fromConfig clamps negative values" {
     try config.set("dns", "timeout_ms", .{ .integer = -100 });
     const dns_config = DnsConfig.fromConfig(&config);
     try std.testing.expectEqual(@as(u16, 0), dns_config.port);
-    try std.testing.expectEqual(@as(u32, 0), dns_config.timeout_ms);
+    // Negative timeouts clamp to 0 and then up to the semantic minimum
+    // (GAP-0874).
+    try std.testing.expectEqual(DnsConfig.min_timeout_ms, dns_config.timeout_ms);
 }
 
 test "DnsConfig fromConfig clamps overflow values" {
@@ -523,7 +540,49 @@ test "DnsConfig fromConfig clamps overflow values" {
     try config.set("dns", "retries", .{ .integer = 300 });
     const dns_config = DnsConfig.fromConfig(&config);
     try std.testing.expectEqual(@as(u16, 65535), dns_config.port);
-    try std.testing.expectEqual(@as(u8, 255), dns_config.retries);
+    // Retries clamp to the u8 range and then down to the semantic cap
+    // (GAP-0874).
+    try std.testing.expectEqual(DnsConfig.max_retries, dns_config.retries);
+}
+
+test "GAP-0874: timeout_ms of zero is clamped to the minimum" {
+    const allocator = std.testing.allocator;
+    var config = Config.init(allocator);
+    defer config.deinit();
+    try config.set("dns", "timeout_ms", .{ .integer = 0 });
+    const dns_config = DnsConfig.fromConfig(&config);
+    try std.testing.expectEqual(DnsConfig.min_timeout_ms, dns_config.timeout_ms);
+}
+
+test "GAP-0874: retries above the cap are clamped to 10" {
+    const allocator = std.testing.allocator;
+    var config = Config.init(allocator);
+    defer config.deinit();
+    try config.set("dns", "retries", .{ .integer = 200 });
+    const dns_config = DnsConfig.fromConfig(&config);
+    try std.testing.expectEqual(@as(u8, 10), dns_config.retries);
+}
+
+test "GAP-0874: max_ttl above one week is clamped to 604800" {
+    const allocator = std.testing.allocator;
+    var config = Config.init(allocator);
+    defer config.deinit();
+    try config.set("cache", "max_ttl", .{ .integer = 999_999_999 });
+    const dns_config = DnsConfig.fromConfig(&config);
+    try std.testing.expectEqual(@as(u32, 604800), dns_config.max_ttl);
+}
+
+test "GAP-0874: in-range sane values pass through unchanged" {
+    const allocator = std.testing.allocator;
+    var config = Config.init(allocator);
+    defer config.deinit();
+    try config.set("dns", "timeout_ms", .{ .integer = 2500 });
+    try config.set("dns", "retries", .{ .integer = 5 });
+    try config.set("cache", "max_ttl", .{ .integer = 3600 });
+    const dns_config = DnsConfig.fromConfig(&config);
+    try std.testing.expectEqual(@as(u32, 2500), dns_config.timeout_ms);
+    try std.testing.expectEqual(@as(u8, 5), dns_config.retries);
+    try std.testing.expectEqual(@as(u32, 3600), dns_config.max_ttl);
 }
 
 test "clampToUnsigned boundary values" {
