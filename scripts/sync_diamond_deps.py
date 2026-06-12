@@ -64,6 +64,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import detect_diamond_deps as ddd  # noqa: E402
 
 SEMVER_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+# --target input validation (SC-2): a dependency name and a 40-char git SHA.
+TARGET_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 NAME_RE = re.compile(r"\.name\s*=\s*(?:\.([A-Za-z_][A-Za-z0-9_]*)|\"([^\"]+)\")")
 DEVNW_URL_RE = re.compile(
     r"gitlab\.com/devnw/(?:zig|codepros/geode)/([A-Za-z0-9_.-]+?)\.git"
@@ -351,9 +354,22 @@ class Bumped:
 
 
 def parse_target(spec: str) -> tuple[str, str, str]:
-    # tls=v0.1.9#<commit>
+    # Format: name=vMAJOR.MINOR.PATCH#<40-hex-commit>, e.g. tls=v0.1.9#<commit>.
+    # Validate each field (SC-2): the values are embedded in git URLs and
+    # commit messages, so reject anything that is not a plain dependency name,
+    # a semver tag, or a 40-character SHA before using them.
+    if "=" not in spec or "#" not in spec:
+        raise ValueError(
+            f"invalid --target {spec!r}: expected name=vX.Y.Z#<40-hex-commit>"
+        )
     name, rest = spec.split("=", 1)
     ref, commit = rest.split("#", 1)
+    if not TARGET_NAME_RE.match(name):
+        raise ValueError(f"invalid --target dependency name: {name!r}")
+    if not SEMVER_TAG_RE.match(ref):
+        raise ValueError(f"invalid --target version tag: {ref!r} (expected vX.Y.Z)")
+    if not COMMIT_SHA_RE.match(commit):
+        raise ValueError(f"invalid --target commit: {commit!r} (expected 40 hex chars)")
     return name, ref, commit
 
 
