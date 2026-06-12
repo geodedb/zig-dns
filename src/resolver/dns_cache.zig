@@ -79,6 +79,11 @@ pub const CacheEntry = struct {
     original_ttl: u32,
     /// Zone name for NXDOMAIN entries (for zone-level caching)
     zone_name: ?[]const u8 = null,
+    /// Allocated capacity behind `rdata` (GAP-0861). Zero means the
+    /// allocation is exactly `rdata.len`. putRecordWithKey grows packed
+    /// multi-record buffers geometrically so appending N records copies
+    /// O(N) bytes amortized instead of O(N^2).
+    rdata_capacity: usize = 0,
 
     const Self = @This();
 
@@ -118,8 +123,11 @@ pub const DnsCache = struct {
     /// Used as the LRU on_evict callback so that eviction, removal,
     /// overwrite, clear, and deinit all release entry-owned memory.
     fn freeCacheEntry(allocator: std.mem.Allocator, entry: CacheEntry) void {
-        if (entry.rdata.len > 0) {
-            allocator.free(entry.rdata);
+        // GAP-0861: free the full allocation, which may be larger than the
+        // used `rdata` slice when spare append capacity was reserved.
+        const cap = @max(entry.rdata_capacity, entry.rdata.len);
+        if (cap > 0) {
+            allocator.free(entry.rdata.ptr[0..cap]);
         }
         if (entry.zone_name) |zn| {
             allocator.free(zn);
@@ -515,8 +523,27 @@ pub const DnsCache = struct {
         if (self.entries.getWithHandle(key)) |handle| {
             if (handle.value.entry_type == .positive and !handle.value.isExpired(now)) {
                 const old = handle.value.rdata;
+                const old_cap = @max(handle.value.rdata_capacity, old.len);
                 const seg_len = 2 + rdata.len;
-                const buf = try self.allocator.alloc(u8, old.len + seg_len);
+                const needed = old.len + seg_len;
+
+                // GAP-0861: append into spare capacity when available --
+                // amortized O(1) per record instead of re-alloc + full
+                // memcpy per append (O(N^2) bytes over N records). The
+                // buffer is mutable: it was allocated by this cache.
+                if (needed <= old_cap) {
+                    const buf = @constCast(old.ptr)[0..old_cap];
+                    std.mem.writeInt(u16, buf[old.len..][0..2], @intCast(rdata.len), .big);
+                    @memcpy(buf[old.len + 2 ..][0..rdata.len], rdata);
+                    handle.node_ptr.value.rdata = buf[0..needed];
+                    handle.node_ptr.value.original_ttl = ttl;
+                    return;
+                }
+
+                // Grow geometrically so future appends hit the in-place
+                // path; copy the existing packed records once.
+                const new_cap = @max(needed, old_cap * 2);
+                const buf = try self.allocator.alloc(u8, new_cap);
                 errdefer self.allocator.free(buf);
                 @memcpy(buf[0..old.len], old);
                 std.mem.writeInt(u16, buf[old.len..][0..2], @intCast(rdata.len), .big);
@@ -525,7 +552,8 @@ pub const DnsCache = struct {
                 // put evicts old entry (freeing old rdata via on_evict)
                 try self.entries.put(key, CacheEntry{
                     .entry_type = .positive,
-                    .rdata = buf,
+                    .rdata = buf[0..needed],
+                    .rdata_capacity = new_cap,
                     .cached_at = handle.value.cached_at,
                     .original_ttl = ttl,
                 });
@@ -581,6 +609,34 @@ test "DnsCache basic" {
     const entry = cache.get("example.com.", .a, .in);
     try std.testing.expect(entry != null);
     try std.testing.expectEqual(EntryType.positive, entry.?.entry_type);
+}
+
+test "GAP-0861: 50-record put/get round trip preserves all packed records" {
+    const allocator = std.testing.allocator;
+    var mock_clock = clock_mod.MockClock.init();
+
+    var cache = DnsCache.init(allocator, .{}, mock_clock.clock());
+    defer cache.deinit();
+
+    // Append 50 distinct A records under the same key; the packed buffer
+    // must grow amortized-linearly and preserve every segment in order.
+    var expected: [50][4]u8 = undefined;
+    for (&expected, 0..) |*rec, i| {
+        rec.* = .{ 10, 0, @intCast(i / 256), @intCast(i % 256) };
+        try cache.putRecord("multi.example.com.", .a, .in, rec, 300);
+    }
+
+    const entry = cache.get("multi.example.com.", .a, .in) orelse
+        return error.TestExpectedEntry;
+    try std.testing.expectEqual(EntryType.positive, entry.entry_type);
+
+    var it = PackedRdataIterator.init(entry.rdata);
+    var count: usize = 0;
+    while (it.next()) |seg| : (count += 1) {
+        try std.testing.expect(count < expected.len);
+        try std.testing.expectEqualSlices(u8, &expected[count], seg);
+    }
+    try std.testing.expectEqual(@as(usize, 50), count);
 }
 
 test "DnsCache expiration" {
