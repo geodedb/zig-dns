@@ -22,6 +22,7 @@ const net = @import("net_compat");
 const io = @import("transport_io");
 const clock = @import("clock");
 const random = @import("random");
+const tsig = @import("tsig");
 
 // GAP-0877: `std.time.milliTimestamp` does not exist in Zig 0.16.0; the
 // previous direct calls only compiled because the transfer paths were not
@@ -295,8 +296,6 @@ pub const ZoneTransferClient = struct {
         }
 
         const start_time = timeMilli();
-        var zone = Zone.init(self.allocator, zone_name);
-        errdefer zone.deinit();
 
         // Connect via TCP (net_compat + transport_io, like the TCP transport;
         // std.net was removed in Zig 0.16). Per-op timeouts replace SO_RCVTIMEO.
@@ -309,16 +308,72 @@ pub const ZoneTransferClient = struct {
         defer net.close(sock);
         try io.connectWithTimeout(sock, address, self.config.timeout_ms);
 
-        // Build and send AXFR query
-        const query = try self.buildTransferQuery(zone_name, .axfr);
-        defer self.allocator.free(query);
+        // Build, TSIG-sign (GAP-0868) and send AXFR query
+        const query = try self.buildSignedTransferQuery(zone_name, .axfr);
+        defer self.allocator.free(query.message);
 
-        try self.sendTcpMessage(sock, query);
+        try self.sendTcpMessage(sock, query.message);
 
-        // Receive and parse responses
+        // Receive, verify and parse responses
+        var source = TcpMessageSource{ .client = self, .sock = sock };
+        return self.runAxfrTransfer(zone_name, &source, query.macSlice(), start_time);
+    }
+
+    /// Adapts the TCP socket to the generic message source used by
+    /// runAxfrTransfer, so the transfer loop can be tested without sockets.
+    const TcpMessageSource = struct {
+        client: *Self,
+        sock: std.posix.socket_t,
+
+        pub fn next(self: *TcpMessageSource) ![]u8 {
+            return self.client.receiveTcpMessage(self.sock);
+        }
+    };
+
+    /// Core AXFR receive loop, generic over a message source providing
+    /// `next() ![]u8` (returned buffers are owned by this function).
+    ///
+    /// SECURITY (GAP-0868): when a TSIG key is configured, every received
+    /// message MUST carry a TSIG RR and verify against the running MAC
+    /// chain of RFC 8945 Section 5.3.2 (the request MAC seeds the first
+    /// envelope; each envelope's MAC seeds the next). This is stricter
+    /// than the RFC, which permits unsigned intermediate envelopes as long
+    /// as a later signed envelope covers them; requiring a signature on
+    /// every envelope is always safe and matches what modern servers
+    /// (e.g. BIND) emit.
+    fn runAxfrTransfer(
+        self: *Self,
+        zone_name: []const u8,
+        source: anytype,
+        request_mac: ?[]const u8,
+        start_time: i64,
+    ) !TransferResult {
+        var zone = Zone.init(self.allocator, zone_name);
+        errdefer zone.deinit();
+
+        var verifier: ?tsig.TsigContext = if (self.config.tsig_key != null)
+            try self.makeTsigContext()
+        else
+            null;
+
+        // Running MAC chain (RFC 8945 Section 5.3.2), seeded by the
+        // request MAC for the first response envelope.
+        var prior_mac: [tsig.max_mac_length]u8 = undefined;
+        var prior_mac_len: usize = 0;
+        if (request_mac) |rm| {
+            @memcpy(prior_mac[0..rm.len], rm);
+            prior_mac_len = rm.len;
+        }
+        // A configured key without a request MAC means the query was not
+        // signed; the response chain cannot be verified (fail closed).
+        if (verifier != null and prior_mac_len == 0) {
+            return error.TsigVerificationFailed;
+        }
+
         var message_count: usize = 0;
         var first_soa_seen = false;
         var second_soa_seen = false;
+        var first_message = true;
 
         while (!second_soa_seen) {
             // SEC-SR-6: enforce the transfer-wide deadline and a hard message
@@ -337,7 +392,7 @@ pub const ZoneTransferClient = struct {
                 };
             }
 
-            const response = try self.receiveTcpMessage(sock);
+            const response = try source.next();
             defer self.allocator.free(response);
             message_count += 1;
 
@@ -353,9 +408,34 @@ pub const ZoneTransferClient = struct {
                 };
             }
 
-            // Parse response and extract records
+            // SECURITY (GAP-0868): verify the TSIG chain BEFORE trusting
+            // any record in the message.
+            if (verifier) |*ctx| {
+                const vr_or_err = if (first_message)
+                    ctx.verifyResponse(response, prior_mac[0..prior_mac_len])
+                else
+                    ctx.verifySubsequent(response, prior_mac[0..prior_mac_len]);
+                const vr = vr_or_err catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return error.TsigVerificationFailed,
+                };
+                if (!vr.valid) return error.TsigVerificationFailed;
+                @memcpy(prior_mac[0..vr.mac_len], vr.macSlice());
+                prior_mac_len = vr.mac_len;
+            }
+            first_message = false;
+
+            // Parse response and extract records.
+            // Records are deep-copied into the zone by addRecord, so the
+            // parsed buffers must be freed here (name + rdata per record).
             const records = try self.parseTransferResponse(response);
-            defer self.allocator.free(records);
+            defer {
+                for (records) |record| {
+                    self.allocator.free(record.name);
+                    self.allocator.free(record.rdata);
+                }
+                self.allocator.free(records);
+            }
 
             for (records) |record| {
                 // Check for SOA records (transfer boundaries)
@@ -441,15 +521,31 @@ pub const ZoneTransferClient = struct {
         defer net.close(sock);
         try io.connectWithTimeout(sock, address, self.config.timeout_ms);
 
-        // Build and send IXFR query with SOA showing our current serial
-        const query = try self.buildIxfrQuery(zone_name, current_serial);
-        defer self.allocator.free(query);
+        // Build, TSIG-sign (GAP-0868) and send IXFR query with SOA showing
+        // our current serial
+        const query = blk: {
+            const raw = try self.buildIxfrQuery(zone_name, current_serial);
+            break :blk try self.signQueryIfConfigured(raw);
+        };
+        defer self.allocator.free(query.message);
 
-        try self.sendTcpMessage(sock, query);
+        try self.sendTcpMessage(sock, query.message);
 
         // Receive response
         const response = try self.receiveTcpMessage(sock);
         defer self.allocator.free(response);
+
+        // SECURITY (GAP-0868): verify the response TSIG against the request
+        // MAC before trusting any record (RFC 8945 Section 5.3.1).
+        if (self.config.tsig_key != null) {
+            var ctx = try self.makeTsigContext();
+            const request_mac = query.macSlice() orelse return error.TsigVerificationFailed;
+            const vr = ctx.verifyResponse(response, request_mac) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return error.TsigVerificationFailed,
+            };
+            if (!vr.valid) return error.TsigVerificationFailed;
+        }
 
         // Parse IXFR response
         // Server may respond with:
@@ -457,8 +553,16 @@ pub const ZoneTransferClient = struct {
         // 2. Incremental changes (deletions followed by additions)
         // 3. Just SOA if we're already up to date
 
+        // Records are deep-copied into the changeset by parseIxfrChanges,
+        // so the parsed buffers must be freed here (name + rdata per record).
         const records = try self.parseTransferResponse(response);
-        defer self.allocator.free(records);
+        defer {
+            for (records) |record| {
+                self.allocator.free(record.name);
+                self.allocator.free(record.rdata);
+            }
+            self.allocator.free(records);
+        }
 
         // Check if server returned AXFR instead of IXFR
         if (self.isAxfrResponse(records)) {
@@ -498,6 +602,54 @@ pub const ZoneTransferClient = struct {
             .new_serial = changeset.new_serial,
             .duration_ms = @intCast(@max(0, timeMilli() - start_time)),
         };
+    }
+
+    /// A transfer query plus the TSIG MAC needed to verify the response
+    /// chain (GAP-0868). mac_len is 0 when no TSIG key is configured.
+    pub const SignedQuery = struct {
+        message: []u8,
+        mac: [tsig.max_mac_length]u8 = [_]u8{0} ** tsig.max_mac_length,
+        mac_len: usize = 0,
+
+        pub fn macSlice(self: *const SignedQuery) ?[]const u8 {
+            return if (self.mac_len > 0) self.mac[0..self.mac_len] else null;
+        }
+    };
+
+    /// GAP-0868: construct a TSIG signing/verification context from the
+    /// configured transfer key. Fails if the algorithm name is unknown.
+    fn makeTsigContext(self: *Self) !tsig.TsigContext {
+        const key_cfg = self.config.tsig_key orelse return error.NoTsigKey;
+        const algorithm = tsig.Algorithm.fromWireName(key_cfg.algorithm) orelse
+            return error.UnsupportedTsigAlgorithm;
+        return tsig.TsigContext.init(
+            self.allocator,
+            tsig.TsigKey.init(key_cfg.name, algorithm, key_cfg.secret),
+        );
+    }
+
+    /// GAP-0868: TSIG-sign a raw query when a key is configured.
+    /// Takes ownership of `raw_query` in all cases.
+    fn signQueryIfConfigured(self: *Self, raw_query: []u8) !SignedQuery {
+        if (self.config.tsig_key == null) {
+            return SignedQuery{ .message = raw_query };
+        }
+        defer self.allocator.free(raw_query);
+
+        var ctx = try self.makeTsigContext();
+        const signed = try ctx.signWithMac(raw_query);
+
+        var query = SignedQuery{ .message = signed.message };
+        @memcpy(query.mac[0..signed.mac_len], signed.macSlice());
+        query.mac_len = signed.mac_len;
+        return query;
+    }
+
+    /// Build an AXFR/IXFR query, TSIG-signed when a key is configured
+    /// (GAP-0868). The returned MAC seeds response-chain verification.
+    fn buildSignedTransferQuery(self: *Self, zone_name: []const u8, transfer_type: TransferType) !SignedQuery {
+        const raw = try self.buildTransferQuery(zone_name, transfer_type);
+        return self.signQueryIfConfigured(raw);
     }
 
     /// Build AXFR/IXFR query message
@@ -1194,4 +1346,236 @@ test "SEC-SCAN-15: TsigKey.deinit handles empty secret" {
     };
     // Should not panic or crash on empty secret
     key.deinit();
+}
+
+// ============================================================================
+// GAP-0868 / GAP-0869: TSIG-authenticated transfer tests
+// ============================================================================
+
+const test_tsig_secret = "test-transfer-secret-32-bytes!!!";
+
+fn testTransferKey() TsigKey {
+    return .{
+        .name = "transfer-key.example.com",
+        .algorithm = "hmac-sha256",
+        .secret = test_tsig_secret,
+    };
+}
+
+/// TSIG context playing the "server" role in tests (same shared secret).
+fn testServerTsigContext(allocator: std.mem.Allocator) tsig.TsigContext {
+    return tsig.TsigContext.initNoWarn(
+        allocator,
+        tsig.TsigKey.init("transfer-key.example.com", .hmac_sha256, test_tsig_secret),
+    );
+}
+
+const TestRecordKind = enum { soa, a };
+
+/// Minimal SOA RDATA: root mname/rname (1 zero byte each) + 5 u32 fields.
+fn testSoaRdata(serial: u32) [22]u8 {
+    var rdata: [22]u8 = [_]u8{0} ** 22;
+    std.mem.writeInt(u32, rdata[2..6], serial, .big);
+    std.mem.writeInt(u32, rdata[6..10], 3600, .big);
+    std.mem.writeInt(u32, rdata[10..14], 600, .big);
+    std.mem.writeInt(u32, rdata[14..18], 604800, .big);
+    std.mem.writeInt(u32, rdata[18..22], 86400, .big);
+    return rdata;
+}
+
+fn appendTestRecord(
+    allocator: std.mem.Allocator,
+    buf: *std.ArrayList(u8),
+    rtype: u16,
+    rdata: []const u8,
+) !void {
+    // Owner name: example.com
+    try buf.appendSlice(allocator, &[_]u8{ 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 });
+    try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, rtype)));
+    try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 1))); // IN
+    try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, 300))); // TTL
+    try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @as(u16, @intCast(rdata.len)))));
+    try buf.appendSlice(allocator, rdata);
+}
+
+/// Build an unsigned AXFR response message containing the given records
+/// in the answer section.
+fn buildTestAxfrMessage(allocator: std.mem.Allocator, kinds: []const TestRecordKind) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, &[_]u8{ 0x12, 0x34, 0x84, 0x00 }); // ID + response flags
+    try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0))); // QDCOUNT
+    try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @as(u16, @intCast(kinds.len))))); // ANCOUNT
+    try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0))); // NSCOUNT
+    try buf.appendSlice(allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0))); // ARCOUNT
+
+    const soa = testSoaRdata(2026061201);
+    for (kinds) |kind| {
+        switch (kind) {
+            .soa => try appendTestRecord(allocator, &buf, soa_rtype, &soa),
+            .a => try appendTestRecord(allocator, &buf, 1, &[_]u8{ 192, 0, 2, 1 }),
+        }
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
+/// Mock message source feeding pre-built messages into the transfer loop.
+const MockMessageSource = struct {
+    allocator: std.mem.Allocator,
+    messages: []const []const u8,
+    index: usize = 0,
+
+    pub fn next(self: *MockMessageSource) ![]u8 {
+        if (self.index >= self.messages.len) return error.ConnectionClosed;
+        const msg = try self.allocator.dupe(u8, self.messages[self.index]);
+        self.index += 1;
+        return msg;
+    }
+};
+
+test "GAP-0868: AXFR query is TSIG-signed when key configured" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .tsig_key = testTransferKey() });
+
+    const query = try client.buildSignedTransferQuery("example.com", .axfr);
+    defer allocator.free(query.message);
+
+    // The TSIG RR must be present in the additional section (ARCOUNT = 1).
+    const arcount = std.mem.readInt(u16, query.message[10..12], .big);
+    try std.testing.expectEqual(@as(u16, 1), arcount);
+    try std.testing.expect(query.mac_len > 0);
+
+    // The query must verify under the shared key (request-style MAC).
+    var server_ctx = testServerTsigContext(allocator);
+    const vr = try server_ctx.verify(query.message);
+    try std.testing.expect(vr.valid);
+}
+
+test "GAP-0868: AXFR query stays unsigned when no key configured" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .require_auth = false });
+
+    const query = try client.buildSignedTransferQuery("example.com", .axfr);
+    defer allocator.free(query.message);
+
+    const arcount = std.mem.readInt(u16, query.message[10..12], .big);
+    try std.testing.expectEqual(@as(u16, 0), arcount);
+    try std.testing.expectEqual(@as(usize, 0), query.mac_len);
+}
+
+test "GAP-0868: response without TSIG rejected when key configured" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .tsig_key = testTransferKey() });
+
+    const msg = try buildTestAxfrMessage(allocator, &.{ .soa, .a, .soa });
+    defer allocator.free(msg);
+
+    var source = MockMessageSource{ .allocator = allocator, .messages = &.{msg} };
+    const request_mac = [_]u8{0xAB} ** 32;
+    const result = client.runAxfrTransfer("example.com", &source, &request_mac, timeMilli());
+    try std.testing.expectError(error.TsigVerificationFailed, result);
+}
+
+test "GAP-0868: tampered record after valid TSIG rejected" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .tsig_key = testTransferKey() });
+
+    const query = try client.buildSignedTransferQuery("example.com", .axfr);
+    defer allocator.free(query.message);
+
+    const raw = try buildTestAxfrMessage(allocator, &.{ .soa, .a, .soa });
+    defer allocator.free(raw);
+
+    var server_ctx = testServerTsigContext(allocator);
+    const signed = try server_ctx.signResponse(raw, query.macSlice().?);
+    defer allocator.free(signed.message);
+
+    // Flip a byte inside the first answer record's RDATA (after the
+    // 12-byte header + 13-byte owner name + 10 bytes of fixed RR fields).
+    signed.message[12 + 13 + 10 + 2] ^= 0xFF;
+
+    var source = MockMessageSource{ .allocator = allocator, .messages = &.{signed.message} };
+    const result = client.runAxfrTransfer("example.com", &source, query.macSlice(), timeMilli());
+    try std.testing.expectError(error.TsigVerificationFailed, result);
+}
+
+test "GAP-0868: correctly signed multi-message AXFR verifies" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .tsig_key = testTransferKey() });
+
+    const query = try client.buildSignedTransferQuery("example.com", .axfr);
+    defer allocator.free(query.message);
+
+    const raw1 = try buildTestAxfrMessage(allocator, &.{ .soa, .a });
+    defer allocator.free(raw1);
+    const raw2 = try buildTestAxfrMessage(allocator, &.{ .a, .soa });
+    defer allocator.free(raw2);
+
+    var server_ctx = testServerTsigContext(allocator);
+    // First envelope: full response MAC seeded by the request MAC.
+    const s1 = try server_ctx.signResponse(raw1, query.macSlice().?);
+    defer allocator.free(s1.message);
+    // Second envelope: chained MAC seeded by the first envelope's MAC.
+    const s2 = try server_ctx.signSubsequent(raw2, s1.macSlice());
+    defer allocator.free(s2.message);
+
+    var source = MockMessageSource{
+        .allocator = allocator,
+        .messages = &.{ s1.message, s2.message },
+    };
+    const result = try client.runAxfrTransfer("example.com", &source, query.macSlice(), timeMilli());
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(usize, 2), result.message_count);
+    // SOA + A from message 1, A from message 2 (terminal SOA not stored).
+    try std.testing.expectEqual(@as(usize, 3), result.record_count);
+
+    var zone = result.zone.?;
+    defer zone.deinit();
+    try std.testing.expectEqual(@as(u32, 2026061201), zone.serial);
+}
+
+test "GAP-0868: multi-message AXFR with broken MAC chain rejected" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .tsig_key = testTransferKey() });
+
+    const query = try client.buildSignedTransferQuery("example.com", .axfr);
+    defer allocator.free(query.message);
+
+    const raw1 = try buildTestAxfrMessage(allocator, &.{ .soa, .a });
+    defer allocator.free(raw1);
+    const raw2 = try buildTestAxfrMessage(allocator, &.{ .a, .soa });
+    defer allocator.free(raw2);
+
+    var server_ctx = testServerTsigContext(allocator);
+    const s1 = try server_ctx.signResponse(raw1, query.macSlice().?);
+    defer allocator.free(s1.message);
+    // Chain the second envelope on the REQUEST MAC instead of s1's MAC --
+    // this breaks the RFC 8945 Section 5.3.2 running-MAC chain.
+    const s2 = try server_ctx.signSubsequent(raw2, query.macSlice().?);
+    defer allocator.free(s2.message);
+
+    var source = MockMessageSource{
+        .allocator = allocator,
+        .messages = &.{ s1.message, s2.message },
+    };
+    const result = client.runAxfrTransfer("example.com", &source, query.macSlice(), timeMilli());
+    try std.testing.expectError(error.TsigVerificationFailed, result);
+}
+
+test "GAP-0868: unauthenticated transfer loop still works when auth disabled" {
+    const allocator = std.testing.allocator;
+    var client = ZoneTransferClient.init(allocator, .{ .require_auth = false });
+
+    const msg = try buildTestAxfrMessage(allocator, &.{ .soa, .a, .soa });
+    defer allocator.free(msg);
+
+    var source = MockMessageSource{ .allocator = allocator, .messages = &.{msg} };
+    const result = try client.runAxfrTransfer("example.com", &source, null, timeMilli());
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(usize, 2), result.record_count);
+
+    var zone = result.zone.?;
+    defer zone.deinit();
 }

@@ -328,15 +328,65 @@ pub const TsigContext = struct {
     /// Sign a DNS message with TSIG
     /// Returns the message with TSIG record appended
     pub fn sign(self: *Self, message: []const u8) ![]u8 {
+        const out = try self.signWithPrior(message, null, false);
+        return out.message;
+    }
+
+    /// Sign a DNS message with TSIG, returning both the signed message and
+    /// the MAC so the caller can chain response verification on it
+    /// (RFC 8945 Section 5.3.1: the request MAC seeds the response MAC).
+    pub fn signWithMac(self: *Self, message: []const u8) !SignOutput {
+        return self.signWithPrior(message, null, false);
+    }
+
+    /// Sign a response to a TSIG-signed request (RFC 8945 Section 5.3.1).
+    /// `request_mac` is the MAC of the request being answered; it is
+    /// digested (length-prefixed) before the response message.
+    pub fn signResponse(self: *Self, message: []const u8, request_mac: []const u8) !SignOutput {
+        return self.signWithPrior(message, request_mac, false);
+    }
+
+    /// Sign a subsequent envelope of a multi-message transaction such as
+    /// AXFR (RFC 8945 Section 5.3.2). The MAC covers the prior envelope's
+    /// MAC (length-prefixed), this message, and the reduced "TSIG timers"
+    /// variables (time signed + fudge) instead of the full TSIG variables.
+    pub fn signSubsequent(self: *Self, message: []const u8, prior_mac: []const u8) !SignOutput {
+        return self.signWithPrior(message, prior_mac, true);
+    }
+
+    /// Shared signing core. `prior_mac` (if any) is digested first with a
+    /// 2-octet length prefix; `timers_only` selects the reduced variables
+    /// used for intermediate envelopes (RFC 8945 Section 5.3.2).
+    fn signWithPrior(self: *Self, message: []const u8, prior_mac: ?[]const u8, timers_only: bool) !SignOutput {
+        if (message.len < 12) return error.InvalidMessage;
+
         const now: u48 = @intCast(@as(u64, @bitCast(timeSec())));
 
-        // Build TSIG variables for MAC computation
         // When signing a new message, error is 0 and other_data is empty.
-        const tsig_vars = try self.buildTsigVariables(now, null, 0, &.{});
+        const tsig_vars = if (timers_only)
+            try self.buildTsigTimers(now, self.fudge)
+        else
+            try self.buildTsigVariables(now, self.fudge, 0, &.{});
         defer self.allocator.free(tsig_vars);
 
-        // Compute MAC over: message + TSIG variables
-        const mac = try self.computeMac(message, tsig_vars);
+        // Compute MAC over: [prior MAC (length-prefixed)] + message + variables
+        var prior_prefix: [2]u8 = undefined;
+        var parts: [4][]const u8 = undefined;
+        var part_count: usize = 0;
+        if (prior_mac) |pm| {
+            if (pm.len > std.math.maxInt(u16)) return error.InvalidMessage;
+            std.mem.writeInt(u16, &prior_prefix, @intCast(pm.len), .big);
+            parts[part_count] = &prior_prefix;
+            part_count += 1;
+            parts[part_count] = pm;
+            part_count += 1;
+        }
+        parts[part_count] = message;
+        part_count += 1;
+        parts[part_count] = tsig_vars;
+        part_count += 1;
+
+        const mac = try self.computeMacParts(parts[0..part_count]);
         defer self.allocator.free(mac);
 
         // Build TSIG record
@@ -344,12 +394,37 @@ pub const TsigContext = struct {
         defer self.allocator.free(tsig_record);
 
         // Append TSIG to message
-        return try self.appendTsig(message, tsig_record);
+        const signed = try self.appendTsig(message, tsig_record);
+
+        var out = SignOutput{ .message = signed };
+        @memcpy(out.mac[0..mac.len], mac);
+        out.mac_len = mac.len;
+        return out;
     }
 
     /// Verify a DNS message with TSIG
     /// Returns the original message without TSIG if valid
     pub fn verify(self: *Self, message: []const u8) !VerifyResult {
+        return self.verifyWithPrior(message, null, false);
+    }
+
+    /// Verify a response to a TSIG-signed request (RFC 8945 Section 5.3.1).
+    /// `request_mac` is the MAC of the signed request; it is digested
+    /// (length-prefixed) before the response message.
+    pub fn verifyResponse(self: *Self, message: []const u8, request_mac: []const u8) !VerifyResult {
+        return self.verifyWithPrior(message, request_mac, false);
+    }
+
+    /// Verify a subsequent envelope of a multi-message transaction such as
+    /// AXFR (RFC 8945 Section 5.3.2). The MAC is verified over the prior
+    /// envelope's MAC (length-prefixed), this message, and the reduced
+    /// "TSIG timers" variables (time signed + fudge).
+    pub fn verifySubsequent(self: *Self, message: []const u8, prior_mac: []const u8) !VerifyResult {
+        return self.verifyWithPrior(message, prior_mac, true);
+    }
+
+    /// Shared verification core (see signWithPrior for the digest layout).
+    fn verifyWithPrior(self: *Self, message: []const u8, prior_mac: ?[]const u8, timers_only: bool) !VerifyResult {
         // Extract TSIG record from message
         const tsig_info = try self.extractTsig(message);
         defer {
@@ -379,20 +454,42 @@ pub const TsigContext = struct {
         // to learn whether the MAC was valid by observing different error codes.
 
         // Recompute MAC using actual error and other_data from received TSIG
-        // (SEC-AUDIT-03: these fields are part of the MAC input per RFC 2845)
-        const tsig_vars = try self.buildTsigVariables(
-            tsig.time_signed,
-            null,
-            tsig.error_code.toResponseCode(),
-            tsig.other_data,
-        );
+        // (SEC-AUDIT-03: these fields are part of the MAC input per RFC 2845).
+        // The fudge digested must be the one the signer placed in the record,
+        // not the verifier's local default (GAP-0868).
+        const tsig_vars = if (timers_only)
+            try self.buildTsigTimers(tsig.time_signed, tsig.fudge)
+        else
+            try self.buildTsigVariables(
+                tsig.time_signed,
+                tsig.fudge,
+                tsig.error_code.toResponseCode(),
+                tsig.other_data,
+            );
         defer self.allocator.free(tsig_vars);
 
         // Message without TSIG for MAC computation
         const msg_without_tsig = try self.stripTsig(message, tsig_info);
         defer self.allocator.free(msg_without_tsig);
 
-        const expected_mac = try self.computeMac(msg_without_tsig, tsig_vars);
+        // [prior MAC (length-prefixed)] + message + TSIG variables
+        var prior_prefix: [2]u8 = undefined;
+        var parts: [4][]const u8 = undefined;
+        var part_count: usize = 0;
+        if (prior_mac) |pm| {
+            if (pm.len > std.math.maxInt(u16)) return error.InvalidMessage;
+            std.mem.writeInt(u16, &prior_prefix, @intCast(pm.len), .big);
+            parts[part_count] = &prior_prefix;
+            part_count += 1;
+            parts[part_count] = pm;
+            part_count += 1;
+        }
+        parts[part_count] = msg_without_tsig;
+        part_count += 1;
+        parts[part_count] = tsig_vars;
+        part_count += 1;
+
+        const expected_mac = try self.computeMacParts(parts[0..part_count]);
         defer self.allocator.free(expected_mac);
 
         // Constant-time MAC comparison using known algorithm output sizes.
@@ -434,29 +531,29 @@ pub const TsigContext = struct {
             return VerifyResult{ .valid = false, .error_code = .bad_time };
         }
 
-        return VerifyResult{
+        var result = VerifyResult{
             .valid = true,
             .error_code = .no_error,
             .time_signed = tsig.time_signed,
             .original_id = tsig.original_id,
         };
+        // Expose the verified MAC so multi-message callers can chain the
+        // next envelope's verification on it (RFC 8945 Section 5.3.2).
+        @memcpy(result.mac[0..expected_mac.len], expected_mac);
+        result.mac_len = expected_mac.len;
+        return result;
     }
 
     /// Build TSIG variables for MAC computation (RFC 2845 Section 3.4.2)
     ///
-    /// `error_code` and `other_data` are included in the MAC input per the
-    /// RFC.  Callers signing a new message pass 0 / empty; callers verifying
-    /// a received message must pass the values from the received TSIG record
-    /// so that the recomputed MAC matches the original (SEC-AUDIT-03).
-    fn buildTsigVariables(self: *Self, time_signed: u48, prior_mac: ?[]const u8, error_code: u16, other_data: []const u8) ![]u8 {
+    /// `fudge`, `error_code` and `other_data` are included in the MAC input
+    /// per the RFC.  Callers signing a new message pass self.fudge / 0 /
+    /// empty; callers verifying a received message must pass the values from
+    /// the received TSIG record so that the recomputed MAC matches the
+    /// original (SEC-AUDIT-03, GAP-0868).
+    fn buildTsigVariables(self: *Self, time_signed: u48, fudge: u16, error_code: u16, other_data: []const u8) ![]u8 {
         var buffer: std.ArrayList(u8) = .empty;
         errdefer buffer.deinit(self.allocator);
-
-        // Prior MAC (for chained messages)
-        if (prior_mac) |pm| {
-            try buffer.appendSlice(self.allocator, std.mem.asBytes(&std.mem.nativeToBig(u16, @intCast(pm.len))));
-            try buffer.appendSlice(self.allocator, pm);
-        }
 
         // Key name (in wire format)
         try encodeNameLower(self.allocator, &buffer, self.key.name);
@@ -476,8 +573,8 @@ pub const TsigContext = struct {
         try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, time_high)));
         try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, time_low)));
 
-        // Fudge
-        try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, self.fudge)));
+        // Fudge (the value digested must match the record's fudge field)
+        try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, fudge)));
 
         // Error code (SEC-AUDIT-03: use actual value, not hardcoded 0)
         try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, error_code)));
@@ -491,62 +588,41 @@ pub const TsigContext = struct {
         return buffer.toOwnedSlice(self.allocator);
     }
 
-    /// Compute HMAC over message and TSIG variables
+    /// Build the reduced "TSIG timers" variables digested for intermediate
+    /// envelopes of a multi-message transaction (RFC 8945 Section 5.3.2):
+    /// time signed (48 bits) followed by fudge (16 bits).
+    fn buildTsigTimers(self: *Self, time_signed: u48, fudge: u16) ![]u8 {
+        var buffer: std.ArrayList(u8) = .empty;
+        errdefer buffer.deinit(self.allocator);
+
+        const time_high: u16 = @intCast((time_signed >> 32) & 0xFFFF);
+        const time_low: u32 = @intCast(time_signed & 0xFFFFFFFF);
+        try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, time_high)));
+        try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, time_low)));
+        try buffer.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, fudge)));
+
+        return buffer.toOwnedSlice(self.allocator);
+    }
+
+    /// Compute HMAC over a sequence of digest components (prior MAC,
+    /// message, TSIG variables -- see RFC 8945 Section 5.3).
     ///
     /// SECURITY: Delegates key handling to Zig's std.crypto.auth.hmac which
     /// implements RFC 2104 correctly: keys longer than block size are hashed
     /// first, keys shorter are zero-padded internally. Previous manual key
     /// handling truncated keys between hash-output-length and block-size,
     /// producing wrong MACs (SEC-C23, CWE-326).
-    fn computeMac(self: *Self, message: []const u8, tsig_vars: []const u8) ![]u8 {
+    fn computeMacParts(self: *Self, parts: []const []const u8) ![]u8 {
         const mac_len = self.key.algorithm.macLength();
         const result = try self.allocator.alloc(u8, mac_len);
         errdefer self.allocator.free(result);
 
-        // Pass the raw secret directly to HMAC init. Zig's HMAC implementation
-        // handles RFC 2104 key sizing internally (hash if > block size, zero-pad
-        // if shorter). This avoids the previous bug where manual pre-processing
-        // truncated keys between hash-output-length and block-size.
-        //
-        // SECURITY: Each HMAC instance is securely zeroed after use via defer
-        // to prevent key-derived material from leaking through stack memory
-        // (SEC-C25, CWE-244).
         switch (self.key.algorithm) {
-            .hmac_md5 => {
-                var hmac = std.crypto.auth.hmac.HmacMd5.init(self.key.secret);
-                defer secureZeroHmac(@TypeOf(hmac), &hmac);
-                hmac.update(message);
-                hmac.update(tsig_vars);
-                hmac.final(result[0..16]);
-            },
-            .hmac_sha1 => {
-                var hmac = std.crypto.auth.hmac.HmacSha1.init(self.key.secret);
-                defer secureZeroHmac(@TypeOf(hmac), &hmac);
-                hmac.update(message);
-                hmac.update(tsig_vars);
-                hmac.final(result[0..20]);
-            },
-            .hmac_sha256 => {
-                var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(self.key.secret);
-                defer secureZeroHmac(@TypeOf(hmac), &hmac);
-                hmac.update(message);
-                hmac.update(tsig_vars);
-                hmac.final(result[0..32]);
-            },
-            .hmac_sha384 => {
-                var hmac = std.crypto.auth.hmac.sha2.HmacSha384.init(self.key.secret);
-                defer secureZeroHmac(@TypeOf(hmac), &hmac);
-                hmac.update(message);
-                hmac.update(tsig_vars);
-                hmac.final(result[0..48]);
-            },
-            .hmac_sha512 => {
-                var hmac = std.crypto.auth.hmac.sha2.HmacSha512.init(self.key.secret);
-                defer secureZeroHmac(@TypeOf(hmac), &hmac);
-                hmac.update(message);
-                hmac.update(tsig_vars);
-                hmac.final(result[0..64]);
-            },
+            .hmac_md5 => hmacParts(std.crypto.auth.hmac.HmacMd5, self.key.secret, parts, result[0..16]),
+            .hmac_sha1 => hmacParts(std.crypto.auth.hmac.HmacSha1, self.key.secret, parts, result[0..20]),
+            .hmac_sha256 => hmacParts(std.crypto.auth.hmac.sha2.HmacSha256, self.key.secret, parts, result[0..32]),
+            .hmac_sha384 => hmacParts(std.crypto.auth.hmac.sha2.HmacSha384, self.key.secret, parts, result[0..48]),
+            .hmac_sha512 => hmacParts(std.crypto.auth.hmac.sha2.HmacSha512, self.key.secret, parts, result[0..64]),
         }
 
         return result;
@@ -719,12 +795,37 @@ pub const TsigContext = struct {
     }
 };
 
+/// Maximum MAC length across supported algorithms (HMAC-SHA512).
+pub const max_mac_length: usize = 64;
+
+/// Result of signing a message: the signed message plus the MAC needed to
+/// chain subsequent envelopes or verify responses (RFC 8945 Section 5.3).
+pub const SignOutput = struct {
+    /// Newly allocated message with TSIG RR appended (caller frees).
+    message: []u8,
+    /// MAC of this message (first mac_len bytes are valid).
+    mac: [max_mac_length]u8 = [_]u8{0} ** max_mac_length,
+    mac_len: usize = 0,
+
+    pub fn macSlice(self: *const SignOutput) []const u8 {
+        return self.mac[0..self.mac_len];
+    }
+};
+
 /// Result of TSIG verification
 pub const VerifyResult = struct {
     valid: bool,
     error_code: TsigError,
     time_signed: u48 = 0,
     original_id: u16 = 0,
+    /// MAC of the verified message (first mac_len bytes are valid; only set
+    /// when valid). Used to chain multi-message verification (GAP-0868).
+    mac: [max_mac_length]u8 = [_]u8{0} ** max_mac_length,
+    mac_len: usize = 0,
+
+    pub fn macSlice(self: *const VerifyResult) []const u8 {
+        return self.mac[0..self.mac_len];
+    }
 };
 
 /// Securely zero an HMAC state struct to prevent key-derived material from
@@ -732,6 +833,20 @@ pub const VerifyResult = struct {
 fn secureZeroHmac(comptime T: type, hmac_ptr: *T) void {
     const hmac_bytes: *[@sizeOf(T)]u8 = @ptrCast(hmac_ptr);
     std.crypto.secureZero(u8, hmac_bytes);
+}
+
+/// Run HMAC over a sequence of digest components.
+///
+/// SECURITY: Each HMAC instance is securely zeroed after use via defer
+/// to prevent key-derived material from leaking through stack memory
+/// (SEC-C25, CWE-244).
+fn hmacParts(comptime H: type, secret: []const u8, parts: []const []const u8, out: *[H.mac_length]u8) void {
+    var hmac = H.init(secret);
+    defer secureZeroHmac(H, &hmac);
+    for (parts) |part| {
+        hmac.update(part);
+    }
+    hmac.final(out);
 }
 
 // Helper functions -- delegated to shared dns_name module to avoid duplication
@@ -1121,12 +1236,12 @@ test "SEC-AUDIT-03: buildTsigVariables uses actual error and other_data" {
     const time_signed: u48 = 1700000000;
 
     // Build TSIG variables with error=0, other_data=empty (signing path)
-    const vars_zero = try ctx.buildTsigVariables(time_signed, null, 0, &.{});
+    const vars_zero = try ctx.buildTsigVariables(time_signed, ctx.fudge, 0, &.{});
     defer allocator.free(vars_zero);
 
     // Build TSIG variables with error=18 (BADTIME), other_data=6 bytes of server time
     const other_data = [_]u8{ 0x00, 0x00, 0x65, 0x54, 0xF8, 0x00 };
-    const vars_nonzero = try ctx.buildTsigVariables(time_signed, null, 18, &other_data);
+    const vars_nonzero = try ctx.buildTsigVariables(time_signed, ctx.fudge, 18, &other_data);
     defer allocator.free(vars_nonzero);
 
     // They must NOT be equal -- different error/other_data must change the output
@@ -1179,6 +1294,110 @@ test "SEC-AUDIT-08: fudge u16*2 overflow with large fudge values" {
     // The message should verify successfully (tsig.fudge=65535 <= 2*65535=131070)
     try std.testing.expect(result.valid);
     try std.testing.expectEqual(TsigError.no_error, result.error_code);
+}
+
+test "GAP-0868: signResponse/verifyResponse bind the request MAC" {
+    const allocator = std.testing.allocator;
+
+    const key = TsigKey.init("transfer-key.example.com", .hmac_sha256, &[_]u8{0xAA} ** 32);
+    var client_ctx = TsigContext.initNoWarn(allocator, key);
+    var server_ctx = TsigContext.initNoWarn(allocator, key);
+
+    // Client signs a request and keeps the MAC.
+    const request = [_]u8{
+        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x07, 'e',  'x',  'a',
+        'm',  'p',  'l',  'e',  0x03, 'c',  'o',  'm',
+        0x00, 0x00, 0xFC, 0x00, 0x01,
+    };
+    const signed_req = try client_ctx.signWithMac(&request);
+    defer allocator.free(signed_req.message);
+    try std.testing.expect(signed_req.mac_len > 0);
+
+    // Server signs a response chained on the request MAC.
+    const response = [_]u8{
+        0x12, 0x34, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    };
+    const signed_resp = try server_ctx.signResponse(&response, signed_req.macSlice());
+    defer allocator.free(signed_resp.message);
+
+    // verifyResponse with the correct request MAC succeeds.
+    const ok = try client_ctx.verifyResponse(signed_resp.message, signed_req.macSlice());
+    try std.testing.expect(ok.valid);
+    try std.testing.expectEqual(signed_resp.mac_len, ok.mac_len);
+    try std.testing.expectEqualSlices(u8, signed_resp.macSlice(), ok.macSlice());
+
+    // Plain verify (no request MAC) must FAIL: the request MAC is part
+    // of the digest per RFC 8945 Section 5.3.1.
+    const plain = try client_ctx.verify(signed_resp.message);
+    try std.testing.expect(!plain.valid);
+
+    // verifyResponse with the WRONG request MAC must fail.
+    const wrong_mac = [_]u8{0x55} ** 32;
+    const bad = try client_ctx.verifyResponse(signed_resp.message, &wrong_mac);
+    try std.testing.expect(!bad.valid);
+    try std.testing.expectEqual(TsigError.bad_sig, bad.error_code);
+}
+
+test "GAP-0868: signSubsequent/verifySubsequent chain prior MACs" {
+    const allocator = std.testing.allocator;
+
+    const key = TsigKey.init("transfer-key.example.com", .hmac_sha256, &[_]u8{0xBB} ** 32);
+    var client_ctx = TsigContext.initNoWarn(allocator, key);
+    var server_ctx = TsigContext.initNoWarn(allocator, key);
+
+    const request = [_]u8{
+        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x07, 'e',  'x',  'a',
+        'm',  'p',  'l',  'e',  0x03, 'c',  'o',  'm',
+        0x00, 0x00, 0xFC, 0x00, 0x01,
+    };
+    const signed_req = try client_ctx.signWithMac(&request);
+    defer allocator.free(signed_req.message);
+
+    const msg1 = [_]u8{
+        0x12, 0x34, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    };
+    const msg2 = [_]u8{
+        0x12, 0x35, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    };
+
+    // First envelope: full response signature seeded by the request MAC.
+    const s1 = try server_ctx.signResponse(&msg1, signed_req.macSlice());
+    defer allocator.free(s1.message);
+    // Second envelope: reduced TSIG-timers signature seeded by s1's MAC
+    // (RFC 8945 Section 5.3.2).
+    const s2 = try server_ctx.signSubsequent(&msg2, s1.macSlice());
+    defer allocator.free(s2.message);
+
+    const v1 = try client_ctx.verifyResponse(s1.message, signed_req.macSlice());
+    try std.testing.expect(v1.valid);
+    const v2 = try client_ctx.verifySubsequent(s2.message, v1.macSlice());
+    try std.testing.expect(v2.valid);
+
+    // Breaking the chain (wrong prior MAC) must fail.
+    const v2_bad = try client_ctx.verifySubsequent(s2.message, signed_req.macSlice());
+    try std.testing.expect(!v2_bad.valid);
+    try std.testing.expectEqual(TsigError.bad_sig, v2_bad.error_code);
+}
+
+test "GAP-0868: verifyResponse rejects message without TSIG" {
+    const allocator = std.testing.allocator;
+
+    const key = TsigKey.init("transfer-key.example.com", .hmac_sha256, &[_]u8{0xCC} ** 32);
+    var ctx = TsigContext.initNoWarn(allocator, key);
+
+    // Plain response with no additional records at all.
+    const unsigned = [_]u8{
+        0x12, 0x34, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+    };
+    const prior = [_]u8{0x11} ** 32;
+    const result = ctx.verifyResponse(&unsigned, &prior);
+    try std.testing.expectError(error.NoTsigRecord, result);
 }
 
 test "SEC-AUDIT-08: fudge comparison works for boundary values" {

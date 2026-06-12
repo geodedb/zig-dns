@@ -405,6 +405,11 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // GAP-0868: zone transfers sign queries and verify response chains
+    // via the hardened TSIG implementation. tsig_mod is declared after
+    // zone_transfer_mod, so wire via addImport.
+    zone_transfer_mod.addImport("tsig", tsig_mod);
+
     // Public API -- SIG(0) - DNS Request and Transaction Signatures (RFC 2931)
     const sig0_mod = b.addModule("sig0", .{
         .root_source_file = b.path("src/security/sig0.zig"),
@@ -1283,6 +1288,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "transport_io", .module = transport_io_mod },
                 .{ .name = "clock", .module = clock_mod },
                 .{ .name = "random", .module = random_mod },
+                .{ .name = "tsig", .module = tsig_mod },
             },
         }),
     });
