@@ -69,12 +69,24 @@ pub const DomainPattern = struct {
     }
 
     fn matchSuffix(self: *const DomainPattern, domain: []const u8, pattern: []const u8) bool {
+        if (pattern.len == 0) return true;
         if (domain.len < pattern.len) return false;
         const suffix = domain[domain.len - pattern.len ..];
-        if (self.case_sensitive) {
-            return std.mem.eql(u8, suffix, pattern);
-        }
-        return std.ascii.eqlIgnoreCase(suffix, pattern);
+        const suffix_eq = if (self.case_sensitive)
+            std.mem.eql(u8, suffix, pattern)
+        else
+            std.ascii.eqlIgnoreCase(suffix, pattern);
+        if (!suffix_eq) return false;
+
+        // Label boundary validation (GAP-0847): a raw byte-suffix match would
+        // let pattern "corp.local" match "evilcorp.local" (policy bypass).
+        // Accept only when:
+        // - the domain IS the pattern (exact match), or
+        // - the pattern starts with '.' (boundary implicit in pattern), or
+        // - the byte preceding the suffix in the domain is a label separator.
+        if (domain.len == pattern.len) return true;
+        if (pattern[0] == '.') return true;
+        return domain[domain.len - pattern.len - 1] == '.';
     }
 
     fn matchPrefix(self: *const DomainPattern, domain: []const u8, pattern: []const u8) bool {
@@ -396,6 +408,53 @@ test "DomainPattern suffix match" {
     try std.testing.expect(pattern.matches("api.example.com"));
     try std.testing.expect(!pattern.matches("example.com"));
     try std.testing.expect(!pattern.matches("example.org"));
+}
+
+test "DomainPattern suffix match enforces label boundary (GAP-0847)" {
+    // Pattern without leading dot must not match across label boundaries:
+    // "corp.local" must NOT match "evilcorp.local" (policy-routing bypass).
+    const pattern = DomainPattern{
+        .pattern = "corp.local",
+        .match_type = .suffix,
+    };
+
+    // Exact domain matches
+    try std.testing.expect(pattern.matches("corp.local"));
+    try std.testing.expect(pattern.matches("CORP.LOCAL"));
+    // Subdomains match
+    try std.testing.expect(pattern.matches("server.corp.local"));
+    try std.testing.expect(pattern.matches("deep.server.corp.local"));
+    // Label-boundary bypass must be rejected
+    try std.testing.expect(!pattern.matches("evilcorp.local"));
+    try std.testing.expect(!pattern.matches("notcorp.local"));
+    try std.testing.expect(!pattern.matches("xcorp.local"));
+}
+
+test "DomainPattern suffix match leading-dot pattern keeps working (GAP-0847)" {
+    const pattern = DomainPattern{
+        .pattern = ".corp.local",
+        .match_type = .suffix,
+    };
+
+    try std.testing.expect(pattern.matches("server.corp.local"));
+    try std.testing.expect(pattern.matches("deep.server.corp.local"));
+    // Leading-dot pattern does not match the bare apex (existing semantics)
+    try std.testing.expect(!pattern.matches("corp.local"));
+    // No bypass either
+    try std.testing.expect(!pattern.matches("evilcorp.local"));
+}
+
+test "DomainPattern suffix match case-sensitive boundary (GAP-0847)" {
+    const pattern = DomainPattern{
+        .pattern = "corp.local",
+        .match_type = .suffix,
+        .case_sensitive = true,
+    };
+
+    try std.testing.expect(pattern.matches("corp.local"));
+    try std.testing.expect(pattern.matches("server.corp.local"));
+    try std.testing.expect(!pattern.matches("evilcorp.local"));
+    try std.testing.expect(!pattern.matches("CORP.LOCAL"));
 }
 
 test "DomainPattern prefix match" {
