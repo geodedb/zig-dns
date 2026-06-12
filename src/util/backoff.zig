@@ -17,6 +17,14 @@
 
 const std = @import("std");
 
+/// Block the current thread for `delay_ms` milliseconds using the Zig 0.16
+/// I/O sleep API. (std.Thread.sleep was removed in 0.16.)
+inline fn sleepMs(delay_ms: u64) void {
+    if (delay_ms == 0) return;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    std.Io.sleep(io, std.Io.Duration.fromMilliseconds(@intCast(delay_ms)), .awake) catch {};
+}
+
 /// Backoff strategy type
 pub const Strategy = enum {
     /// Fixed delay between retries
@@ -87,9 +95,11 @@ pub const Backoff = struct {
     pub const InitError = error{EntropyUnavailable};
 
     pub fn init(config: Config) InitError!Self {
-        // Use secure random for jitter calculations
+        // Use secure random for jitter calculations. (std.posix.getrandom was
+        // removed in Zig 0.16; use the I/O CSPRNG like the rest of the lib.)
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        std.Io.randomSecure(io, std.mem.asBytes(&seed)) catch {
             return error.EntropyUnavailable;
         };
         return Self{
@@ -228,6 +238,10 @@ pub fn RetryExecutor(comptime Context: type, comptime ErrorSet: type) type {
             self: *Self,
             comptime func: fn (Context) ErrorSet!void,
         ) ErrorSet!void {
+            // Each call is an independent operation: start from a fresh retry
+            // budget so a reused executor does not carry attempt state across
+            // operations (REL-10).
+            self.backoff.reset();
             while (true) {
                 func(self.context) catch |err| {
                     if (self.on_retry) |callback| {
@@ -235,7 +249,7 @@ pub fn RetryExecutor(comptime Context: type, comptime ErrorSet: type) type {
                     }
 
                     if (self.backoff.nextDelay()) |delay_ms| {
-                        std.Thread.sleep(delay_ms * std.time.ns_per_ms);
+                        sleepMs(delay_ms);
                         continue;
                     }
 
@@ -252,6 +266,8 @@ pub fn RetryExecutor(comptime Context: type, comptime ErrorSet: type) type {
             comptime ResultType: type,
             comptime func: fn (Context) ErrorSet!ResultType,
         ) ErrorSet!ResultType {
+            // Fresh retry budget per operation (REL-10).
+            self.backoff.reset();
             while (true) {
                 return func(self.context) catch |err| {
                     if (self.on_retry) |callback| {
@@ -259,7 +275,7 @@ pub fn RetryExecutor(comptime Context: type, comptime ErrorSet: type) type {
                     }
 
                     if (self.backoff.nextDelay()) |delay_ms| {
-                        std.Thread.sleep(delay_ms * std.time.ns_per_ms);
+                        sleepMs(delay_ms);
                         continue;
                     }
 
@@ -286,7 +302,7 @@ pub fn retry(
     while (true) {
         return @call(.auto, func, args) catch |err| {
             if (backoff.nextDelay()) |delay_ms| {
-                std.Thread.sleep(delay_ms * std.time.ns_per_ms);
+                sleepMs(delay_ms);
                 continue;
             }
             return err;
@@ -531,4 +547,33 @@ test "calculateDelay utility function" {
     try std.testing.expectEqual(@as(u64, 100), calculateDelay(.exponential, 0, 100, 10000));
     try std.testing.expectEqual(@as(u64, 800), calculateDelay(.exponential, 3, 100, 10000));
     try std.testing.expectEqual(@as(u64, 10000), calculateDelay(.exponential, 10, 100, 10000)); // capped
+}
+
+test "RetryExecutor resets retry budget between operations (REL-10)" {
+    const Ctx = struct { calls: *u32 };
+    const Executor = RetryExecutor(Ctx, error{Fail});
+
+    const failer = struct {
+        fn run(ctx: Ctx) error{Fail}!void {
+            ctx.calls.* += 1;
+            return error.Fail;
+        }
+    }.run;
+
+    var calls: u32 = 0;
+    var exec = try Executor.init(
+        .{ .strategy = .constant, .base_delay_ms = 0, .max_retries = 3 },
+        .{ .calls = &calls },
+    );
+
+    // First operation exhausts the retry budget.
+    try std.testing.expectError(error.Fail, exec.execute(failer));
+    const first_calls = calls;
+    try std.testing.expect(first_calls > 1); // retries actually happened
+
+    // Second operation must get the same fresh budget, not be starved by
+    // leftover attempt state from the first.
+    calls = 0;
+    try std.testing.expectError(error.Fail, exec.execute(failer));
+    try std.testing.expectEqual(first_calls, calls);
 }
