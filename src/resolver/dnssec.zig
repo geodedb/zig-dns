@@ -1230,6 +1230,13 @@ pub fn parallelValidateSignatures(
 // Tests
 // =========================================================================
 
+test "parallelValidateSignatures type-check (Zig 0.16 dormant-breakage guard)" {
+    // Public wrapper around the parallel module; never referenced elsewhere, so
+    // its `@import("parallel")` was a dormant-compile landmine (QC-1). Force
+    // analysis so any breakage fails the build.
+    _ = &parallelValidateSignatures;
+}
+
 test "Validator.init and deinit" {
     var validator = Validator.init(std.testing.allocator);
     defer validator.deinit();

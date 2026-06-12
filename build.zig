@@ -354,6 +354,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "transport_io", .module = transport_io_mod },
         },
     });
+    // parseRecordsParallel needs the parallel module (QC-1).
+    if (parallel_mod) |pm| zone_transfer_mod.addImport("parallel", pm);
 
     // Public API -- DNSSEC Validation (RFC 4033/4034/4035)
     const dnssec_mod = b.addModule("dnssec", .{
@@ -411,6 +413,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "clock", .module = clock_mod },
         },
     });
+    // parallelValidateSignatures / prefetchEntriesParallel need the parallel
+    // module (QC-1, same dormant-compile class as parseRecordsParallel).
+    if (parallel_mod) |pm| dnssec_mod.addImport("parallel", pm);
+    if (parallel_mod) |pm| cache_prefetch_mod.addImport("parallel", pm);
 
     // Public API -- Server Failover and Load Balancing
     const failover_mod = b.addModule("failover", .{
@@ -1201,6 +1207,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    if (parallel_mod) |pm| zone_transfer_test.root_module.addImport("parallel", pm);
     const run_zone_transfer_test = b.addRunArtifact(zone_transfer_test);
     test_resolver_step.dependOn(&run_zone_transfer_test.step);
 
@@ -1217,6 +1224,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    if (parallel_mod) |pm| dnssec_test.root_module.addImport("parallel", pm);
     const run_dnssec_test = b.addRunArtifact(dnssec_test);
     test_resolver_step.dependOn(&run_dnssec_test.step);
 
@@ -1253,6 +1261,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    if (parallel_mod) |pm| cache_prefetch_test.root_module.addImport("parallel", pm);
     const run_cache_prefetch_test = b.addRunArtifact(cache_prefetch_test);
     test_resolver_step.dependOn(&run_cache_prefetch_test.step);
 

@@ -943,6 +943,9 @@ test "axfr/ixfr type-check (Zig 0.16 dormant-breakage guard)" {
     // hiding until a consumer wires up zone transfer (Q-NEW-1).
     _ = &ZoneTransferClient.axfr;
     _ = &ZoneTransferClient.ixfr;
+    // parseRecordsParallel is public API but unreferenced, so its
+    // `@import("parallel")` was also a dormant-compile landmine (QC-1).
+    _ = &parseRecordsParallel;
 }
 
 test "Zone basic operations" {

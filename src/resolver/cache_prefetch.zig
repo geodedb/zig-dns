@@ -339,6 +339,12 @@ pub fn prefetchEntriesParallel(
 // Tests
 // ============================================================================
 
+test "prefetchEntriesParallel type-check (Zig 0.16 dormant-breakage guard)" {
+    // Public wrapper around the parallel module; never referenced elsewhere, so
+    // its `@import("parallel")` was a dormant-compile landmine (QC-1).
+    _ = &prefetchEntriesParallel;
+}
+
 test "CachePrefetcher init/deinit" {
     const allocator = std.testing.allocator;
     var mock_clock = clock_mod.MockClock.init();
