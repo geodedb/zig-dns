@@ -476,6 +476,55 @@ def cascade(root_repo: Path, target_spec: str, base_from: Path, apply: bool) -> 
             return 1
 
         run(["git", "add", "build.zig.zon"], cwd=repo.path)
+
+        # Already-converged consumer: if the re-pin produced no change, this
+        # repo's base commit already pins every target, so there is nothing
+        # to release. Don't crash on an empty commit — reuse the release tag
+        # that points at this converged base so downstream consumers pin the
+        # existing version. Reuse ONLY a tag that points exactly at the base
+        # commit (never guess a different version); otherwise fail loudly.
+        if (
+            run(
+                ["git", "diff", "--cached", "--quiet"], cwd=repo.path, check=False
+            ).returncode
+            == 0
+        ):
+            head = run(["git", "rev-parse", "HEAD"], cwd=repo.path).stdout.strip()
+            pointed = [
+                t
+                for t in run(
+                    ["git", "tag", "--points-at", head, "--list", "v*"],
+                    cwd=repo.path,
+                    check=False,
+                ).stdout.split()
+                if SEMVER_TAG_RE.match(t)
+            ]
+            if not pointed:
+                log(
+                    f"  ERROR: {field} already converged but base commit "
+                    f"{head[:8]} carries no release tag; cannot reuse a version"
+                )
+                return 1
+            cur_tag = max(
+                pointed,
+                key=lambda t: tuple(int(x) for x in SEMVER_TAG_RE.match(t).groups()),
+            )
+            cur_url = f"{repo.url}?ref={cur_tag}#{head}"
+            cur_hash = zig_pkg_hash(root_repo, cur_url)
+            if not cur_hash:
+                log(
+                    f"  ERROR: could not compute pkg hash for already-converged "
+                    f"{field}@{cur_tag}"
+                )
+                return 1
+            bumped[field] = Bumped(field, cur_tag, head, cur_hash, cur_url)
+            log(
+                f"  {field} already converged; reuse {cur_tag} "
+                f"({head[:8]}) hash={cur_hash}"
+            )
+            run(["git", "checkout", "-q", "-f", "main"], cwd=repo.path, check=False)
+            continue
+
         run(
             [
                 "git",
@@ -497,7 +546,11 @@ def cascade(root_repo: Path, target_spec: str, base_from: Path, apply: bool) -> 
             ],
             cwd=repo.path,
         )
-        run(["git", "push", "origin", branch], cwd=repo.path)
+        # `gap-diamond-sync` is a throwaway staging branch (the release
+        # artifact is the tag, not the branch). Force-push it so a leftover
+        # branch from a prior/aborted cascade can't block the run with a
+        # non-fast-forward rejection. Tags are never force-pushed.
+        run(["git", "push", "-f", "origin", branch], cwd=repo.path)
         run(["git", "push", "origin", new_tag], cwd=repo.path)
 
         url_ref = f"{repo.url}?ref={new_tag}#{new_commit}"
