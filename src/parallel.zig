@@ -411,7 +411,7 @@ pub const QueryResult = struct {
     /// Built wire-format DNS query message (caller must free with allocator),
     /// or null on failure
     response: ?[]const u8,
-    /// Error code: null=success, 1=invalid_input, 2=build_error
+    /// Error code: null=success, 1=invalid_input, 2=build_error, 3=entropy_unavailable
     error_code: ?u8,
 };
 

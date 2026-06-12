@@ -584,6 +584,8 @@ pub fn build(b: *std.Build) void {
     recursive_mod.addImport("random", random_mod);
     backoff_mod.addImport("random", random_mod);
     zone_transfer_mod.addImport("random", random_mod);
+    failover_mod.addImport("random", random_mod);
+    logging_mod.addImport("random", random_mod);
     if (parallel_mod) |pm| pm.addImport("random", random_mod);
 
     const dns_mod = b.addModule("dns", .{
@@ -1343,6 +1345,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "sync", .module = sync_mod },
                 .{ .name = "clock", .module = clock_mod },
+                .{ .name = "random", .module = random_mod },
             },
         }),
     });
@@ -1382,6 +1385,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "clock", .module = clock_mod },
+                .{ .name = "random", .module = random_mod },
             },
         }),
     });

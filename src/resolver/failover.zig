@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const clock = @import("clock");
+const random_util = @import("random");
 
 inline fn timeMilli() i64 {
     return clock.milliTimestamp();
@@ -171,7 +172,7 @@ pub const FailoverManager = struct {
     /// Weighted round-robin accumulated weights
     weighted_accumulator: u32 = 0,
     /// Random number generator
-    rng: std.Random.DefaultPrng,
+    rng: random_util.SystemRandom,
     /// Statistics
     stats: Stats,
     /// Mutex for thread safety
@@ -196,10 +197,9 @@ pub const FailoverManager = struct {
     pub const InitError = error{EntropyUnavailable};
 
     pub fn init(allocator: std.mem.Allocator, config: FailoverConfig) InitError!Self {
-        // Use secure random for server selection
-        var seed: u64 = undefined;
-        const io = std.Io.Threaded.global_single_threaded.io();
-        std.Io.randomSecure(io, std.mem.asBytes(&seed)) catch {
+        // Use secure random for server selection (GAP-0851: shared
+        // fail-fast entropy helper, no hand-rolled seeding).
+        const rng = random_util.SystemRandom.init() catch {
             return error.EntropyUnavailable;
         };
         return Self{
@@ -208,7 +208,7 @@ pub const FailoverManager = struct {
             .servers = .empty,
             .rr_index = 0,
             .weighted_accumulator = 0,
-            .rng = std.Random.DefaultPrng.init(seed),
+            .rng = rng,
             .stats = .{},
             .mutex = .{},
         };

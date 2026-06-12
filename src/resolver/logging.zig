@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const clock = @import("clock");
+const random_util = @import("random");
 
 inline fn timeMilli() i64 {
     return clock.milliTimestamp();
@@ -130,7 +131,7 @@ pub const DnsLogger = struct {
     /// Statistics
     stats: Stats,
     /// Random for sampling
-    rng: std.Random.DefaultPrng,
+    rng: random_util.SystemRandom,
     /// Last flush timestamp (for periodic flushing)
     last_flush_ms: i64,
 
@@ -153,10 +154,9 @@ pub const DnsLogger = struct {
     pub const InitError = error{EntropyUnavailable};
 
     pub fn init(allocator: std.mem.Allocator, config: LogConfig) InitError!Self {
-        // Use secure random for sampling decisions
-        var seed: u64 = undefined;
-        const io = std.Io.Threaded.global_single_threaded.io();
-        std.Io.randomSecure(io, std.mem.asBytes(&seed)) catch {
+        // Use secure random for sampling decisions (GAP-0851: shared
+        // fail-fast entropy helper, no hand-rolled seeding).
+        const rng = random_util.SystemRandom.init() catch {
             return error.EntropyUnavailable;
         };
         return Self{
@@ -164,7 +164,7 @@ pub const DnsLogger = struct {
             .config = config,
             .buffer = .empty,
             .stats = .{},
-            .rng = std.Random.DefaultPrng.init(seed),
+            .rng = rng,
             .last_flush_ms = timeMilli(),
         };
     }
