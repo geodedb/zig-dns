@@ -97,7 +97,7 @@ pub const recursive = @import("recursive");
 pub const client = @import("client");
 
 // Resolver extensions
-pub const dnssec = @import("dnssec");
+pub const dnssec = @import("dnssec"); // NOTE: dnssec.Validator.validateChainOfTrust is standalone/experimental (fail-open, SEC-A3/#292) — use the resolver's in-path validation (dnssec=true + trust anchors)
 pub const zone_transfer = @import("zone_transfer");
 pub const failover = @import("failover");
 pub const split_dns = @import("split_dns");

@@ -553,7 +553,18 @@ pub const Validator = struct {
     // Chain of Trust Validation (RFC 4035 Section 5)
     // =========================================================================
 
-    /// Validate a complete chain of trust from root to leaf
+    /// Validate a complete chain of trust from root to leaf.
+    ///
+    /// WARNING — STANDALONE / EXPERIMENTAL API. This function is NOT used by
+    /// the resolver path and has known fail-open behaviors: it can return
+    /// `.secure` based on DNSKEY/DS presence without RRSIG verification over
+    /// the DS RRset or denial-of-existence (NSEC/NSEC3) records
+    /// (SEC-A3/#292, SEC-A2/#291, SEC-A8/#297). Do NOT rely on it for
+    /// security decisions. Consumers should use the resolver's in-path
+    /// validation instead (`RecursiveResolver` with `dnssec=true` plus
+    /// configured trust anchors), which only returns `.secure` after a
+    /// verified covering RRSIG over the answer RRset with key-tag,
+    /// signer-bailiwick, and wildcard-labels enforcement.
     pub fn validateChainOfTrust(
         self: *Validator,
         target_zone: []const u8,
