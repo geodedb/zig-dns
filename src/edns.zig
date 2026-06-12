@@ -291,8 +291,9 @@ pub const ClientSubnet = struct {
         const source_prefix_length = data[2];
         const scope_prefix_length = data[3];
 
-        // Calculate expected address length (rounded up to bytes)
-        const addr_bytes = (source_prefix_length + 7) / 8;
+        // Calculate expected address length (rounded up to bytes).
+        // Widen to usize so source_prefix_length >= 249 cannot overflow u8.
+        const addr_bytes = (@as(usize, source_prefix_length) + 7) / 8;
         if (data.len < 4 + addr_bytes) {
             return error.InvalidOptionData;
         }
@@ -307,7 +308,7 @@ pub const ClientSubnet = struct {
 
     /// Encode Client Subnet option to wire format
     pub fn encode(self: Self, allocator: std.mem.Allocator) ![]u8 {
-        const addr_bytes = (self.source_prefix_length + 7) / 8;
+        const addr_bytes = (@as(usize, self.source_prefix_length) + 7) / 8;
         const total_len = 4 + addr_bytes;
 
         const result = try allocator.alloc(u8, total_len);
@@ -334,7 +335,7 @@ pub const ClientSubnet = struct {
 
     /// Create Client Subnet for IPv4 address
     pub fn fromIPv4(addr: [4]u8, prefix_length: u8) Self {
-        const bytes_needed = (prefix_length + 7) / 8;
+        const bytes_needed = (@as(usize, prefix_length) + 7) / 8;
         return Self{
             .family = .ipv4,
             .source_prefix_length = prefix_length,
@@ -345,7 +346,7 @@ pub const ClientSubnet = struct {
 
     /// Create Client Subnet for IPv6 address
     pub fn fromIPv6(addr: [16]u8, prefix_length: u8) Self {
-        const bytes_needed = (prefix_length + 7) / 8;
+        const bytes_needed = (@as(usize, prefix_length) + 7) / 8;
         return Self{
             .family = .ipv6,
             .source_prefix_length = prefix_length,
@@ -844,6 +845,19 @@ test "ClientSubnet.parse IPv6" {
     try std.testing.expectEqual(AddressFamily.ipv6, ecs.family);
     try std.testing.expectEqual(@as(u8, 64), ecs.source_prefix_length);
     try std.testing.expectEqual(@as(usize, 8), ecs.address.len);
+}
+
+test "ClientSubnet.parse rejects overflowing source_prefix_length (SEC-SR-3)" {
+    // source_prefix_length = 255. `(source_prefix_length + 7) / 8` must not
+    // overflow u8 (255 + 7 = 262): parse must return InvalidOptionData, not
+    // panic (ReleaseSafe) or wrap to a tiny addr_bytes (ReleaseFast).
+    const data = [_]u8{
+        0x00, 0x01, // Family: IPv4
+        0xFF, // Source prefix: 255 (overflows `prefix + 7` as u8)
+        0x00, // Scope prefix: 0
+        0xC0, 0xA8, 0x01, // 3 address bytes (far fewer than 255/8 = 32)
+    };
+    try std.testing.expectError(error.InvalidOptionData, ClientSubnet.parse(&data));
 }
 
 test "ClientSubnet.encode" {

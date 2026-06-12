@@ -387,12 +387,12 @@ pub const ResourceRecord = struct {
         const flags = self.rdata[0];
         const tag_length = self.rdata[1];
 
-        if (2 + tag_length > self.rdlength) {
+        if (@as(usize, 2) + tag_length > self.rdlength) {
             return error.InvalidRdataLength;
         }
 
         const tag = self.rdata[2..][0..tag_length];
-        const value = self.rdata[2 + tag_length ..];
+        const value = self.rdata[@as(usize, 2) + tag_length ..];
 
         return CaaData{
             .flags = flags,
@@ -1074,7 +1074,7 @@ pub const ResourceRecord = struct {
         }
 
         const salt_length = self.rdata[4];
-        if (5 + salt_length > self.rdlength) {
+        if (@as(usize, 5) + salt_length > self.rdlength) {
             return error.InvalidRdataLength;
         }
 
@@ -1423,6 +1423,24 @@ test "ResourceRecord.parseCAA critical" {
     try std.testing.expect(caa.isCritical());
 }
 
+test "ResourceRecord.parseCAA rejects overflowing tag_length (SEC-SR-1)" {
+    // tag_length = 0xFF (255). The bound check `2 + tag_length` must not
+    // overflow u8: with rdlength = 4 it must return InvalidRdataLength, not
+    // panic (ReleaseSafe) or wrap and read out of bounds (ReleaseFast).
+    const data = [_]u8{
+        1, 'a', 0, // name
+        0x01, 0x01, // CAA
+        0x00, 0x01, // IN
+        0x00, 0x00, 0x0E, 0x10, // TTL
+        0x00, 0x04, // RDLENGTH: 4
+        0x00, // flags
+        0xFF, // tag length: 255 (overflows `2 + tag_length` as u8)
+        0xAA, 0xBB, // filler
+    };
+    const rr = try ResourceRecord.parse(&data, 0);
+    try std.testing.expectError(error.InvalidRdataLength, rr.parseCAA());
+}
+
 test "ResourceRecord.parseTLSA" {
     // TLSA record: 3 1 1 <sha256 hash>
     const sha256_hash = [_]u8{
@@ -1720,6 +1738,25 @@ test "ResourceRecord.parseNSEC3" {
     try std.testing.expectEqual(@as(u16, 10), nsec3.iterations);
     try std.testing.expectEqual(@as(usize, 4), nsec3.salt.len);
     try std.testing.expectEqual(@as(usize, 20), nsec3.next_hashed_owner.len);
+}
+
+test "ResourceRecord.parseNSEC3PARAM rejects overflowing salt_length (SEC-SR-2)" {
+    // salt_length = 0xFF (255). The bound check `5 + salt_length` must not
+    // overflow u8: with rdlength = 5 it must return InvalidRdataLength.
+    const data = [_]u8{
+        1, 'a', 0, // name
+        0x00, 0x33, // NSEC3PARAM (51)
+        0x00, 0x01, // IN
+        0x00, 0x00, 0x0E, 0x10, // TTL
+        0x00, 0x05, // RDLENGTH: 5
+        0x01, // hash algorithm
+        0x00, // flags
+        0x00, 0x0A, // iterations
+        0xFF, // salt length: 255 (overflows `5 + salt_length` as u8)
+    };
+    const rr = try ResourceRecord.parse(&data, 0);
+    try std.testing.expectEqual(Type.nsec3param, rr.rtype);
+    try std.testing.expectError(error.InvalidRdataLength, rr.parseNSEC3PARAM());
 }
 
 test "ResourceRecord.hasTypeInBitmap" {

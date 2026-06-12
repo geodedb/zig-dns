@@ -692,14 +692,19 @@ const Tokenizer = struct {
 fn parseTTL(s: []const u8) ParseError!u32 {
     if (s.len == 0) return error.InvalidTTL;
 
-    var value: u32 = 0;
-    var current: u32 = 0;
+    // Accumulate in u64 and reject anything exceeding the u32 TTL range so a
+    // crafted digit string cannot panic (ReleaseSafe) or silently wrap
+    // (ReleaseFast) the TTL / SOA-timer fields.
+    const max_ttl = std.math.maxInt(u32);
+    var value: u64 = 0;
+    var current: u64 = 0;
 
     for (s) |c| {
         if (c >= '0' and c <= '9') {
             current = current * 10 + (c - '0');
+            if (current > max_ttl) return error.InvalidTTL;
         } else {
-            const multiplier: u32 = switch (c) {
+            const multiplier: u64 = switch (c) {
                 's', 'S' => 1,
                 'm', 'M' => 60,
                 'h', 'H' => 3600,
@@ -708,11 +713,14 @@ fn parseTTL(s: []const u8) ParseError!u32 {
                 else => return error.InvalidTTL,
             };
             value += current * multiplier;
+            if (value > max_ttl) return error.InvalidTTL;
             current = 0;
         }
     }
 
-    return value + current;
+    const total = value + current;
+    if (total > max_ttl) return error.InvalidTTL;
+    return @intCast(total);
 }
 
 /// Expand IPv6 address (handle :: shorthand)
@@ -772,6 +780,16 @@ test "parseTTL basic" {
     try std.testing.expectEqual(@as(u32, 86400), try parseTTL("1d"));
     try std.testing.expectEqual(@as(u32, 604800), try parseTTL("1w"));
     try std.testing.expectEqual(@as(u32, 90061), try parseTTL("1d1h1m1s"));
+    try std.testing.expectEqual(@as(u32, 4294967295), try parseTTL("4294967295")); // u32 max
+}
+
+test "parseTTL rejects values overflowing u32 (SEC-SR-4)" {
+    // Digit strings beyond u32 max must return InvalidTTL, not panic
+    // (ReleaseSafe) or silently wrap (ReleaseFast).
+    try std.testing.expectError(error.InvalidTTL, parseTTL("99999999999"));
+    try std.testing.expectError(error.InvalidTTL, parseTTL("4294967296")); // u32 max + 1
+    // Suffix multiplication must also be overflow-checked.
+    try std.testing.expectError(error.InvalidTTL, parseTTL("4294967295w"));
 }
 
 test "Class.fromString" {
