@@ -407,6 +407,15 @@ pub const Sig0Context = struct {
             return VerifyResult{ .valid = false, .error_reason = "Key tag mismatch" };
         }
 
+        // SECURITY (GAP-0870): bind the signature to the trusted key's owner
+        // name. Key tags are 16-bit non-cryptographic checksums that collide
+        // readily, so algorithm + key_tag alone must not select the key --
+        // the signer name in the SIG(0) record has to match the name the
+        // caller actually trusts.
+        if (!dnsNamesEqual(sig0.signer_name, public_key.name)) {
+            return VerifyResult{ .valid = false, .error_reason = "Signer name mismatch" };
+        }
+
         // Verify time validity
         const now: u32 = @intCast(@as(u64, @bitCast(timeSec())));
         if (now < sig0.sig_inception or now > sig0.sig_expiration) {
@@ -612,6 +621,15 @@ pub const VerifyResult = struct {
     key_tag: u16 = 0,
 };
 
+/// DNS-canonical name equality: case-insensitive (RFC 4343) and
+/// insensitive to a trailing root dot ("example.com." == "example.com").
+/// Used to bind a SIG(0) signer name to the trusted key name (GAP-0870).
+fn dnsNamesEqual(a: []const u8, b: []const u8) bool {
+    const a_trimmed = std.mem.trimEnd(u8, a, ".");
+    const b_trimmed = std.mem.trimEnd(u8, b, ".");
+    return std.ascii.eqlIgnoreCase(a_trimmed, b_trimmed);
+}
+
 /// Calculate DNSKEY key tag (RFC 4034 Appendix B)
 pub fn calculateKeyTag(algorithm: Algorithm, public_key: []const u8) u16 {
     // Build DNSKEY RDATA format
@@ -743,6 +761,66 @@ test "Sig0Context sign and verify" {
     // Verify
     const result = try ctx.verify(signed, &public_key);
     try std.testing.expect(result.valid);
+}
+
+test "GAP-0870: verify rejects signature when signer name differs from trusted key" {
+    const allocator = std.testing.allocator;
+
+    // Sign with a key named "test.example.com".
+    var key_pair = try Sig0KeyPair.generate(allocator, "test.example.com", .ed25519);
+    defer key_pair.deinit(allocator);
+
+    var ctx = Sig0Context.init(allocator);
+
+    const message = [_]u8{
+        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x07, 'e',  'x',  'a',
+        'm',  'p',  'l',  'e',  0x03, 'c',  'o',  'm',
+        0x00, 0x00, 0x01, 0x00, 0x01,
+    };
+    const signed = try ctx.sign(&message, &key_pair);
+    defer allocator.free(signed);
+
+    // Trusted key has the SAME key material, algorithm and (therefore)
+    // key tag -- 16-bit key tags collide readily -- but a DIFFERENT owner
+    // name. The signature must NOT be accepted for it.
+    const wrong_name_key = try Sig0PublicKey.fromDnskey("evil.example.com", .ed25519, key_pair.public_key);
+    const result = try ctx.verify(signed, &wrong_name_key);
+    try std.testing.expect(!result.valid);
+    try std.testing.expectEqualStrings("Signer name mismatch", result.error_reason.?);
+}
+
+test "GAP-0870: signer name comparison is case- and trailing-dot-insensitive" {
+    const allocator = std.testing.allocator;
+
+    var key_pair = try Sig0KeyPair.generate(allocator, "test.example.com", .ed25519);
+    defer key_pair.deinit(allocator);
+
+    var ctx = Sig0Context.init(allocator);
+
+    const message = [_]u8{
+        0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x07, 'e',  'x',  'a',
+        'm',  'p',  'l',  'e',  0x03, 'c',  'o',  'm',
+        0x00, 0x00, 0x01, 0x00, 0x01,
+    };
+    const signed = try ctx.sign(&message, &key_pair);
+    defer allocator.free(signed);
+
+    // DNS names compare case-insensitively, and an absolute (trailing-dot)
+    // form denotes the same name.
+    const public_key = try Sig0PublicKey.fromDnskey("TEST.Example.COM.", .ed25519, key_pair.public_key);
+    const result = try ctx.verify(signed, &public_key);
+    try std.testing.expect(result.valid);
+}
+
+test "GAP-0870: dnsNamesEqual canonical comparison" {
+    try std.testing.expect(dnsNamesEqual("example.com", "example.com"));
+    try std.testing.expect(dnsNamesEqual("EXAMPLE.com", "example.COM"));
+    try std.testing.expect(dnsNamesEqual("example.com.", "example.com"));
+    try std.testing.expect(!dnsNamesEqual("example.com", "example.org"));
+    try std.testing.expect(!dnsNamesEqual("sub.example.com", "example.com"));
+    try std.testing.expect(!dnsNamesEqual("", "example.com"));
 }
 
 test "SEC-C20: Sig0Record.parse does not panic on unknown algorithm" {
