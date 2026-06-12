@@ -25,6 +25,25 @@ const feature_doq = if (@hasDecl(build_options, "feature_doq")) build_options.fe
 ///
 /// Implementations must provide this interface to enable DoQ transport.
 /// The backend handles QUIC connection and stream management.
+/// Parameters a QUIC backend needs to establish a verified connection.
+/// Carries the certificate-verification name and CA bundle separately from the
+/// dial target so an IP-bootstrapped connection can still verify the server's
+/// identity (A5, #294).
+pub const QuicConnectOptions = struct {
+    /// Hostname the server certificate must be verified against (SNI).
+    server_name: []const u8,
+    /// Dial target host (may be an IP when bootstrapping).
+    host: []const u8,
+    /// Server port.
+    port: u16,
+    /// ALPN protocol (must be "doq" for RFC 9250).
+    alpn: []const u8 = "doq",
+    /// CA bundle in PEM for verification; empty means "use system trust".
+    ca_pem: []const u8 = "",
+    /// Connection timeout in milliseconds.
+    timeout_ms: u32 = 5000,
+};
+
 pub const QuicBackend = struct {
     /// Opaque context for the backend implementation
     ctx: *anyopaque,
@@ -35,10 +54,7 @@ pub const QuicBackend = struct {
         /// Connect to QUIC server
         connect: *const fn (
             ctx: *anyopaque,
-            host: []const u8,
-            port: u16,
-            alpn: []const u8,
-            timeout_ms: u32,
+            options: QuicConnectOptions,
         ) anyerror!void,
 
         /// Open a new bidirectional stream and send data
@@ -69,14 +85,8 @@ pub const QuicBackend = struct {
         isConnected: *const fn (ctx: *anyopaque) bool,
     };
 
-    pub fn connect(
-        self: QuicBackend,
-        host: []const u8,
-        port: u16,
-        alpn: []const u8,
-        timeout_ms: u32,
-    ) !void {
-        return self.vtable.connect(self.ctx, host, port, alpn, timeout_ms);
+    pub fn connect(self: QuicBackend, options: QuicConnectOptions) !void {
+        return self.vtable.connect(self.ctx, options);
     }
 
     pub fn openStream(self: QuicBackend, data: []const u8) !u64 {
@@ -175,14 +185,18 @@ pub const DoQTransport = struct {
 
         const backend = self.quic_backend orelse return error.NoQuicBackend;
 
-        // Ensure connected
+        // Ensure connected. Pass the verification name and CA bundle separately
+        // from the dial target so the backend can verify the server's identity
+        // even when connecting to a bootstrap IP (A5, #294).
         if (!self.connected) {
-            try backend.connect(
-                self.options.server_name,
-                self.options.addr.port,
-                self.options.alpn_doq,
-                timeout_ms,
-            );
+            try backend.connect(.{
+                .server_name = self.options.server_name,
+                .host = self.options.addr.host,
+                .port = self.options.addr.port,
+                .alpn = self.options.alpn_doq,
+                .ca_pem = self.options.ca_pem,
+                .timeout_ms = timeout_ms,
+            });
             self.connected = true;
         }
 
@@ -296,6 +310,8 @@ pub const MockQuicBackend = struct {
         host: []const u8,
         port: u16,
         alpn: []const u8,
+        server_name: []const u8 = "",
+        ca_pem: []const u8 = "",
     };
 
     const Self = @This();
@@ -347,14 +363,17 @@ pub const MockQuicBackend = struct {
         return entry.data_sent;
     }
 
-    fn connectImpl(ctx: *anyopaque, host: []const u8, port: u16, alpn: []const u8, timeout_ms: u32) anyerror!void {
-        _ = timeout_ms;
+    fn connectImpl(ctx: *anyopaque, options: QuicConnectOptions) anyerror!void {
         const self: *Self = @ptrCast(@alignCast(ctx));
 
+        // Record the verification name and CA so tests can assert they were
+        // threaded through (A5, #294).
         self.connection_info = .{
-            .host = host,
-            .port = port,
-            .alpn = alpn,
+            .host = options.host,
+            .port = options.port,
+            .alpn = options.alpn,
+            .server_name = options.server_name,
+            .ca_pem = options.ca_pem,
         };
         self.connected = true;
     }
@@ -625,8 +644,16 @@ test "MockQuicBackend basic" {
     const backend = mock.backend();
 
     // Connect
-    try backend.connect("dns.example.com", 853, "doq", 5000);
+    try backend.connect(.{
+        .server_name = "dns.example.com",
+        .host = "dns.example.com",
+        .port = 853,
+        .ca_pem = "test-ca",
+    });
     try std.testing.expect(backend.isConnected());
+    // A5 (#294): the verification name and CA bundle reach the backend.
+    try std.testing.expectEqualStrings("dns.example.com", mock.connection_info.server_name);
+    try std.testing.expectEqualStrings("test-ca", mock.connection_info.ca_pem);
 
     // Open stream
     const stream_id = try backend.openStream("test data");
