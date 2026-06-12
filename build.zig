@@ -351,6 +351,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "net_compat", .module = net_compat_mod },
+            .{ .name = "transport_io", .module = transport_io_mod },
         },
     });
 
@@ -1196,6 +1197,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "net_compat", .module = net_compat_mod },
+                .{ .name = "transport_io", .module = transport_io_mod },
             },
         }),
     });

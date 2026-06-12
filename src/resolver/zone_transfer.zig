@@ -18,6 +18,17 @@
 
 const std = @import("std");
 const parallel = @import("parallel");
+const net = @import("net_compat");
+const io = @import("transport_io");
+
+/// Wall-clock milliseconds. std.time.milliTimestamp was removed in Zig 0.16;
+/// axfr()/ixfr() are public but never referenced from a compiled path, so this
+/// breakage stayed dormant until the SR-6/SR-7 deadline work and the
+/// force-reference test below exercised them.
+inline fn timeMilli() i64 {
+    const io_inst = std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+}
 
 /// SOA record type value (RFC 1035 Section 3.2.2)
 /// Used to identify SOA records in zone transfer boundary detection.
@@ -282,33 +293,26 @@ pub const ZoneTransferClient = struct {
             }
         }
 
-        const start_time = std.time.milliTimestamp();
+        const start_time = timeMilli();
         var zone = Zone.init(self.allocator, zone_name);
         errdefer zone.deinit();
 
-        // Connect via TCP
-        const address = try std.net.Address.parseIp4(server_addr, port);
-        const stream = try std.net.tcpConnectToAddress(address);
-        defer stream.close();
-
-        // Set timeout
-        const timeout_sec = self.config.timeout_ms / 1000;
-        const timeout = std.posix.timeval{
-            .sec = @intCast(timeout_sec),
-            .usec = 0,
-        };
-        try std.posix.setsockopt(
-            stream.handle,
-            std.posix.SOL.SOCKET,
-            std.posix.SO.RCVTIMEO,
-            std.mem.asBytes(&timeout),
+        // Connect via TCP (net_compat + transport_io, like the TCP transport;
+        // std.net was removed in Zig 0.16). Per-op timeouts replace SO_RCVTIMEO.
+        const address = try net.Address.parseIp4(server_addr, port);
+        const sock = try net.socket(
+            address.any.family,
+            std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
+            std.os.linux.IPPROTO.TCP,
         );
+        defer net.close(sock);
+        try io.connectWithTimeout(sock, address, self.config.timeout_ms);
 
         // Build and send AXFR query
         const query = try self.buildTransferQuery(zone_name, .axfr);
         defer self.allocator.free(query);
 
-        try self.sendTcpMessage(stream, query);
+        try self.sendTcpMessage(sock, query);
 
         // Receive and parse responses
         var message_count: usize = 0;
@@ -320,19 +324,19 @@ pub const ZoneTransferClient = struct {
             // cap so a server that never sends the closing SOA (e.g. trickling
             // empty ancount=0 messages, which never trip max_records) cannot
             // hang the loop indefinitely.
-            if (transferDeadlineExceeded(start_time, std.time.milliTimestamp(), self.config.timeout_ms)) {
+            if (transferDeadlineExceeded(start_time, timeMilli(), self.config.timeout_ms)) {
                 zone.deinit();
                 return TransferResult{
                     .success = false,
                     .zone = null,
                     .record_count = 0,
                     .message_count = message_count,
-                    .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
+                    .duration_ms = @intCast(@max(0, timeMilli() - start_time)),
                     .error_message = "Transfer deadline exceeded",
                 };
             }
 
-            const response = try self.receiveTcpMessage(stream);
+            const response = try self.receiveTcpMessage(sock);
             defer self.allocator.free(response);
             message_count += 1;
 
@@ -343,7 +347,7 @@ pub const ZoneTransferClient = struct {
                     .zone = null,
                     .record_count = 0,
                     .message_count = message_count,
-                    .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
+                    .duration_ms = @intCast(@max(0, timeMilli() - start_time)),
                     .error_message = "Too many transfer messages",
                 };
             }
@@ -379,7 +383,7 @@ pub const ZoneTransferClient = struct {
                         .zone = null,
                         .record_count = count,
                         .message_count = message_count,
-                        .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
+                        .duration_ms = @intCast(@max(0, timeMilli() - start_time)),
                         .error_message = "Zone too large",
                     };
                 }
@@ -391,7 +395,7 @@ pub const ZoneTransferClient = struct {
             .zone = zone,
             .record_count = zone.recordCount(),
             .message_count = message_count,
-            .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
+            .duration_ms = @intCast(@max(0, timeMilli() - start_time)),
             .error_message = null,
         };
     }
@@ -424,21 +428,26 @@ pub const ZoneTransferClient = struct {
             }
         }
 
-        const start_time = std.time.milliTimestamp();
+        const start_time = timeMilli();
 
-        // Connect via TCP
-        const address = try std.net.Address.parseIp4(server_addr, port);
-        const stream = try std.net.tcpConnectToAddress(address);
-        defer stream.close();
+        // Connect via TCP (net_compat + transport_io; std.net removed in 0.16).
+        const address = try net.Address.parseIp4(server_addr, port);
+        const sock = try net.socket(
+            address.any.family,
+            std.posix.SOCK.STREAM | std.posix.SOCK.NONBLOCK,
+            std.os.linux.IPPROTO.TCP,
+        );
+        defer net.close(sock);
+        try io.connectWithTimeout(sock, address, self.config.timeout_ms);
 
         // Build and send IXFR query with SOA showing our current serial
         const query = try self.buildIxfrQuery(zone_name, current_serial);
         defer self.allocator.free(query);
 
-        try self.sendTcpMessage(stream, query);
+        try self.sendTcpMessage(sock, query);
 
         // Receive response
-        const response = try self.receiveTcpMessage(stream);
+        const response = try self.receiveTcpMessage(sock);
         defer self.allocator.free(response);
 
         // Parse IXFR response
@@ -460,7 +469,7 @@ pub const ZoneTransferClient = struct {
                     self.extractSerial(records[0].rdata)
                 else
                     current_serial,
-                .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
+                .duration_ms = @intCast(@max(0, timeMilli() - start_time)),
             };
         }
 
@@ -486,7 +495,7 @@ pub const ZoneTransferClient = struct {
             .is_full_zone = false,
             .changeset = changeset,
             .new_serial = changeset.new_serial,
-            .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
+            .duration_ms = @intCast(@max(0, timeMilli() - start_time)),
         };
     }
 
@@ -500,7 +509,8 @@ pub const ZoneTransferClient = struct {
         // Generate random ID
         // SECURITY: Fail-fast if entropy unavailable - predictable IDs enable cache poisoning
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+        const io_inst = std.Io.Threaded.global_single_threaded.io();
+        std.Io.randomSecure(io_inst, std.mem.asBytes(&seed)) catch {
             return error.EntropyUnavailable;
         };
         var prng = std.Random.DefaultPrng.init(seed);
@@ -532,7 +542,8 @@ pub const ZoneTransferClient = struct {
         // Generate random ID
         // SECURITY: Fail-fast if entropy unavailable - predictable IDs enable cache poisoning
         var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+        const io_inst = std.Io.Threaded.global_single_threaded.io();
+        std.Io.randomSecure(io_inst, std.mem.asBytes(&seed)) catch {
             return error.EntropyUnavailable;
         };
         var prng = std.Random.DefaultPrng.init(seed);
@@ -598,29 +609,23 @@ pub const ZoneTransferClient = struct {
         try buffer.append(self.allocator, 0); // Root label
     }
 
-    fn sendTcpMessage(self: *Self, stream: std.net.Stream, message: []const u8) !void {
-        _ = self;
+    fn sendTcpMessage(self: *Self, sock: std.posix.socket_t, message: []const u8) !void {
         // TCP DNS uses 2-byte length prefix; message must fit in u16
         if (message.len > std.math.maxInt(u16)) return error.MessageTooLarge;
         var length_prefix: [2]u8 = undefined;
         std.mem.writeInt(u16, &length_prefix, @intCast(message.len), .big);
 
-        // Use writeAll to ensure all bytes are sent (prevents partial write data loss)
-        try stream.writeAll(&length_prefix);
-        try stream.writeAll(message);
+        // writeAllWithTimeout ensures all bytes are sent and bounds the write.
+        try io.writeAllWithTimeout(sock, &length_prefix, self.config.timeout_ms);
+        try io.writeAllWithTimeout(sock, message, self.config.timeout_ms);
     }
 
-    fn receiveTcpMessage(self: *Self, stream: std.net.Stream) ![]u8 {
-        // Read length prefix - loop to ensure we get exactly 2 bytes
-        // A single read() may return only 1 byte on a slow or congested link;
-        // treating that as ConnectionClosed would be incorrect (SEC-C33/QH-08).
+    fn receiveTcpMessage(self: *Self, sock: std.posix.socket_t) ![]u8 {
+        // Read exactly 2 bytes for the length prefix. readExactWithTimeout
+        // loops internally (a single read may return 1 byte on a slow link)
+        // and returns error.ConnectionClosed on EOF (SEC-C33/QH-08).
         var length_buf: [2]u8 = undefined;
-        var len_read: usize = 0;
-        while (len_read < 2) {
-            const n = try stream.read(length_buf[len_read..]);
-            if (n == 0) return error.ConnectionClosed;
-            len_read += n;
-        }
+        try io.readExactWithTimeout(sock, &length_buf, self.config.timeout_ms);
 
         const message_len = std.mem.readInt(u16, &length_buf, .big);
         if (message_len > self.config.buffer_size) {
@@ -631,12 +636,7 @@ pub const ZoneTransferClient = struct {
         const message = try self.allocator.alloc(u8, message_len);
         errdefer self.allocator.free(message);
 
-        var total_read: usize = 0;
-        while (total_read < message_len) {
-            const n = try stream.read(message[total_read..]);
-            if (n == 0) return error.ConnectionClosed;
-            total_read += n;
-        }
+        try io.readExactWithTimeout(sock, message, self.config.timeout_ms);
 
         return message;
     }
@@ -933,6 +933,16 @@ pub fn parseRecordsParallel(
     results: []parallel.ParsedRecord,
 ) void {
     parallel.parallelZoneRecordParse(allocator, raw_records, results);
+}
+
+test "axfr/ixfr type-check (Zig 0.16 dormant-breakage guard)" {
+    // axfr() and ixfr() do real TCP I/O so they are not exercised directly by
+    // unit tests, which means Zig never semantically analyzes their bodies.
+    // Reference them so a removed-std-API (e.g. std.time.milliTimestamp) or
+    // other breakage in those public entry points fails the build instead of
+    // hiding until a consumer wires up zone transfer (Q-NEW-1).
+    _ = &ZoneTransferClient.axfr;
+    _ = &ZoneTransferClient.ixfr;
 }
 
 test "Zone basic operations" {
