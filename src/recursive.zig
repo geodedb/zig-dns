@@ -968,8 +968,8 @@ pub const RecursiveResolver = struct {
     /// DS-walk from the root (fetching DNSKEY/DS RRsets per delegation,
     /// dnssec.Validator.validateChainOfTrust) is NOT performed here; that
     /// depth is tracked separately. Signatures using algorithms this
-    /// library cannot verify (RSA, see SEC-004) are treated as insecure,
-    /// not bogus.
+    /// library cannot verify (e.g. deprecated RSA/SHA-1, GAP-0842) are
+    /// treated as insecure, not bogus.
     fn validateDnssecResponse(
         self: *Self,
         response: []const u8,
@@ -1128,8 +1128,8 @@ pub const RecursiveResolver = struct {
                         trusted_keys[t],
                     ) catch |err| switch (err) {
                         error.OutOfMemory => return error.OutOfMemory,
-                        // Unverifiable algorithm (e.g. RSA, SEC-004):
-                        // treated as insecure, not bogus.
+                        // Unverifiable algorithm (e.g. deprecated
+                        // RSA/SHA-1): treated as insecure, not bogus.
                         error.UnsupportedAlgorithm => {
                             rrset_unsupported = true;
                             continue;

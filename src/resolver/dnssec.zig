@@ -16,30 +16,22 @@
 //! | Ed25519 (15)    | Supported | Recommended for new deployments          |
 //! | ECDSA P-256 (13)| Supported | RFC 6605, widely supported               |
 //! | ECDSA P-384 (14)| Supported | RFC 6605, high security                  |
-//! | RSA-SHA256 (8)  | **NOT SUPPORTED** | See limitation below          |
-//! | RSA-SHA512 (10) | **NOT SUPPORTED** | See limitation below          |
-//! | RSA-SHA1 (5)    | **NOT SUPPORTED** | See limitation below          |
+//! | RSA-SHA256 (8)  | Supported | RFC 5702, via std.crypto.Certificate.rsa |
+//! | RSA-SHA512 (10) | Supported | RFC 5702, via std.crypto.Certificate.rsa |
+//! | RSA-SHA1 (5)    | **NOT SUPPORTED** | Deprecated (RFC 8624)            |
 //!
-//! ## IMPORTANT: RSA Algorithm Limitation (SEC-004)
+//! ## RSA Support (GAP-0842, formerly SEC-004)
 //!
-//! **RSA signature verification is NOT implemented.** This is a significant
-//! limitation because RSA-SHA256 (algorithm 8) is currently the most widely
-//! deployed DNSSEC algorithm. As of 2024, approximately 70-80% of DNSSEC-signed
-//! zones use RSA algorithms.
+//! RSA/SHA-256 (8) and RSA/SHA-512 (10) signatures are verified with
+//! RSASSA-PKCS1-v1_5 using `std.crypto.Certificate.rsa`. DNSKEY public
+//! keys are parsed from the RFC 3110 wire format (exponent length prefix,
+//! exponent, modulus); key sizes from 512 to 4096 bits are accepted. This
+//! covers the root zone and the majority of TLD zones, which sign with
+//! RSA-SHA256.
 //!
-//! **Impact:** This library cannot validate DNSSEC signatures for:
-//! - Most TLD zones (.com, .net, .org, etc.)
-//! - The root zone (uses RSA-SHA256)
-//! - Legacy zones not yet migrated to ECDSA/Ed25519
-//!
-//! **Workarounds:**
-//! 1. Use a full resolver (like Unbound or BIND) for DNSSEC validation
-//! 2. Integrate an external RSA crypto library (not included due to Zig's
-//!    goal of minimal C dependencies)
-//! 3. Limit validation to zones known to use ECDSA/Ed25519
-//!
-//! **Future:** RSA support may be added via optional external crypto bindings
-//! or when Zig's standard library includes RSA primitives.
+//! RSA/SHA-1 (5) remains intentionally unsupported: RFC 8624 forbids new
+//! signing with SHA-1 and validators are phasing it out. Zones signed only
+//! with RSA/SHA-1 validate as insecure rather than secure.
 //!
 //! For zones using unsupported algorithms, `verifySignature` returns
 //! `error.UnsupportedAlgorithm`.
@@ -543,12 +535,14 @@ pub const Validator = struct {
             .ed25519 => return verifyEd25519(public_key, message, signature),
             .ecdsap256sha256 => return verifyEcdsaP256(public_key, message, signature),
             .ecdsap384sha384 => return verifyEcdsaP384(public_key, message, signature),
-            .rsasha256, .rsasha512, .rsasha1 => {
-                // SEC-004: RSA signature verification is NOT IMPLEMENTED
-                // Zig's std.crypto does not include RSA primitives.
-                // See module documentation for details on this limitation.
-                // Most DNSSEC-signed zones (including root and major TLDs) use
-                // RSA-SHA256, so this is a significant limitation.
+            // GAP-0842: RSA/SHA-256 (8) and RSA/SHA-512 (10) via
+            // std.crypto.Certificate.rsa (RSASSA-PKCS1-v1_5, RFC 5702).
+            .rsasha256 => return verifyRsa(std.crypto.hash.sha2.Sha256, public_key, message, signature),
+            .rsasha512 => return verifyRsa(std.crypto.hash.sha2.Sha512, public_key, message, signature),
+            .rsasha1 => {
+                // RSA/SHA-1 (5) is deliberately NOT supported: SHA-1 is
+                // deprecated for DNSSEC (RFC 8624 says MUST NOT sign;
+                // validation is being phased out ecosystem-wide).
                 return error.UnsupportedAlgorithm;
             },
             else => return error.UnsupportedAlgorithm,
@@ -1010,6 +1004,63 @@ fn verifyEcdsaP384(public_key: []const u8, message: []const u8, signature: []con
 
     sig.verify(message, pk) catch return false;
     return true;
+}
+
+/// Verify an RSASSA-PKCS1-v1_5 DNSSEC signature (GAP-0842, RFC 5702).
+///
+/// `public_key` is the DNSKEY public key field in RFC 3110 wire format:
+/// a 1-byte exponent length (or a 0 byte followed by a 2-byte length for
+/// exponents longer than 255 bytes), the exponent, then the modulus.
+/// `Hash` selects the digest: SHA-256 for algorithm 8, SHA-512 for
+/// algorithm 10.
+fn verifyRsa(
+    comptime Hash: type,
+    public_key: []const u8,
+    message: []const u8,
+    signature: []const u8,
+) ValidationError!bool {
+    const rsa = std.crypto.Certificate.rsa;
+
+    // Parse RFC 3110 exponent length prefix
+    if (public_key.len < 3) return error.InvalidSignature;
+    var offset: usize = 1;
+    var exp_len: usize = public_key[0];
+    if (exp_len == 0) {
+        exp_len = std.mem.readInt(u16, public_key[1..3], .big);
+        offset = 3;
+    }
+    if (exp_len == 0) return error.InvalidSignature;
+    // Exponent must fit and leave at least one modulus byte
+    if (offset + exp_len >= public_key.len) return error.InvalidSignature;
+
+    const exponent = public_key[offset..][0..exp_len];
+    const modulus = public_key[offset + exp_len ..];
+
+    // RFC 3110 Section 3: the signature length equals the modulus length.
+    if (signature.len != modulus.len) return error.InvalidSignature;
+
+    const pk = rsa.PublicKey.fromBytes(exponent, modulus) catch
+        return error.InvalidSignature;
+
+    // PKCS#1 v1.5 verification needs a comptime modulus length; dispatch
+    // over RSA key sizes used in DNSSEC deployments (512..4096 bits).
+    switch (signature.len) {
+        inline 64, 96, 128, 192, 256, 384, 512 => |modulus_len| {
+            // EMSA-PKCS1-v1_5 requires emLen >= tLen + 11 (RFC 8017
+            // Section 9.2); tLen is the 19-byte DigestInfo prefix plus
+            // the digest. Keys too small for the digest cannot carry a
+            // valid signature (e.g. SHA-512 with a 512-bit modulus).
+            if (comptime modulus_len >= Hash.digest_length + 30) {
+                const sig = rsa.PKCS1v1_5Signature.fromBytes(modulus_len, signature);
+                rsa.PKCS1v1_5Signature.verify(modulus_len, sig, message, pk, Hash) catch
+                    return false;
+                return true;
+            } else {
+                return error.InvalidSignature;
+            }
+        },
+        else => return error.UnsupportedAlgorithm,
+    }
 }
 
 /// Append canonical (lowercase) name to buffer
@@ -2338,6 +2389,176 @@ test "GAP-0841: RRSIG over the wildcard owner itself verifies (leftmost * does n
     // the owner is used as-is and the signature verifies.
     const rrset = [_]ResourceRecord{rr};
     try std.testing.expect(try validator.verifyRrsig(rrsig, &rrset, dnskey));
+}
+
+// =========================================================================
+// GAP-0842: RSA DNSSEC verification (RFC 5702 algorithms 8 and 10)
+// =========================================================================
+
+/// Test helper: decode base64 into a freshly allocated buffer.
+fn b64Decode(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
+    const len = try std.base64.standard.Decoder.calcSizeForSlice(encoded);
+    const buf = try allocator.alloc(u8, len);
+    errdefer allocator.free(buf);
+    try std.base64.standard.Decoder.decode(buf, encoded);
+    return buf;
+}
+
+/// RFC 5702 shared test fixture: www.example.net. 3600 IN A 192.0.2.91
+/// signed at inception 2000-01-01T00:00:00Z, expiration 2030-01-01T00:00:00Z.
+const rfc5702_owner: []const u8 = "\x03www\x07example\x03net\x00";
+const rfc5702_signer: []const u8 = "\x07example\x03net\x00";
+const rfc5702_inception: u32 = 946684800; // 20000101000000
+const rfc5702_expiration: u32 = 1893456000; // 20300101000000
+
+fn rfc5702Rrsig(algorithm: DnssecAlgorithm, key_tag: u16, signature: []const u8) RrsigData {
+    return RrsigData{
+        .type_covered = .a,
+        .algorithm = algorithm,
+        .labels = 3,
+        .original_ttl = 3600,
+        .sig_expiration = rfc5702_expiration,
+        .sig_inception = rfc5702_inception,
+        .key_tag = key_tag,
+        .signer = .{ .labels = rfc5702_signer, .wire_length = rfc5702_signer.len },
+        .signature = signature,
+        .sig_offset = 0,
+    };
+}
+
+test "GAP-0842: RFC 5702 Section 6.1 RSA/SHA-256 signature verifies" {
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+    validator.setCurrentTime(1_700_000_000);
+
+    // DNSKEY public key (RFC 3110 wire format) from RFC 5702 Section 6.1
+    const pubkey = try b64Decode(allocator, "AwEAAcFcGsaxxdgiuuGmCkVImy4h99CqT7jwY3pexPGcnUFtR2Fh36BponcwtkZ4cAgtvd4Qs8PkxUdp6p/DlUmObdk=");
+    defer allocator.free(pubkey);
+
+    // Verify the key tag matches the RFC's stated id = 9033
+    const dnskey_rdata = try std.mem.concat(allocator, u8, &.{ &[_]u8{ 0x01, 0x00, 0x03, 0x08 }, pubkey });
+    defer allocator.free(dnskey_rdata);
+    try std.testing.expectEqual(@as(u16, 9033), ResourceRecord.calculateKeyTag(dnskey_rdata));
+
+    const signature = try b64Decode(allocator, "kRCOH6u7l0QGy9qpC9l1sLncJcOKFLJ7GhiUOibu4teYp5VE9RncriShZNz85mwlMgNEacFYK/lPtPiVYP4bwg==");
+    defer allocator.free(signature);
+
+    var a_rdata = [_]u8{ 192, 0, 2, 91 };
+    const rr = makeTestARecord(rfc5702_owner, &a_rdata);
+    const rrsig = rfc5702Rrsig(.rsasha256, 9033, signature);
+    const dnskey = DnskeyData{
+        .flags = .{ .raw = 0x0100 },
+        .protocol = 3,
+        .algorithm = .rsasha256,
+        .public_key = pubkey,
+    };
+
+    const rrset = [_]ResourceRecord{rr};
+    try std.testing.expect(try validator.verifyRrsig(rrsig, &rrset, dnskey));
+}
+
+test "GAP-0842: RFC 5702 Section 6.1 RSA/SHA-256 rejects tampered RRset" {
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+    validator.setCurrentTime(1_700_000_000);
+
+    const pubkey = try b64Decode(allocator, "AwEAAcFcGsaxxdgiuuGmCkVImy4h99CqT7jwY3pexPGcnUFtR2Fh36BponcwtkZ4cAgtvd4Qs8PkxUdp6p/DlUmObdk=");
+    defer allocator.free(pubkey);
+    const signature = try b64Decode(allocator, "kRCOH6u7l0QGy9qpC9l1sLncJcOKFLJ7GhiUOibu4teYp5VE9RncriShZNz85mwlMgNEacFYK/lPtPiVYP4bwg==");
+    defer allocator.free(signature);
+
+    // Tampered address: 192.0.2.92 instead of 192.0.2.91
+    var a_rdata = [_]u8{ 192, 0, 2, 92 };
+    const rr = makeTestARecord(rfc5702_owner, &a_rdata);
+    const rrsig = rfc5702Rrsig(.rsasha256, 9033, signature);
+    const dnskey = DnskeyData{
+        .flags = .{ .raw = 0x0100 },
+        .protocol = 3,
+        .algorithm = .rsasha256,
+        .public_key = pubkey,
+    };
+
+    const rrset = [_]ResourceRecord{rr};
+    try std.testing.expect(!(try validator.verifyRrsig(rrsig, &rrset, dnskey)));
+}
+
+test "GAP-0842: RFC 5702 Section 6.2 RSA/SHA-512 signature verifies" {
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+    validator.setCurrentTime(1_700_000_000);
+
+    // DNSKEY public key (RFC 3110 wire format) from RFC 5702 Section 6.2
+    const pubkey = try b64Decode(allocator, "AwEAAdHoNTOW+et86KuJOWRDp1pndvwb6Y83nSVXXyLA3DLroROUkN6X0O6pnWnjJQujX/AyhqFDxj13tOnD9u/1kTg7cV6rklMrZDtJCQ5PCl/D7QNPsgVsMu1J2Q8gpMpztNFLpPBz1bWXjDtaR7ZQBlZ3PFY12ZTSncorffcGmhOL");
+    defer allocator.free(pubkey);
+
+    // Verify the key tag matches the RFC's stated id = 3740
+    const dnskey_rdata = try std.mem.concat(allocator, u8, &.{ &[_]u8{ 0x01, 0x00, 0x03, 0x0A }, pubkey });
+    defer allocator.free(dnskey_rdata);
+    try std.testing.expectEqual(@as(u16, 3740), ResourceRecord.calculateKeyTag(dnskey_rdata));
+
+    const signature = try b64Decode(allocator, "tsb4wnjRUDnB1BUi+t6TMTXThjVnG+eCkWqjvvjhzQL1d0YRoOe0CbxrVDYd0xDtsuJRaeUw1ep94PzEWzr0iGYgZBWm/zpq+9fOuagYJRfDqfReKBzMweOLDiNa8iP5g9vMhpuv6OPlvpXwm9Sa9ZXIbNl1MBGk0fthPgxdDLw=");
+    defer allocator.free(signature);
+
+    var a_rdata = [_]u8{ 192, 0, 2, 91 };
+    const rr = makeTestARecord(rfc5702_owner, &a_rdata);
+    const rrsig = rfc5702Rrsig(.rsasha512, 3740, signature);
+    const dnskey = DnskeyData{
+        .flags = .{ .raw = 0x0100 },
+        .protocol = 3,
+        .algorithm = .rsasha512,
+        .public_key = pubkey,
+    };
+
+    const rrset = [_]ResourceRecord{rr};
+    try std.testing.expect(try validator.verifyRrsig(rrsig, &rrset, dnskey));
+}
+
+test "GAP-0842: RSA/SHA-1 (algorithm 5) remains unsupported (deprecated)" {
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+    validator.setCurrentTime(1_700_000_000);
+
+    const pubkey = try b64Decode(allocator, "AwEAAcFcGsaxxdgiuuGmCkVImy4h99CqT7jwY3pexPGcnUFtR2Fh36BponcwtkZ4cAgtvd4Qs8PkxUdp6p/DlUmObdk=");
+    defer allocator.free(pubkey);
+
+    var a_rdata = [_]u8{ 192, 0, 2, 91 };
+    const rr = makeTestARecord(rfc5702_owner, &a_rdata);
+    const rrsig = rfc5702Rrsig(.rsasha1, 9033, &[_]u8{0} ** 64);
+    const dnskey = DnskeyData{
+        .flags = .{ .raw = 0x0100 },
+        .protocol = 3,
+        .algorithm = .rsasha1,
+        .public_key = pubkey,
+    };
+
+    const rrset = [_]ResourceRecord{rr};
+    try std.testing.expectError(
+        error.UnsupportedAlgorithm,
+        validator.verifyRrsig(rrsig, &rrset, dnskey),
+    );
+}
+
+test "GAP-0842: RSA rejects malformed RFC 3110 public keys" {
+    // Too short to contain exponent length + exponent + modulus
+    try std.testing.expectError(
+        error.InvalidSignature,
+        verifyRsa(std.crypto.hash.sha2.Sha256, &[_]u8{0x03}, "msg", &[_]u8{0} ** 64),
+    );
+    // Exponent length runs past the key data (no modulus left)
+    try std.testing.expectError(
+        error.InvalidSignature,
+        verifyRsa(std.crypto.hash.sha2.Sha256, &[_]u8{ 0x10, 0x01, 0x00, 0x01 }, "msg", &[_]u8{0} ** 64),
+    );
+    // Signature length not matching the modulus length
+    const pubkey = [_]u8{ 0x01, 0x03 } ++ [_]u8{0xAB} ** 64;
+    try std.testing.expectError(
+        error.InvalidSignature,
+        verifyRsa(std.crypto.hash.sha2.Sha256, &pubkey, "msg", &[_]u8{0} ** 63),
+    );
 }
 
 test "isNameInZone: root zone matches everything" {

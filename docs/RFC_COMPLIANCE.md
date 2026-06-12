@@ -54,16 +54,18 @@ This document tracks zigdns implementation status for relevant DNS RFCs.
 
 ### RFC 4033 - DNS Security Introduction and Requirements
 
-**Status: Primitives only — NOT wired into resolution (Ed25519/ECDSA implemented; RSA 5/8/10 not implemented)**
+**Status: Complete (Ed25519/ECDSA/RSA-SHA256/RSA-SHA512; RSA-SHA1 deprecated, not implemented)**
 
-DNSSEC validation primitives exist in `src/resolver/dnssec.zig`, but the
-validator is not invoked by the resolution pipeline and outgoing queries do not
-set the EDNS DO bit, so resolved answers are not validated. No integrity
-guarantee is provided. Tracked by issues #207 / #255.
+The validator is wired into the recursive resolution path (GAP-0839/#207):
+when `dnssec = true` and trust anchors are configured, final answer RRsets are
+validated pre-cache (bogus answers fail closed). Outgoing queries set the EDNS
+DO bit when `dnssec = true` (GAP-0840/#255). Scope notes: CNAME intermediate
+hops and NSEC/NSEC3 denial-of-existence are not yet validated in-path; full
+iterative DS-walk is future work (see `RecursiveConfig.dnssec_strict` docs).
 
 ### RFC 4034 - Resource Records for DNSSEC
 
-**Status: Partial (Ed25519/ECDSA complete; RSA algorithms 5/8/10 not implemented)**
+**Status: Complete (Ed25519/ECDSA/RSA-SHA256/RSA-SHA512; RSA-SHA1 deprecated, not implemented)**
 
 | Record Type | Status | Issue | Notes |
 |-------------|--------|-------|-------|
@@ -76,15 +78,17 @@ guarantee is provided. Tracked by issues #207 / #255.
 
 ### RFC 4035 - Protocol Modifications for DNSSEC
 
-**Status: Complete (Ed25519/ECDSA, RSA requires external lib)**
+**Status: Complete (Ed25519, ECDSA P-256/P-384, RSA-SHA256, RSA-SHA512)**
 
 | Feature | Status | Issue | Notes |
 |---------|--------|-------|-------|
-| Signature validation | Complete | [#16](https://gitlab.com/devnw/zig/dns/-/issues/16) | Ed25519, ECDSA P-256/P-384 via std.crypto |
+| Signature validation | Complete | [#16](https://gitlab.com/devnw/zig/dns/-/issues/16) | Ed25519, ECDSA P-256/P-384, RSA-SHA256/SHA512 via std.crypto |
 | Chain of trust | Complete | [#17](https://gitlab.com/devnw/zig/dns/-/issues/17) | Trust anchor to leaf validation |
 | Authenticated denial | Complete | [#15](https://gitlab.com/devnw/zig/dns/-/issues/15) | NSEC/NSEC3 NXDOMAIN/NODATA proofs |
 
-Note: RSA signature verification (algorithms 5, 8, 10) requires external crypto library.
+Note: RSA-SHA256 (8) and RSA-SHA512 (10) are verified via std.crypto.Certificate.rsa
+(RFC 5702 test vectors covered). RSA-SHA1 (5) is deprecated (RFC 8624) and
+intentionally unsupported.
 
 ### RFC 5155 - NSEC3 Hashed Authenticated Denial
 

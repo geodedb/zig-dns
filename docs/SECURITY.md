@@ -185,10 +185,11 @@ var resolver = try RecursiveResolver.init(allocator, config);
 | Ed25519 (15) | Supported | Recommended |
 | ECDSA P-256 (13) | Supported | Widely compatible |
 | ECDSA P-384 (14) | Supported | High security |
-| RSA-SHA256 (8) | **NOT SUPPORTED** | Most common, limitation |
-| RSA-SHA512 (10) | **NOT SUPPORTED** | Limitation |
+| RSA-SHA256 (8) | Supported | RFC 5702 (most common) |
+| RSA-SHA512 (10) | Supported | RFC 5702 |
+| RSA-SHA1 (5) | **NOT SUPPORTED** | Deprecated (RFC 8624) |
 
-**Note:** RSA algorithms are not implemented. See `src/resolver/dnssec.zig` for details. For full DNSSEC validation, consider using an external resolver.
+**Note:** RSA-SHA256/RSA-SHA512 verification uses RSASSA-PKCS1-v1_5 via `std.crypto.Certificate.rsa` (key sizes 512-4096 bits). RSA-SHA1 is deprecated and intentionally rejected; zones signed only with it validate as insecure. See `src/resolver/dnssec.zig` for details.
 
 ## Input Validation
 
