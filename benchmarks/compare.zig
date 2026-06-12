@@ -28,8 +28,10 @@ const TierData = struct {
     name_encode_ns: f64 = 0,
     name_decode_ns: f64 = 0,
     record_parse_ns: f64 = 0,
-    cache_put_ns: f64 = 0,
-    cache_get_ns: f64 = 0,
+    dns_cache_put_ns: f64 = 0,
+    dns_cache_get_ns: f64 = 0,
+    legacy_cache_put_ns: f64 = 0,
+    legacy_cache_get_ns: f64 = 0,
     parallel_parse_ms: f64 = 0,
     skipped: bool = false,
 };
@@ -71,11 +73,17 @@ fn getNameDecode(t: TierData) f64 {
 fn getRecordParse(t: TierData) f64 {
     return t.record_parse_ns;
 }
-fn getCachePut(t: TierData) f64 {
-    return t.cache_put_ns;
+fn getDnsCachePut(t: TierData) f64 {
+    return t.dns_cache_put_ns;
 }
-fn getCacheGet(t: TierData) f64 {
-    return t.cache_get_ns;
+fn getDnsCacheGet(t: TierData) f64 {
+    return t.dns_cache_get_ns;
+}
+fn getLegacyCachePut(t: TierData) f64 {
+    return t.legacy_cache_put_ns;
+}
+fn getLegacyCacheGet(t: TierData) f64 {
+    return t.legacy_cache_get_ns;
 }
 fn getParallelParse(t: TierData) f64 {
     return t.parallel_parse_ms;
@@ -87,8 +95,10 @@ const metrics = [_]Metric{
     .{ .name = "name_encode_ns", .kind = .lower_is_better, .get = getNameEncode },
     .{ .name = "name_decode_ns", .kind = .lower_is_better, .get = getNameDecode },
     .{ .name = "record_parse_ns", .kind = .lower_is_better, .get = getRecordParse },
-    .{ .name = "cache_put_ns", .kind = .lower_is_better, .get = getCachePut },
-    .{ .name = "cache_get_ns", .kind = .lower_is_better, .get = getCacheGet },
+    .{ .name = "dns_cache_put_ns", .kind = .lower_is_better, .get = getDnsCachePut },
+    .{ .name = "dns_cache_get_ns", .kind = .lower_is_better, .get = getDnsCacheGet },
+    .{ .name = "legacy_cache_put_ns", .kind = .lower_is_better, .get = getLegacyCachePut },
+    .{ .name = "legacy_cache_get_ns", .kind = .lower_is_better, .get = getLegacyCacheGet },
     .{ .name = "parallel_parse_ms", .kind = .lower_is_better, .get = getParallelParse },
 };
 

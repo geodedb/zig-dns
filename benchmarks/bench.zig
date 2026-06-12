@@ -4,7 +4,8 @@
 //! Performance benchmark harness for the dns library.
 //!
 //! Benchmarks: message parse, message build, name encode, name decode,
-//! record parse, cache put, cache get, EDNS parse/build, parallel zone parse.
+//! record parse, production DnsCache put/get, legacy cache put/get,
+//! EDNS parse/build, parallel zone parse.
 //!
 //! Run via: zig build bench
 
@@ -252,7 +253,7 @@ fn makeResourceRecord() ResourceRecord {
     };
 }
 
-fn benchCachePut(allocator: std.mem.Allocator) BenchResult {
+fn benchLegacyCachePut(allocator: std.mem.Allocator) BenchResult {
     var cache = dns.cache.Cache.init(allocator, 10_000);
     defer cache.deinit();
 
@@ -274,10 +275,10 @@ fn benchCachePut(allocator: std.mem.Allocator) BenchResult {
     }
     const elapsed = nowNs() - start_ns;
 
-    return .{ .name = "cache put", .count = allocated, .total_ns = elapsed };
+    return .{ .name = "legacy_cache_put", .count = allocated, .total_ns = elapsed };
 }
 
-fn benchCacheGet(allocator: std.mem.Allocator) BenchResult {
+fn benchLegacyCacheGet(allocator: std.mem.Allocator) BenchResult {
     var cache = dns.cache.Cache.init(allocator, 10_000);
     defer cache.deinit();
 
@@ -303,7 +304,74 @@ fn benchCacheGet(allocator: std.mem.Allocator) BenchResult {
     }
     const elapsed = nowNs() - start_ns;
 
-    return .{ .name = "cache get", .count = CACHE_GET_COUNT, .total_ns = elapsed };
+    return .{ .name = "legacy_cache_get", .count = CACHE_GET_COUNT, .total_ns = elapsed };
+}
+
+// GAP-0859: benchmark the production O(1) LRU DnsCache (used by the
+// client and recursive resolver), not just the legacy O(n) dns.cache.Cache.
+
+fn benchDnsCachePut(allocator: std.mem.Allocator) BenchResult {
+    var sys_clock = dns.client.systemClock();
+    var cache = dns.client.DnsCache.init(
+        allocator,
+        .{ .max_entries = 10_000 },
+        sys_clock.clock(),
+    );
+    defer cache.deinit();
+
+    const rdata = [_]u8{ 192, 0, 2, 1 };
+
+    // Build domain names ahead of time
+    var domains: [CACHE_PUT_COUNT][]u8 = undefined;
+    var allocated: usize = 0;
+    defer for (domains[0..allocated]) |d| allocator.free(d);
+
+    for (0..CACHE_PUT_COUNT) |i| {
+        domains[i] = std.fmt.allocPrint(allocator, "host-{d}.example.com", .{i}) catch break;
+        allocated = i + 1;
+    }
+
+    const start_ns = nowNs();
+    for (domains[0..allocated]) |domain| {
+        cache.putRecord(domain, .a, .in, &rdata, 300) catch continue;
+    }
+    const elapsed = nowNs() - start_ns;
+
+    return .{ .name = "dns_cache_put", .count = allocated, .total_ns = elapsed };
+}
+
+fn benchDnsCacheGet(allocator: std.mem.Allocator) BenchResult {
+    var sys_clock = dns.client.systemClock();
+    var cache = dns.client.DnsCache.init(
+        allocator,
+        .{ .max_entries = 10_000 },
+        sys_clock.clock(),
+    );
+    defer cache.deinit();
+
+    const rdata = [_]u8{ 192, 0, 2, 1 };
+
+    // Populate cache first
+    const pop_count = @min(CACHE_GET_COUNT, 10_000);
+    var domains: [10_000][]u8 = undefined;
+    var allocated: usize = 0;
+    defer for (domains[0..allocated]) |d| allocator.free(d);
+
+    for (0..pop_count) |i| {
+        domains[i] = std.fmt.allocPrint(allocator, "host-{d}.example.com", .{i}) catch break;
+        allocated = i + 1;
+        cache.putRecord(domains[i], .a, .in, &rdata, 300) catch continue;
+    }
+
+    const start_ns = nowNs();
+    for (0..CACHE_GET_COUNT) |i| {
+        const idx = i % allocated;
+        const result = cache.get(domains[idx], .a, .in);
+        std.mem.doNotOptimizeAway(&result);
+    }
+    const elapsed = nowNs() - start_ns;
+
+    return .{ .name = "dns_cache_get", .count = CACHE_GET_COUNT, .total_ns = elapsed };
 }
 
 fn benchEdnsParse() BenchResult {
@@ -363,8 +431,10 @@ pub fn main() !void {
     printResult(benchNameEncode(allocator));
     printResult(benchNameDecode(allocator));
     printResult(benchRecordParse());
-    printResult(benchCachePut(allocator));
-    printResult(benchCacheGet(allocator));
+    printResult(benchDnsCachePut(allocator));
+    printResult(benchDnsCacheGet(allocator));
+    printResult(benchLegacyCachePut(allocator));
+    printResult(benchLegacyCacheGet(allocator));
     printResult(benchEdnsParse());
     printResult(benchParallelZoneParse(allocator));
 

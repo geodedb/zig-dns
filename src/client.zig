@@ -33,6 +33,10 @@ pub const RecursiveResolver = recursive_mod.RecursiveResolver;
 pub const DnsCache = dns_cache_mod.DnsCache;
 pub const PackedRdataIterator = dns_cache_mod.PackedRdataIterator;
 pub const CachePrefetcher = cache_prefetch_mod.CachePrefetcher;
+/// Re-exported so external consumers (and the benchmark harness) can
+/// construct a standalone DnsCache with the real system clock (GAP-0859).
+pub const SystemClock = clock_mod.SystemClock;
+pub const systemClock = clock_mod.systemClock;
 
 /// DNS Client mode
 pub const Mode = enum {

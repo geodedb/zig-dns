@@ -127,8 +127,12 @@ const TierResult = struct {
     name_encode_ns: f64,
     name_decode_ns: f64,
     record_parse_ns: f64,
-    cache_put_ns: f64,
-    cache_get_ns: f64,
+    /// Production O(1) LRU DnsCache (GAP-0859)
+    dns_cache_put_ns: f64,
+    dns_cache_get_ns: f64,
+    /// Legacy O(n) dns.cache.Cache (kept for comparison)
+    legacy_cache_put_ns: f64,
+    legacy_cache_get_ns: f64,
     parallel_parse_ms: f64,
     skipped: bool = false,
     skip_reason: ?[]const u8 = null,
@@ -260,7 +264,7 @@ fn makeResourceRecord() ResourceRecord {
     };
 }
 
-fn benchCachePut(allocator: std.mem.Allocator, count: usize, cache_size: usize) f64 {
+fn benchLegacyCachePut(allocator: std.mem.Allocator, count: usize, cache_size: usize) f64 {
     var cache = dns.cache.Cache.init(allocator, cache_size);
     defer cache.deinit();
 
@@ -288,7 +292,7 @@ fn benchCachePut(allocator: std.mem.Allocator, count: usize, cache_size: usize) 
     return if (count_f > 0) ns_f / count_f else 0;
 }
 
-fn benchCacheGet(allocator: std.mem.Allocator, count: usize, cache_size: usize) f64 {
+fn benchLegacyCacheGet(allocator: std.mem.Allocator, count: usize, cache_size: usize) f64 {
     var cache = dns.cache.Cache.init(allocator, cache_size);
     defer cache.deinit();
 
@@ -307,6 +311,86 @@ fn benchCacheGet(allocator: std.mem.Allocator, count: usize, cache_size: usize) 
             break;
         };
         cache.put(d, rr) catch continue;
+    }
+
+    if (domains.items.len == 0) return 0;
+
+    const timer_start: u64 = nowNs();
+    for (0..count) |i| {
+        const idx = i % domains.items.len;
+        const result = cache.get(domains.items[idx], .a, .in);
+        std.mem.doNotOptimizeAway(&result);
+    }
+    const elapsed = nowNs() - timer_start;
+
+    const ns_f: f64 = @floatFromInt(elapsed);
+    const count_f: f64 = @floatFromInt(count);
+    return ns_f / count_f;
+}
+
+// GAP-0859: benchmark the production O(1) LRU DnsCache (used by the
+// client and recursive resolver), not just the legacy O(n) cache.
+
+fn benchDnsCachePut(allocator: std.mem.Allocator, count: usize, cache_size: usize) f64 {
+    var sys_clock = dns.client.systemClock();
+    var cache = dns.client.DnsCache.init(
+        allocator,
+        .{ .max_entries = cache_size },
+        sys_clock.clock(),
+    );
+    defer cache.deinit();
+
+    const rdata = [_]u8{ 192, 0, 2, 1 };
+
+    var domains: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (domains.items) |d| allocator.free(d);
+        domains.deinit(allocator);
+    }
+
+    for (0..count) |i| {
+        const d = std.fmt.allocPrint(allocator, "h{d}.example.com", .{i}) catch break;
+        domains.append(allocator, d) catch {
+            allocator.free(d);
+            break;
+        };
+    }
+
+    const timer_start: u64 = nowNs();
+    for (domains.items) |domain| {
+        cache.putRecord(domain, .a, .in, &rdata, 300) catch continue;
+    }
+    const elapsed = nowNs() - timer_start;
+
+    const ns_f: f64 = @floatFromInt(elapsed);
+    const count_f: f64 = @floatFromInt(domains.items.len);
+    return if (count_f > 0) ns_f / count_f else 0;
+}
+
+fn benchDnsCacheGet(allocator: std.mem.Allocator, count: usize, cache_size: usize) f64 {
+    var sys_clock = dns.client.systemClock();
+    var cache = dns.client.DnsCache.init(
+        allocator,
+        .{ .max_entries = cache_size },
+        sys_clock.clock(),
+    );
+    defer cache.deinit();
+
+    const rdata = [_]u8{ 192, 0, 2, 1 };
+    const pop = @min(count, cache_size);
+    var domains: std.ArrayListUnmanaged([]u8) = .empty;
+    defer {
+        for (domains.items) |d| allocator.free(d);
+        domains.deinit(allocator);
+    }
+
+    for (0..pop) |i| {
+        const d = std.fmt.allocPrint(allocator, "h{d}.example.com", .{i}) catch break;
+        domains.append(allocator, d) catch {
+            allocator.free(d);
+            break;
+        };
+        cache.putRecord(d, .a, .in, &rdata, 300) catch continue;
     }
 
     if (domains.items.len == 0) return 0;
@@ -360,8 +444,10 @@ fn runTier(allocator: std.mem.Allocator, tier: Tier) TierResult {
             .name_encode_ns = 0,
             .name_decode_ns = 0,
             .record_parse_ns = 0,
-            .cache_put_ns = 0,
-            .cache_get_ns = 0,
+            .dns_cache_put_ns = 0,
+            .dns_cache_get_ns = 0,
+            .legacy_cache_put_ns = 0,
+            .legacy_cache_get_ns = 0,
             .parallel_parse_ms = 0,
             .skipped = true,
             .skip_reason = "timeout",
@@ -371,8 +457,10 @@ fn runTier(allocator: std.mem.Allocator, tier: Tier) TierResult {
     const name_enc = benchNameEncode(allocator, tier.name_count);
     const name_dec = benchNameDecode(allocator, tier.name_count);
     const rec_parse = benchRecordParse(tier.record_count);
-    const cache_put = benchCachePut(allocator, tier.cache_ops, tier.cache_size);
-    const cache_get = benchCacheGet(allocator, tier.cache_ops, tier.cache_size);
+    const dns_cache_put = benchDnsCachePut(allocator, tier.cache_ops, tier.cache_size);
+    const dns_cache_get = benchDnsCacheGet(allocator, tier.cache_ops, tier.cache_size);
+    const legacy_cache_put = benchLegacyCachePut(allocator, tier.cache_ops, tier.cache_size);
+    const legacy_cache_get = benchLegacyCacheGet(allocator, tier.cache_ops, tier.cache_size);
     const parallel_ms = benchParallelParse(allocator, tier.parallel_records);
 
     return .{
@@ -383,8 +471,10 @@ fn runTier(allocator: std.mem.Allocator, tier: Tier) TierResult {
         .name_encode_ns = name_enc,
         .name_decode_ns = name_dec,
         .record_parse_ns = rec_parse,
-        .cache_put_ns = cache_put,
-        .cache_get_ns = cache_get,
+        .dns_cache_put_ns = dns_cache_put,
+        .dns_cache_get_ns = dns_cache_get,
+        .legacy_cache_put_ns = legacy_cache_put,
+        .legacy_cache_get_ns = legacy_cache_get,
         .parallel_parse_ms = parallel_ms,
     };
 }
@@ -416,8 +506,10 @@ fn writeJson(allocator: std.mem.Allocator, results: []const TierResult) !void {
         try json.print(allocator, "      \"name_encode_ns\": {d:.1},\n", .{r.name_encode_ns});
         try json.print(allocator, "      \"name_decode_ns\": {d:.1},\n", .{r.name_decode_ns});
         try json.print(allocator, "      \"record_parse_ns\": {d:.1},\n", .{r.record_parse_ns});
-        try json.print(allocator, "      \"cache_put_ns\": {d:.1},\n", .{r.cache_put_ns});
-        try json.print(allocator, "      \"cache_get_ns\": {d:.1},\n", .{r.cache_get_ns});
+        try json.print(allocator, "      \"dns_cache_put_ns\": {d:.1},\n", .{r.dns_cache_put_ns});
+        try json.print(allocator, "      \"dns_cache_get_ns\": {d:.1},\n", .{r.dns_cache_get_ns});
+        try json.print(allocator, "      \"legacy_cache_put_ns\": {d:.1},\n", .{r.legacy_cache_put_ns});
+        try json.print(allocator, "      \"legacy_cache_get_ns\": {d:.1},\n", .{r.legacy_cache_get_ns});
         try json.print(allocator, "      \"parallel_parse_ms\": {d:.2},\n", .{r.parallel_parse_ms});
         try json.print(allocator, "      \"skipped\": {}\n", .{r.skipped});
 
@@ -467,7 +559,7 @@ pub fn main(init: std.process.Init) !void {
     print("  dns scale benchmark suite\n", .{});
     print("{s}\n\n", .{"=" ** 90});
     print("  {s:<6} {s:>16} {s:>16} {s:>12} {s:>12} {s:>12} {s:>10}\n", .{
-        "Tier", "msg_parse/s", "msg_build/s", "name_enc_ns", "rec_parse_ns", "cache_get_ns", "par_ms",
+        "Tier", "msg_parse/s", "msg_build/s", "name_enc_ns", "rec_parse_ns", "dns_get_ns", "par_ms",
     });
     print("  {s:<6} {s:>16} {s:>16} {s:>12} {s:>12} {s:>12} {s:>10}\n", .{
         "-" ** 6, "-" ** 16, "-" ** 16, "-" ** 12, "-" ** 12, "-" ** 12, "-" ** 10,
@@ -486,7 +578,7 @@ pub fn main(init: std.process.Init) !void {
                 r.msg_build_ops_sec,
                 r.name_encode_ns,
                 r.record_parse_ns,
-                r.cache_get_ns,
+                r.dns_cache_get_ns,
                 r.parallel_parse_ms,
             });
         }
