@@ -14,10 +14,10 @@
 //! Note: RSA algorithms require external crypto library.
 
 const std = @import("std");
+const clock = @import("clock");
 
 inline fn timeSec() i64 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toSeconds();
+    return clock.timestamp();
 }
 
 /// DNSSEC Algorithm numbers (subset relevant for SIG(0))

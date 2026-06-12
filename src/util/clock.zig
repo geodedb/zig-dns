@@ -7,13 +7,19 @@
 
 const std = @import("std");
 
-/// Shim for `std.time.timestamp` (seconds since epoch) removed in Zig 0.16.0.
+/// Replacement for `std.time.timestamp` (seconds since epoch), which is
+/// not present in Zig 0.16.0's `std.time`; wall-clock reads go through
+/// `std.Io.Clock` instead. All modules should use this shim rather than
+/// re-implementing it (GAP-0877).
 pub fn timestamp() i64 {
     const io = std.Io.Threaded.global_single_threaded.io();
     return std.Io.Clock.Timestamp.now(io, .real).raw.toSeconds();
 }
 
-/// Shim for `std.time.milliTimestamp` (ms since epoch) removed in Zig 0.16.0.
+/// Replacement for `std.time.milliTimestamp` (ms since epoch), which is
+/// not present in Zig 0.16.0's `std.time`; wall-clock reads go through
+/// `std.Io.Clock` instead. All modules should use this shim rather than
+/// re-implementing it (GAP-0877).
 pub fn milliTimestamp() i64 {
     const io = std.Io.Threaded.global_single_threaded.io();
     return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
@@ -133,6 +139,21 @@ pub const MockClock = struct {
 /// Get the default system clock
 pub fn systemClock() SystemClock {
     return SystemClock{};
+}
+
+test "timestamp and milliTimestamp advance monotonically (within tolerance)" {
+    const ms_first = milliTimestamp();
+    const ms_second = milliTimestamp();
+    // Wall clocks may be adjusted between reads; allow 1s of slack but
+    // catch unit mix-ups (e.g. seconds returned where ms are expected).
+    try std.testing.expect(ms_second >= ms_first - 1000);
+    // Sanity: epoch ms must be far past 2001-09-09 (1e12 ms).
+    try std.testing.expect(ms_first > 1_000_000_000_000);
+
+    const s_first = timestamp();
+    try std.testing.expect(s_first > 1_000_000_000); // past 2001 in seconds
+    // Seconds and milliseconds shims must agree on the same epoch.
+    try std.testing.expect(@abs(ms_first - s_first * 1000) < 10_000);
 }
 
 test "MockClock init" {

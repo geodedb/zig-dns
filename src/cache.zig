@@ -9,10 +9,10 @@
 //! network traffic and improve resolution latency.
 
 const std = @import("std");
+const clock = @import("clock");
 
 inline fn timeSec() i64 {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io, .real).raw.toSeconds();
+    return clock.timestamp();
 }
 
 const name_mod = @import("name");

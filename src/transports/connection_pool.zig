@@ -17,10 +17,10 @@ const std = @import("std");
 const builtin = @import("builtin");
 const io = @import("transport_io");
 const net = @import("net_compat");
+const clock = @import("clock");
 
 inline fn timeMilli() i64 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+    return clock.milliTimestamp();
 }
 
 /// 0.16.0 shim: Mutex was moved (shared, see src/util/sync.zig).

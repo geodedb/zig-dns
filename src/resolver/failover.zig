@@ -13,10 +13,10 @@
 //! - RFC 2782: DNS SRV Records (for weight/priority concepts)
 
 const std = @import("std");
+const clock = @import("clock");
 
 inline fn timeMilli() i64 {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
+    return clock.milliTimestamp();
 }
 
 /// Zig 0.16.0-compatible mutex shim (shared, see src/util/sync.zig).

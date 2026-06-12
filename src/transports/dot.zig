@@ -74,11 +74,13 @@
 
 const std = @import("std");
 const channel = @import("channel");
+const clock = @import("clock");
 
-/// Wall-clock milliseconds. std.time.milliTimestamp was removed in Zig 0.16.
+// GAP-0877: `std.time.milliTimestamp` does not exist in Zig 0.16.0; the
+// previous direct calls only compiled because these paths are not
+// analyzed by the unit tests. Route through the shared clock shim.
 inline fn timeMilli() i64 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+    return clock.milliTimestamp();
 }
 
 pub const Channel = channel.Channel;

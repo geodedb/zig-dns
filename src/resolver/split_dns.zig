@@ -16,10 +16,10 @@
 //! - Enterprise DNS policies
 
 const std = @import("std");
+const clock = @import("clock");
 
 inline fn timeSec() i64 {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io, .real).raw.toSeconds();
+    return clock.timestamp();
 }
 
 /// Match type for domain patterns

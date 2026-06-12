@@ -9,10 +9,10 @@
 
 const std = @import("std");
 const net = @import("net_compat");
+const clock = @import("clock");
 
 inline fn timeMilli() i64 {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
+    return clock.milliTimestamp();
 }
 
 /// Connect a non-blocking socket with a timeout.

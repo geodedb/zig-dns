@@ -556,6 +556,28 @@ pub fn build(b: *std.Build) void {
     //        const message = dns.message;
     //        const resolver = dns.client;
 
+    // GAP-0877: route all wall-clock reads through the shared
+    // src/util/clock.zig shim. Each consumer keeps a thin local
+    // `timeMilli`/`timeSec` alias over `@import("clock")`.
+    // (recursive_mod and client_mod get "clock" in the PF-24 block below.)
+    cache_mod.addImport("clock", clock_mod);
+    stub_mod.addImport("clock", clock_mod);
+    transport_io_mod.addImport("clock", clock_mod);
+    udp_mod.addImport("clock", clock_mod);
+    connection_pool_mod.addImport("clock", clock_mod);
+    happy_eyeballs_mod.addImport("clock", clock_mod);
+    failover_mod.addImport("clock", clock_mod);
+    split_dns_mod.addImport("clock", clock_mod);
+    logging_mod.addImport("clock", clock_mod);
+    config_mod.addImport("clock", clock_mod);
+    dnssec_mod.addImport("clock", clock_mod);
+    dot_mod.addImport("clock", clock_mod);
+    zone_transfer_mod.addImport("clock", clock_mod);
+    tsig_mod.addImport("clock", clock_mod);
+    sig0_mod.addImport("clock", clock_mod);
+    enhanced_metrics_mod.addImport("clock", clock_mod);
+    if (parallel_mod) |pm| pm.addImport("clock", clock_mod);
+
     const dns_mod = b.addModule("dns", .{
         .root_source_file = b.path("src/lib.zig"),
         .target = target,
@@ -842,6 +864,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "types", .module = types_mod },
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "cache_protection", .module = cache_protection_mod },
+                .{ .name = "clock", .module = clock_mod },
             },
         },
         .{
@@ -857,6 +880,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "transport_io", .module = transport_io_mod },
                 .{ .name = "net_compat", .module = net_compat_mod },
                 .{ .name = "observability", .module = observability_mod },
+                .{ .name = "clock", .module = clock_mod },
             },
         },
         .{
@@ -1080,22 +1104,29 @@ pub fn build(b: *std.Build) void {
 
     const test_util_step = b.step("test-util", "Run utility module tests");
 
-    const util_tests = [_][]const u8{
-        "src/util/sync.zig",
-        "src/util/clock.zig",
-        "src/util/random.zig",
-        "src/util/lru.zig",
-        "src/util/metrics.zig",
-        "src/util/enhanced_metrics.zig",
-        "src/util/backoff.zig",
+    const util_tests = [_]TestInfo{
+        .{ .name = "sync", .source = "src/util/sync.zig", .imports = &.{} },
+        .{ .name = "clock", .source = "src/util/clock.zig", .imports = &.{} },
+        .{ .name = "random", .source = "src/util/random.zig", .imports = &.{} },
+        .{ .name = "lru", .source = "src/util/lru.zig", .imports = &.{} },
+        .{ .name = "metrics", .source = "src/util/metrics.zig", .imports = &.{} },
+        .{
+            .name = "enhanced_metrics",
+            .source = "src/util/enhanced_metrics.zig",
+            .imports = &.{
+                .{ .name = "clock", .module = clock_mod },
+            },
+        },
+        .{ .name = "backoff", .source = "src/util/backoff.zig", .imports = &.{} },
     };
 
-    for (util_tests) |test_source| {
+    for (util_tests) |test_info| {
         const util_test = b.addTest(.{
             .root_module = b.createModule(.{
-                .root_source_file = b.path(test_source),
+                .root_source_file = b.path(test_info.source),
                 .target = target,
                 .optimize = optimize,
+                .imports = test_info.imports,
             }),
         });
         const run_util_test = b.addRunArtifact(util_test);
@@ -1133,6 +1164,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "net_compat", .module = net_compat_mod },
+                .{ .name = "clock", .module = clock_mod },
             },
         }),
     });
@@ -1149,6 +1181,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "transport_io", .module = transport_io_mod },
                 .{ .name = "net_compat", .module = net_compat_mod },
                 .{ .name = "sync", .module = sync_mod },
+                .{ .name = "clock", .module = clock_mod },
             },
         }),
     });
@@ -1163,6 +1196,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "net_compat", .module = net_compat_mod },
+                .{ .name = "clock", .module = clock_mod },
             },
         }),
     });
@@ -1220,6 +1254,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "net_compat", .module = net_compat_mod },
                 .{ .name = "transport_io", .module = transport_io_mod },
+                .{ .name = "clock", .module = clock_mod },
             },
         }),
     });
@@ -1237,6 +1272,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "name", .module = name_mod },
                 .{ .name = "types", .module = types_mod },
+                .{ .name = "clock", .module = clock_mod },
             },
         }),
     });
@@ -1289,6 +1325,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "sync", .module = sync_mod },
+                .{ .name = "clock", .module = clock_mod },
             },
         }),
     });
@@ -1301,6 +1338,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/resolver/split_dns.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "clock", .module = clock_mod },
+            },
         }),
     });
     const run_split_dns_test = b.addRunArtifact(split_dns_test);
@@ -1323,6 +1363,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/resolver/logging.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "clock", .module = clock_mod },
+            },
         }),
     });
     const run_logging_test = b.addRunArtifact(logging_test);
@@ -1334,6 +1377,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/resolver/config.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "clock", .module = clock_mod },
+            },
         }),
     });
     const run_config_test = b.addRunArtifact(config_test);
@@ -1370,6 +1416,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "record", .module = record_mod },
                 .{ .name = "message", .module = message_mod },
                 .{ .name = "sync", .module = sync_mod },
+                .{ .name = "clock", .module = clock_mod },
             },
         }),
     });
@@ -1395,6 +1442,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "dns_name", .module = security_dns_name_mod },
+                .{ .name = "clock", .module = clock_mod },
             },
         }),
     });
@@ -1409,6 +1457,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "dns_name", .module = security_dns_name_mod },
+                .{ .name = "clock", .module = clock_mod },
             },
         }),
     });

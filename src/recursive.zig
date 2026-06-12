@@ -27,8 +27,7 @@ const net = @import("net_compat");
 const observability = @import("observability");
 
 inline fn timeMilli() i64 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+    return clock_mod.milliTimestamp();
 }
 
 fn systemRandomU16() u16 {

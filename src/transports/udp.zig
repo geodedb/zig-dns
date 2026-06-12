@@ -9,10 +9,10 @@ const std = @import("std");
 const channel = @import("channel");
 const types_mod = @import("types");
 const net = @import("net_compat");
+const clock = @import("clock");
 
 inline fn timeMilli() i64 {
-    const io = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io, .real).raw.toMilliseconds();
+    return clock.milliTimestamp();
 }
 
 /// Remaining receive budget in milliseconds, or null when the deadline has

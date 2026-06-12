@@ -22,10 +22,10 @@ const net = @import("net_compat");
 // helpers collapse to comptime-known no-ops and the optimizer drops
 // every span site below.
 const observability = @import("observability");
+const clock = @import("clock");
 
 inline fn timeMilli() i64 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+    return clock.milliTimestamp();
 }
 
 fn systemRandomU16() u16 {

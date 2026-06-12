@@ -56,6 +56,7 @@ const Type = record.Type;
 const Class = record.Class;
 
 const tp = @import("thread_pool");
+const clock = @import("clock");
 
 const MAX_CHUNKS = 64;
 
@@ -68,8 +69,7 @@ const MAX_CHUNKS = 64;
 const PARALLEL_DNSSEC_THRESHOLD: usize = 256;
 
 inline fn timeSec() i64 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toSeconds();
+    return clock.timestamp();
 }
 
 /// 0.16.0 shim: std.Thread.Mutex was moved (shared, see src/util/sync.zig).

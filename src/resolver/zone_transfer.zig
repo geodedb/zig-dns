@@ -20,14 +20,14 @@ const std = @import("std");
 const parallel = @import("parallel");
 const net = @import("net_compat");
 const io = @import("transport_io");
+const clock = @import("clock");
 
-/// Wall-clock milliseconds. std.time.milliTimestamp was removed in Zig 0.16;
-/// axfr()/ixfr() are public but never referenced from a compiled path, so this
-/// breakage stayed dormant until the SR-6/SR-7 deadline work and the
-/// force-reference test below exercised them.
+// GAP-0877: `std.time.milliTimestamp` does not exist in Zig 0.16.0; the
+// previous direct calls only compiled because the transfer paths were not
+// analyzed by the unit tests (fixed by the SR-6/SR-7 deadline work and the
+// force-reference test). Route through the shared clock shim.
 inline fn timeMilli() i64 {
-    const io_inst = std.Io.Threaded.global_single_threaded.io();
-    return std.Io.Clock.Timestamp.now(io_inst, .real).raw.toMilliseconds();
+    return clock.milliTimestamp();
 }
 
 /// SOA record type value (RFC 1035 Section 3.2.2)
