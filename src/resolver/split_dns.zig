@@ -304,14 +304,15 @@ pub const SplitDns = struct {
 
     /// Add a policy rule
     pub fn addRule(self: *Self, rule: PolicyRule) !void {
-        try self.rules.append(self.allocator, rule);
-
-        // Sort by priority
-        std.mem.sort(PolicyRule, self.rules.items, {}, struct {
-            fn lessThan(_: void, a: PolicyRule, b: PolicyRule) bool {
-                return a.priority < b.priority;
+        // GAP-0862: binary-search insertion keeps the priority-sorted
+        // invariant without a full re-sort on every add. Equal priorities
+        // insert after existing entries, preserving insertion order.
+        const idx = std.sort.upperBound(PolicyRule, self.rules.items, rule.priority, struct {
+            fn compare(prio: u16, item: PolicyRule) std.math.Order {
+                return std.math.order(prio, item.priority);
             }
-        }.lessThan);
+        }.compare);
+        try self.rules.insert(self.allocator, idx, rule);
     }
 
     /// Remove a rule by name
@@ -539,6 +540,65 @@ test "SplitDns rule matching" {
     // Should use default
     const result2 = dns.resolve("google.com", .any);
     try std.testing.expectEqualStrings("8.8.8.8", result2.servers[0]);
+}
+
+test "addRule keeps rules in priority order regardless of insertion order (GAP-0862)" {
+    const allocator = std.testing.allocator;
+
+    const default = ResolverTarget{
+        .servers = &[_][]const u8{"8.8.8.8"},
+    };
+
+    var dns = SplitDns.init(allocator, default);
+    defer dns.deinit();
+
+    const corp_pattern = [_]DomainPattern{
+        .{ .pattern = ".corp.local", .match_type = .suffix },
+    };
+    const any_pattern = [_]DomainPattern{
+        .{ .pattern = "", .match_type = .any },
+    };
+    const any_type = [_]QueryTypeFilter{.any};
+
+    // Add the catch-all LOW-priority rule first, the specific HIGH-priority
+    // (lower number) rule last -- in shuffled order.
+    try dns.addRule(.{
+        .name = "catch-all",
+        .priority = 200,
+        .domains = &any_pattern,
+        .query_types = &any_type,
+        .target = .{ .servers = &[_][]const u8{"1.1.1.1"} },
+    });
+    try dns.addRule(.{
+        .name = "corporate",
+        .priority = 10,
+        .domains = &corp_pattern,
+        .query_types = &any_type,
+        .target = .{ .servers = &[_][]const u8{"10.0.0.1"} },
+    });
+    try dns.addRule(.{
+        .name = "middle",
+        .priority = 100,
+        .domains = &any_pattern,
+        .query_types = &any_type,
+        .target = .{ .servers = &[_][]const u8{"9.9.9.9"} },
+    });
+
+    // Sorted-ascending invariant must hold.
+    var prev: u16 = 0;
+    for (dns.rules.items) |rule| {
+        try std.testing.expect(rule.priority >= prev);
+        prev = rule.priority;
+    }
+
+    // The priority-10 corporate rule must win for corp domains even though
+    // the priority-200 catch-all was added first.
+    const corp = dns.resolve("server.corp.local", .any);
+    try std.testing.expectEqualStrings("10.0.0.1", corp.servers[0]);
+
+    // Non-corp domains fall through to the priority-100 catch-all.
+    const other = dns.resolve("google.com", .any);
+    try std.testing.expectEqualStrings("9.9.9.9", other.servers[0]);
 }
 
 test "wildcardMatch" {

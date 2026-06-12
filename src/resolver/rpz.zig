@@ -489,6 +489,74 @@ test "ResponsePolicyZone add rule and check" {
     try std.testing.expect(result3 == null);
 }
 
+test "addRule keeps rules in priority order regardless of insertion order (GAP-0862)" {
+    const allocator = std.testing.allocator;
+
+    var zone = ResponsePolicyZone.init(allocator, "ordering");
+    defer zone.deinit();
+
+    // Bulk-add in shuffled priority order.
+    const priorities = [_]u16{ 100, 0, 50, 200, 50, 10, 0 };
+    for (priorities) |prio| {
+        var rule = blockDomain("rule", "blocked.example");
+        rule.priority = prio;
+        try zone.addRule(rule);
+    }
+
+    // Sorting is deferred to the first check() (PF-NEW-34 lazy sort);
+    // trigger it, then the sorted-ascending invariant must hold.
+    _ = zone.check("trigger.sort", .qname);
+    var prev: u16 = 0;
+    for (zone.rules.items) |rule| {
+        try std.testing.expect(rule.priority >= prev);
+        prev = rule.priority;
+    }
+
+    // Match results identical to sorted behavior: the priority-0 allow rule
+    // added LAST must still win over the earlier priority-100 block rule.
+    var zone2 = ResponsePolicyZone.init(allocator, "ordering2");
+    defer zone2.deinit();
+    try zone2.addRule(blockDomain("block-all", "*.example.com")); // priority 100
+    try zone2.addRule(allowDomain("allow-safe", "safe.example.com")); // priority 0
+
+    const allowed = zone2.check("safe.example.com", .qname);
+    try std.testing.expect(allowed != null);
+    try std.testing.expectEqual(RpzAction.passthrough, allowed.?.action);
+
+    const blocked = zone2.check("other.example.com", .qname);
+    try std.testing.expect(blocked != null);
+    try std.testing.expectEqual(RpzAction.nxdomain, blocked.?.action);
+}
+
+test "addZone keeps zones in priority order regardless of insertion order (GAP-0862)" {
+    const allocator = std.testing.allocator;
+
+    var manager = RpzManager.init(allocator);
+    defer manager.deinit();
+
+    // Add the LOW-priority (higher number) zone first.
+    var blocklist = ResponsePolicyZone.init(allocator, "blocklist");
+    blocklist.priority = 100;
+    try blocklist.addRule(blockDomain("block-example", "*.example.com"));
+    try manager.addZone(blocklist);
+
+    var whitelist = ResponsePolicyZone.init(allocator, "whitelist");
+    whitelist.priority = 0;
+    try whitelist.addRule(allowDomain("allow-safe", "safe.example.com"));
+    try manager.addZone(whitelist);
+
+    // Whitelist (priority 0) must be consulted first despite being added last.
+    const result = manager.check("safe.example.com", .qname);
+    try std.testing.expect(result != null);
+    try std.testing.expectEqual(RpzAction.passthrough, result.?.action);
+
+    var prev: u16 = 0;
+    for (manager.zones.items) |zone| {
+        try std.testing.expect(zone.priority >= prev);
+        prev = zone.priority;
+    }
+}
+
 test "RpzManager multiple zones" {
     const allocator = std.testing.allocator;
 
