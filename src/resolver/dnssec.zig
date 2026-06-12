@@ -112,6 +112,10 @@ pub const Validator = struct {
     trust_anchors: std.ArrayList(TrustAnchor),
     /// Current time for signature validation
     current_time: u32,
+    /// Accept SHA-1 DS digests. SHA-1 is deprecated for DS records (RFC 8624;
+    /// SHA-1 is collision-prone), so it is rejected by default; set true only
+    /// for interop with legacy zones that publish nothing stronger (A9, #298).
+    allow_sha1_ds: bool = false,
 
     pub const TrustAnchor = struct {
         /// Zone name this anchor is for
@@ -181,7 +185,11 @@ pub const Validator = struct {
         owner_name: []const u8,
         ds: DsData,
     ) ValidationError!bool {
-        _ = self;
+        // Reject deprecated SHA-1 DS digests unless explicitly allowed, so a
+        // downgrade to SHA-1 cannot be used to forge a delegation (A9, #298).
+        if (ds.digest_type == .sha1 and !self.allow_sha1_ds) {
+            return false;
+        }
 
         // Key tag must match
         const computed_key_tag = ResourceRecord.calculateKeyTag(dnskey_rdata);
@@ -2016,4 +2024,42 @@ test "isNameInZone: root zone matches everything" {
     const name = "\x07example\x03com\x00";
     const root = "\x00";
     try std.testing.expect(isNameInZone(name, root));
+}
+
+test "A9 (#298): SHA-1 DS digests are rejected unless explicitly allowed" {
+    const allocator = std.testing.allocator;
+    var validator = Validator.init(allocator);
+    defer validator.deinit();
+
+    // The DNSKEY RDATA is opaque to the DS digest; pick an arbitrary blob.
+    const dnskey_rdata = [_]u8{ 0x01, 0x01, 0x03, 0x08, 0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56 };
+    const owner_name = [_]u8{ 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0 };
+
+    const key_tag = ResourceRecord.calculateKeyTag(&dnskey_rdata);
+
+    // The matching SHA-1 DS digest: SHA1(owner_name || dnskey_rdata).
+    var hasher = std.crypto.hash.Sha1.init(.{});
+    hasher.update(&owner_name);
+    hasher.update(&dnskey_rdata);
+    const sha1_digest = hasher.finalResult();
+
+    const dnskey = DnskeyData{
+        .flags = .{ .raw = 0x0101 },
+        .protocol = 3,
+        .algorithm = .rsasha256,
+        .public_key = dnskey_rdata[4..],
+    };
+    const ds = DsData{
+        .key_tag = key_tag,
+        .algorithm = .rsasha256,
+        .digest_type = .sha1,
+        .digest = &sha1_digest,
+    };
+
+    // Rejected by default even though key tag, algorithm, and digest all match.
+    try std.testing.expect(!try validator.verifyDsMatch(dnskey, &dnskey_rdata, &owner_name, ds));
+
+    // Accepted only when SHA-1 is explicitly opted into.
+    validator.allow_sha1_ds = true;
+    try std.testing.expect(try validator.verifyDsMatch(dnskey, &dnskey_rdata, &owner_name, ds));
 }
