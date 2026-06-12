@@ -17,9 +17,18 @@ test "build_options.with_otel exists and defaults to false" {
     try std.testing.expectEqual(false, build_options.with_otel);
 }
 
-test "observability.enabled tracks build_options.with_otel" {
-    const build_options = @import("build_options");
-    try std.testing.expectEqual(build_options.with_otel, dns.observability.enabled);
+test "observability.enabled is pinned off pending upstream Zig dedup fix" {
+    // The seam is deliberately a permanent no-op: src/observability.zig
+    // hardcodes `enabled = false` to avoid a Zig 0.16 `build_options`
+    // module-dedup diamond in downstream consumers (e.g. geode). Until that
+    // upstream issue is resolved the seam does NOT track
+    // build_options.with_otel, so `enabled` is always false regardless of the
+    // build flag. See the note in src/observability.zig (#206 / GAP-0074).
+    //
+    // build_options.with_otel still governs whether the otel dependency is
+    // resolved and the enabled-mode smoke test runs (build.zig), which is the
+    // half this repo controls; flipping `enabled` itself stays blocked upstream.
+    try std.testing.expectEqual(false, dns.observability.enabled);
 }
 
 test "client/server seams are no-ops when otel disabled" {

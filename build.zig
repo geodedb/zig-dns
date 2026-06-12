@@ -1494,9 +1494,19 @@ pub fn build(b: *std.Build) void {
         // so the smoke test reaches `@import("otel")`. The earlier
         // `lazyDependency` call handles `dns_mod`; the test root needs
         // its own import wire.
+        //
+        // The forwarded options MUST match the first call (line ~621)
+        // exactly. Omitting them resolves a *different* otel package
+        // instance, so the test sees two distinct modules (`otel` and
+        // `otel0`) and fails to compile with "file exists in modules
+        // 'otel' and 'otel0'" (B-01/B-02, #210).
         const otel_dep = b.lazyDependency("otel", .{
             .target = target,
             .optimize = optimize,
+            .otel_use_devnw_tls = otel_use_devnw_tls,
+            .otel_disabled = otel_disabled,
+            .otel_profiles = otel_profiles,
+            .otel_use_devnw_grpc = otel_use_devnw_grpc,
         }) orelse return;
         observability_enabled_tests.root_module.addImport("otel", otel_dep.module("otel"));
     }
