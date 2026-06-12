@@ -368,10 +368,16 @@ pub const ZoneTransferClient = struct {
                 try zone.addRecord(record);
 
                 if (zone.recordCount() > self.config.max_records) {
+                    // Returning a value (not an error) does not fire the
+                    // function-level `errdefer zone.deinit()`, so free the
+                    // accumulated zone explicitly to avoid a leak, matching the
+                    // deadline/message-cap branches above (CWE-401).
+                    const count = zone.recordCount();
+                    zone.deinit();
                     return TransferResult{
                         .success = false,
                         .zone = null,
-                        .record_count = zone.recordCount(),
+                        .record_count = count,
                         .message_count = message_count,
                         .duration_ms = @intCast(@max(0, std.time.milliTimestamp() - start_time)),
                         .error_message = "Zone too large",
