@@ -158,6 +158,11 @@ pub const DoQTransport = struct {
             return error.InvalidAlpn;
         }
 
+        // Fail closed if no CA trust is configured, mirroring DoT (A6, #295).
+        if (options.ca_pem.len == 0 and !options.use_system_ca) {
+            return error.NoCaTrustConfigured;
+        }
+
         return Self{
             .allocator = allocator,
             .options = options,
@@ -573,6 +578,16 @@ test "DoQTransport invalid ALPN" {
         .addr = .{ .host = "1.2.3.4", .port = 853 },
         .ca_pem = "",
         .alpn_doq = "wrong",
+    }, null));
+}
+
+test "A6 (#295): DoQ init fails closed with no CA trust configured" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.NoCaTrustConfigured, DoQTransport.init(allocator, .{
+        .server_name = "dns.example.com",
+        .addr = .{ .host = "1.2.3.4", .port = 853 },
+        .ca_pem = "",
+        .alpn_doq = "doq",
     }, null));
 }
 

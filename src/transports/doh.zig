@@ -179,6 +179,11 @@ pub const DoHTransport = struct {
             return error.HttpsRequired;
         }
 
+        // Fail closed if no CA trust is configured, mirroring DoT (A6, #295).
+        if (options.ca_pem.len == 0 and !options.use_system_ca) {
+            return error.NoCaTrustConfigured;
+        }
+
         return Self{
             .allocator = allocator,
             .options = options,
@@ -707,6 +712,14 @@ test "DoHTransport media type" {
     try std.testing.expectEqualStrings("application/dns-message", DoHTransport.media_type);
 }
 
+test "A6 (#295): DoH init fails closed with no CA trust configured" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.NoCaTrustConfigured, DoHTransport.init(allocator, .{
+        .uri = "https://dns.example.com/dns-query",
+        .ca_pem = "",
+    }, null));
+}
+
 test "A4 (#293): uriHost extracts the TLS verification name" {
     try std.testing.expectEqualStrings("dns.example.com", uriHost("https://dns.example.com/dns-query"));
     try std.testing.expectEqualStrings("dns.example.com", uriHost("https://dns.example.com:8443/dns-query"));
@@ -800,6 +813,7 @@ test "DoHTransport with MockHttpBackend POST" {
     var doh = try DoHTransport.init(allocator, .{
         .uri = "https://dns.example.com/dns-query",
         .ca_pem = "",
+        .use_system_ca = true,
         .prefer_get = false,
     }, http_mock.backend());
     defer doh.deinit();
@@ -831,6 +845,7 @@ test "DoHTransport response size cap" {
     var doh = try DoHTransport.init(allocator, .{
         .uri = "https://dns.example.com/dns-query",
         .ca_pem = "",
+        .use_system_ca = true,
         .prefer_get = true,
     }, http_mock.backend());
     defer doh.deinit();

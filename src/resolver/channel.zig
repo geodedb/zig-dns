@@ -85,6 +85,9 @@ pub const DoHOptions = struct {
     ca_pem: []const u8,
     bootstrap_ip: ?SocketAddress = null,
     prefer_get: bool = true,
+    /// Explicitly use the system CA trust store. Either ca_pem must be
+    /// non-empty or this must be true, or init fails closed (A6).
+    use_system_ca: bool = false,
 };
 
 /// DNS over QUIC options
@@ -93,6 +96,8 @@ pub const DoQOptions = struct {
     addr: SocketAddress,
     ca_pem: []const u8,
     alpn_doq: []const u8 = "doq",
+    /// Explicitly use the system CA trust store (see DoHOptions) (A6).
+    use_system_ca: bool = false,
 };
 
 /// Mock channel for testing
