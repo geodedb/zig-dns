@@ -1005,3 +1005,48 @@ test "QA-AUDIT-02: resolve rejects unsupported record types" {
         try std.testing.expectError(error.UnsupportedRecordType, client.resolve("example.com", rtype));
     }
 }
+
+const MockAResponder = struct {
+    fn respond(
+        ctx: ?*anyopaque,
+        query: []const u8,
+        server: stub_mod.ServerAddress,
+        alloc: std.mem.Allocator,
+    ) anyerror![]u8 {
+        _ = ctx;
+        _ = server;
+        // Echo the query (header + question, keeping the transaction ID),
+        // flip to a response, and append one A answer (93.184.216.34).
+        var resp: std.ArrayList(u8) = .empty;
+        errdefer resp.deinit(alloc);
+        try resp.appendSlice(alloc, query);
+        resp.items[2] = 0x81; // QR=1, RD=1
+        resp.items[3] = 0x80; // RA=1
+        resp.items[6] = 0x00;
+        resp.items[7] = 0x01; // ANCOUNT=1
+        try resp.appendSlice(alloc, &[_]u8{ 0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04 });
+        try resp.appendSlice(alloc, &[_]u8{ 93, 184, 216, 34 });
+        return resp.toOwnedSlice(alloc);
+    }
+};
+
+test "TEST-1: Client.resolve returns mocked A addresses (flagship path)" {
+    const allocator = std.testing.allocator;
+
+    var client = try Client.initWithConfig(allocator, .{
+        .servers = &[_][]const u8{"8.8.8.8"},
+        .cache_size = 0,
+    });
+    defer client.deinit();
+
+    // Inject a deterministic response so the flagship resolve path is exercised
+    // end-to-end without a network (via the StubResolver mock seam, TEST-5).
+    client.stub.?.setMockResponder(MockAResponder.respond, null);
+
+    var result = try client.resolve("example.com", .a);
+    defer result.deinit(allocator);
+
+    try std.testing.expect(!result.from_cache);
+    try std.testing.expectEqual(@as(usize, 1), result.addresses.len);
+    try std.testing.expectEqualStrings("93.184.216.34", result.addresses[0]);
+}
