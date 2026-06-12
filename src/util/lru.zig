@@ -11,7 +11,10 @@ const std = @import("std");
 pub fn LruCache(comptime V: type) type {
     return struct {
         allocator: std.mem.Allocator,
-        map: std.StringHashMap(Node),
+        // Nodes are heap-allocated (stable addresses) because the LRU
+        // intrusive list stores raw *Node pointers; storing Node by
+        // value in the map would dangle them on rehash (GAP-0867).
+        map: std.StringHashMap(*Node),
         head: ?*Node,
         tail: ?*Node,
         capacity: usize,
@@ -32,7 +35,7 @@ pub fn LruCache(comptime V: type) type {
         pub fn init(allocator: std.mem.Allocator, capacity: usize) Self {
             return Self{
                 .allocator = allocator,
-                .map = std.StringHashMap(Node).init(allocator),
+                .map = std.StringHashMap(*Node).init(allocator),
                 .head = null,
                 .tail = null,
                 .capacity = capacity,
@@ -44,16 +47,18 @@ pub fn LruCache(comptime V: type) type {
         pub fn deinit(self: *Self) void {
             var it = self.map.iterator();
             while (it.next()) |entry| {
+                const node = entry.value_ptr.*;
                 if (self.on_evict) |cb| {
-                    cb(self.allocator, entry.value_ptr.value);
+                    cb(self.allocator, node.value);
                 }
                 self.allocator.free(entry.key_ptr.*);
+                self.allocator.destroy(node);
             }
             self.map.deinit();
         }
 
         pub fn get(self: *Self, key: []const u8) ?V {
-            if (self.map.getPtr(key)) |node| {
+            if (self.map.get(key)) |node| {
                 self.moveToFront(node);
                 return node.value;
             }
@@ -74,11 +79,12 @@ pub fn LruCache(comptime V: type) type {
         /// The handle is invalidated by any mutation to the cache.
         pub fn getWithHandle(self: *Self, key: []const u8) ?EntryHandle {
             if (self.map.getEntry(key)) |entry| {
-                self.moveToFront(entry.value_ptr);
+                const node = entry.value_ptr.*;
+                self.moveToFront(node);
                 return .{
-                    .value = entry.value_ptr.value,
+                    .value = node.value,
                     .key_ptr = entry.key_ptr,
-                    .node_ptr = entry.value_ptr,
+                    .node_ptr = node,
                 };
             }
             return null;
@@ -97,11 +103,12 @@ pub fn LruCache(comptime V: type) type {
             const key_slice = handle.key_ptr.*;
             self.map.removeByPtr(handle.key_ptr);
             self.allocator.free(key_slice);
+            self.allocator.destroy(handle.node_ptr);
             self.count -= 1;
         }
 
         pub fn put(self: *Self, key: []const u8, value: V) !void {
-            if (self.map.getPtr(key)) |node| {
+            if (self.map.get(key)) |node| {
                 if (self.on_evict) |cb| {
                     cb(self.allocator, node.value);
                 }
@@ -117,14 +124,16 @@ pub fn LruCache(comptime V: type) type {
             const key_copy = try self.allocator.dupe(u8, key);
             errdefer self.allocator.free(key_copy);
 
-            try self.map.put(key_copy, Node{
+            const node = try self.allocator.create(Node);
+            errdefer self.allocator.destroy(node);
+            node.* = Node{
                 .key = key_copy,
                 .value = value,
                 .prev = null,
                 .next = self.head,
-            });
+            };
 
-            const node = self.map.getPtr(key_copy).?;
+            try self.map.put(key_copy, node);
 
             if (self.head) |head| {
                 head.prev = node;
@@ -140,12 +149,13 @@ pub fn LruCache(comptime V: type) type {
 
         pub fn remove(self: *Self, key: []const u8) bool {
             if (self.map.fetchRemove(key)) |kv| {
-                const node = &kv.value;
+                const node = kv.value;
                 if (self.on_evict) |cb| {
                     cb(self.allocator, node.value);
                 }
                 self.removeFromList(node);
                 self.allocator.free(kv.key);
+                self.allocator.destroy(node);
                 self.count -= 1;
                 return true;
             }
@@ -155,10 +165,12 @@ pub fn LruCache(comptime V: type) type {
         pub fn clear(self: *Self) void {
             var it = self.map.iterator();
             while (it.next()) |entry| {
+                const node = entry.value_ptr.*;
                 if (self.on_evict) |cb| {
-                    cb(self.allocator, entry.value_ptr.value);
+                    cb(self.allocator, node.value);
                 }
                 self.allocator.free(entry.key_ptr.*);
+                self.allocator.destroy(node);
             }
             self.map.clearRetainingCapacity();
             self.head = null;
@@ -214,6 +226,7 @@ pub fn LruCache(comptime V: type) type {
                 self.removeFromList(tail);
                 _ = self.map.remove(key);
                 self.allocator.free(key);
+                self.allocator.destroy(tail);
                 self.count -= 1;
             }
         }
@@ -301,6 +314,31 @@ test "LruCache removeByHandle calls on_evict" {
 
     // on_evict should have been called once (for removeByHandle)
     try std.testing.expectEqual(@as(usize, 1), Tracker.evict_count);
+}
+
+test "LruCache survives hashmap growth (rehash pointer stability)" {
+    const allocator = std.testing.allocator;
+    var cache = LruCache(usize).init(allocator, 2000);
+    defer cache.deinit();
+
+    var buf: [32]u8 = undefined;
+    var i: usize = 0;
+    while (i < 5000) : (i += 1) {
+        const key = try std.fmt.bufPrint(&buf, "key-{d}", .{i});
+        try cache.put(key, i);
+        if (i > 10) {
+            const old = try std.fmt.bufPrint(&buf, "key-{d}", .{i - 10});
+            _ = cache.get(old);
+        }
+    }
+
+    // The intrusive list must stay consistent with the map across
+    // rehashes and evictions: walking head->tail visits exactly
+    // `count` nodes.
+    var walked: usize = 0;
+    var node = cache.head;
+    while (node) |n| : (node = n.next) walked += 1;
+    try std.testing.expectEqual(cache.count, walked);
 }
 
 test "LruCache eviction" {
