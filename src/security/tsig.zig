@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const clock = @import("clock");
+const crypto_backend = @import("crypto_backend");
 
 inline fn timeSec() i64 {
     return clock.timestamp();
@@ -618,14 +619,54 @@ pub const TsigContext = struct {
         errdefer self.allocator.free(result);
 
         switch (self.key.algorithm) {
-            .hmac_md5 => hmacParts(std.crypto.auth.hmac.HmacMd5, self.key.secret, parts, result[0..16]),
-            .hmac_sha1 => hmacParts(std.crypto.auth.hmac.HmacSha1, self.key.secret, parts, result[0..20]),
-            .hmac_sha256 => hmacParts(std.crypto.auth.hmac.sha2.HmacSha256, self.key.secret, parts, result[0..32]),
-            .hmac_sha384 => hmacParts(std.crypto.auth.hmac.sha2.HmacSha384, self.key.secret, parts, result[0..48]),
-            .hmac_sha512 => hmacParts(std.crypto.auth.hmac.sha2.HmacSha512, self.key.secret, parts, result[0..64]),
+            // SEC: FIPS strict-security — MD5 and SHA-1 HMAC are not approved.
+            // Available only when -Dfips=false (std-backed legacy support).
+            .hmac_md5 => {
+                if (crypto_backend.fips_enabled) return error.UnsupportedAlgorithm;
+                hmacParts(std.crypto.auth.hmac.HmacMd5, self.key.secret, parts, result[0..16]);
+            },
+            .hmac_sha1 => {
+                if (crypto_backend.fips_enabled) return error.UnsupportedAlgorithm;
+                hmacParts(std.crypto.auth.hmac.HmacSha1, self.key.secret, parts, result[0..20]);
+            },
+            // FIPS-approved HMAC over SHA-2: routed through the crypto seam.
+            // The seam Mac.hmac is one-shot, so the ordered RFC 8945 parts
+            // are joined into one contiguous buffer (freed before return).
+            .hmac_sha256 => {
+                const joined = try self.concatParts(parts);
+                defer self.allocator.free(joined);
+                _ = try crypto_backend.Mac.hmac(.sha256, self.key.secret, joined, result);
+            },
+            .hmac_sha384 => {
+                const joined = try self.concatParts(parts);
+                defer self.allocator.free(joined);
+                _ = try crypto_backend.Mac.hmac(.sha384, self.key.secret, joined, result);
+            },
+            .hmac_sha512 => {
+                const joined = try self.concatParts(parts);
+                defer self.allocator.free(joined);
+                _ = try crypto_backend.Mac.hmac(.sha512, self.key.secret, joined, result);
+            },
         }
 
         return result;
+    }
+
+    /// Concatenate the digest components into one contiguous buffer. The seam
+    /// `Mac.hmac` is one-shot (no incremental update), so RFC 8945's ordered
+    /// parts (prior MAC || message || TSIG variables) are joined here. The
+    /// caller-owned buffer is freed before return.
+    fn concatParts(self: *Self, parts: []const []const u8) ![]u8 {
+        var total: usize = 0;
+        for (parts) |p| total += p.len;
+        const buf = try self.allocator.alloc(u8, total);
+        errdefer self.allocator.free(buf);
+        var off: usize = 0;
+        for (parts) |p| {
+            @memcpy(buf[off .. off + p.len], p);
+            off += p.len;
+        }
+        return buf;
     }
 
     /// Build TSIG RDATA
@@ -848,6 +889,9 @@ fn secureZeroHmac(comptime T: type, hmac_ptr: *T) void {
 }
 
 /// Run HMAC over a sequence of digest components.
+///
+/// fips-exempt: non-security — legacy MD5/SHA-1 HMAC only on the
+/// -Dfips=false path; FIPS-approved SHA-2 HMAC routes through the seam.
 ///
 /// SECURITY: Each HMAC instance is securely zeroed after use via defer
 /// to prevent key-derived material from leaking through stack memory
@@ -1448,5 +1492,29 @@ test "SEC-AUDIT-08: fudge comparison works for boundary values" {
 
     // Must not panic from overflow
     const result = try ctx.verify(signed);
+    try std.testing.expect(result.valid);
+}
+
+test "TSIG HMAC-SHA256 via seam matches RFC 4231 TC2 KAT (dual-mode)" {
+    const allocator = std.testing.allocator;
+    // key="Jefe", data="what do ya want for nothing?"
+    var ctx = TsigContext.initNoWarn(allocator, TsigKey.init("k", .hmac_sha256, "Jefe"));
+    const parts = [_][]const u8{"what do ya want for nothing?"};
+    const mac = try ctx.computeMacParts(parts[0..]);
+    defer allocator.free(mac);
+    const expect = [_]u8{
+        0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75, 0xc7,
+        0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9, 0x64, 0xec, 0x38, 0x43,
+    };
+    try std.testing.expectEqualSlices(u8, &expect, mac);
+}
+test "TSIG sign->verify round trips through the seam (HMAC-SHA256)" {
+    const allocator = std.testing.allocator;
+    const msg = [_]u8{0x00} ** 12; // minimal DNS header
+    var signer = TsigContext.initNoWarn(allocator, TsigKey.init("key.example.com", .hmac_sha256, &[_]u8{0xAB} ** 32));
+    const signed = try signer.sign(&msg);
+    defer allocator.free(signed);
+    var verifier = TsigContext.initNoWarn(allocator, TsigKey.init("key.example.com", .hmac_sha256, &[_]u8{0xAB} ** 32));
+    const result = try verifier.verify(signed);
     try std.testing.expect(result.valid);
 }
