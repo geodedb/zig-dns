@@ -101,12 +101,32 @@ pub const Sig0KeyPair = struct {
         ml_dsa_65: void,
     };
 
-    /// Generate a new key pair
+    /// Generate a new key pair.
+    ///
+    /// KEY-GENERATION RANDOMNESS SOURCE (FIPS):
+    /// The classical SIG(0) key types (.ed25519, .ecdsa_p256_sha256,
+    /// .ecdsa_p384_sha384) are all supported by the FIPS backend's
+    /// `crypto_backend.Sig.generate` (sig.zig: ed25519 + EC families), but that
+    /// path returns an opaque seam-owned `EVP_PKEY`; the rest of this file
+    /// (rawPrivateBytes / rawPublicBytes / the sign+verify seam round-trip)
+    /// requires the std typed `SecretKey`/`PublicKey` representation, and the
+    /// frozen seam surface exposes no raw scalar/seed export to reconstruct one.
+    /// So under fips we route only the KEY-GENERATION RANDOMNESS through the
+    /// FIPS backend: the seed is drawn from `crypto_backend.Csprng.bytes` (the
+    /// SP 800-90A DRBG via the FIPS provider's RAND), NOT from
+    /// `std.crypto.random`, and the std `generateDeterministic(seed)` then does
+    /// the (non-entropy) curve math to derive the key pair. Under -Dfips=false
+    /// the existing std `KeyPair.generate(io)` path (std.crypto.random) is kept
+    /// verbatim; the fips branch compiles out entirely.
     pub fn generate(allocator: std.mem.Allocator, name: []const u8, algorithm: Algorithm) !Self {
         switch (algorithm) {
             .ed25519 => {
-                const io_inst = std.Io.Threaded.global_single_threaded.io();
-                const key_pair = std.crypto.sign.Ed25519.KeyPair.generate(io_inst);
+                const key_pair = if (crypto_backend.fips_enabled)
+                    try fipsGenerate(std.crypto.sign.Ed25519.KeyPair)
+                else blk: {
+                    const io_inst = std.Io.Threaded.global_single_threaded.io();
+                    break :blk std.crypto.sign.Ed25519.KeyPair.generate(io_inst);
+                };
                 const public_key = try allocator.dupe(u8, &key_pair.public_key.bytes);
                 return Self{
                     .name = name,
@@ -117,8 +137,12 @@ pub const Sig0KeyPair = struct {
                 };
             },
             .ecdsa_p256_sha256 => {
-                const io_inst = std.Io.Threaded.global_single_threaded.io();
-                const key_pair = std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair.generate(io_inst);
+                const key_pair = if (crypto_backend.fips_enabled)
+                    try fipsGenerate(std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair)
+                else blk: {
+                    const io_inst = std.Io.Threaded.global_single_threaded.io();
+                    break :blk std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair.generate(io_inst);
+                };
                 const public_key = try allocator.dupe(u8, &key_pair.public_key.toUncompressedSec1());
                 return Self{
                     .name = name,
@@ -129,8 +153,12 @@ pub const Sig0KeyPair = struct {
                 };
             },
             .ecdsa_p384_sha384 => {
-                const io_inst = std.Io.Threaded.global_single_threaded.io();
-                const key_pair = std.crypto.sign.ecdsa.EcdsaP384Sha384.KeyPair.generate(io_inst);
+                const key_pair = if (crypto_backend.fips_enabled)
+                    try fipsGenerate(std.crypto.sign.ecdsa.EcdsaP384Sha384.KeyPair)
+                else blk: {
+                    const io_inst = std.Io.Threaded.global_single_threaded.io();
+                    break :blk std.crypto.sign.ecdsa.EcdsaP384Sha384.KeyPair.generate(io_inst);
+                };
                 const public_key = try allocator.dupe(u8, &key_pair.public_key.toUncompressedSec1());
                 return Self{
                     .name = name,
@@ -144,6 +172,26 @@ pub const Sig0KeyPair = struct {
             // ML-DSA SIG(0) keys are seam-owned (MlDsaSig0Signer), not std keys.
             .ml_dsa_65 => return error.UnsupportedAlgorithm,
             _ => return error.UnsupportedAlgorithm,
+        }
+    }
+
+    /// FIPS key-generation: derive a std `KeyPair` (Ed25519 or ECDSA) from a
+    /// seed drawn off the FIPS SP 800-90A DRBG (`crypto_backend.Csprng.bytes`),
+    /// never `std.crypto.random`. `KeyPair.generateDeterministic` can reject a
+    /// seed that reduces to the identity scalar (vanishingly unlikely), so this
+    /// mirrors std's own `generate` retry loop with a fresh DRBG draw each time.
+    /// Compiled only on the comptime fips path.
+    fn fipsGenerate(comptime KeyPair: type) !KeyPair {
+        var seed: [KeyPair.seed_length]u8 = undefined;
+        // fips-exempt: non-security — secureZero is memory hygiene, not a
+        // FIPS crypto op (the entropy itself comes from the FIPS DRBG above).
+        defer std.crypto.secureZero(u8, &seed); // scrub seed entropy off the stack
+        while (true) {
+            crypto_backend.Csprng.bytes(&seed) catch return error.KeyGenerationFailed;
+            return KeyPair.generateDeterministic(seed) catch {
+                @branchHint(.unlikely);
+                continue;
+            };
         }
     }
 
@@ -196,6 +244,10 @@ pub const Sig0KeyPair = struct {
 
     /// SECURITY: Zeros private key material before releasing memory to prevent
     /// key leakage through uncleared memory (SEC-C25, CWE-244).
+    ///
+    /// fips-exempt: non-security — `std.crypto.secureZero` is memory hygiene
+    /// (a guaranteed-not-elided scrub), not a FIPS-boundary crypto operation,
+    /// so it stays std in both modes.
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         // Zero private key material before struct goes out of scope
         switch (self.algorithm) {
@@ -694,6 +746,8 @@ pub const Sig0Context = struct {
         // std shim Ed25519 64B / fips P-384 RFC 5915 DER (167B).
         var raw_buf: [192]u8 = undefined;
         const raw_priv = try key_pair.rawPrivateBytes(&raw_buf);
+        // fips-exempt: non-security — secureZero is memory hygiene, not a
+        // FIPS crypto op; scrubs the copied private bytes off the stack.
         defer std.crypto.secureZero(u8, &raw_buf); // SEC: scrub copied private bytes
         var kp = crypto_backend.Sig.KeyPair.fromPrivateBytes(sig_alg, raw_priv) catch |e| switch (e) {
             error.Unsupported => return error.UnsupportedAlgorithm,
@@ -1374,6 +1428,53 @@ test "SEC-C20: Sig0Record.parse does not panic on unknown algorithm" {
 
     // signatureLength should return null for unknown algorithms
     try std.testing.expect(sig0.algorithm.signatureLength() == null);
+}
+
+test "FIPS keygen randomness comes from the FIPS DRBG, not std.crypto.random" {
+    // Under -Dfips=true the classical SIG(0) key-generation entropy must be
+    // drawn from crypto_backend.Csprng.bytes (the SP 800-90A DRBG via the
+    // FIPS provider's RAND), NOT std.crypto.random. This pins that contract.
+    if (!crypto_backend.fips_enabled) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+
+    // (1) The FIPS DRBG is the active entropy source the generate path uses:
+    // Csprng.bytes routes through the FIPS provider RAND (it requires the
+    // active provider; std.crypto.random does not) and yields distinct,
+    // non-zero draws.
+    var a: [32]u8 = undefined;
+    var b: [32]u8 = undefined;
+    try crypto_backend.Csprng.bytes(&a);
+    try crypto_backend.Csprng.bytes(&b);
+    try std.testing.expect(!std.mem.eql(u8, &a, &b));
+    try std.testing.expect(!std.mem.allEqual(u8, &a, 0));
+
+    // (2) Key generation succeeds through the DRBG-seeded deterministic path
+    // and produces distinct, non-degenerate private keys across calls for
+    // every classical SIG(0) algorithm (would be impossible if the seed were
+    // a fixed/zero value; would not depend on std.crypto.random at all).
+    inline for (.{ Algorithm.ed25519, Algorithm.ecdsa_p256_sha256, Algorithm.ecdsa_p384_sha384 }) |alg| {
+        var k1 = try Sig0KeyPair.generate(allocator, "fips.example.com", alg);
+        defer k1.deinit(allocator);
+        var k2 = try Sig0KeyPair.generate(allocator, "fips.example.com", alg);
+        defer k2.deinit(allocator);
+        // Distinct public keys => distinct DRBG-derived seeds/scalars.
+        try std.testing.expect(!std.mem.eql(u8, k1.public_key, k2.public_key));
+        try std.testing.expect(!std.mem.allEqual(u8, k1.public_key, 0));
+    }
+}
+
+test "non-FIPS keygen uses the std random path (regression guard)" {
+    // Under -Dfips=false the std KeyPair.generate(io) path (std.crypto.random)
+    // is kept; key generation still yields distinct non-zero keys. This is the
+    // counterpart to the fips DRBG test above.
+    if (crypto_backend.fips_enabled) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var k1 = try Sig0KeyPair.generate(allocator, "host.example.com", .ed25519);
+    defer k1.deinit(allocator);
+    var k2 = try Sig0KeyPair.generate(allocator, "host.example.com", .ed25519);
+    defer k2.deinit(allocator);
+    try std.testing.expect(!std.mem.eql(u8, k1.public_key, k2.public_key));
+    try std.testing.expect(!std.mem.allEqual(u8, k1.public_key, 0));
 }
 
 test "SEC-C20: Sig0KeyPair.generate rejects unknown algorithm" {

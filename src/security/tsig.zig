@@ -142,7 +142,11 @@ pub const TsigKey = struct {
         };
     }
 
-    /// Create key with base64-encoded secret
+    /// Create key with base64-encoded secret.
+    ///
+    /// fips-exempt: non-security — std.base64 is RFC 4648 transport encoding of
+    /// the already-trusted shared secret, not a FIPS-boundary crypto operation;
+    /// it stays std in both modes.
     pub fn initBase64(allocator: std.mem.Allocator, name: []const u8, algorithm: Algorithm, secret_b64: []const u8) !Self {
         const decoder = std.base64.standard.Decoder;
         const decoded_len = decoder.calcSizeForSlice(secret_b64) catch return error.InvalidBase64;
@@ -162,6 +166,10 @@ pub const TsigKey = struct {
     /// residual secrets in freed memory (CWE-244: Heap Inspection).
     /// If the secret was heap-allocated (via initBase64), pass the same
     /// allocator to also free the backing memory after zeroing.
+    ///
+    /// fips-exempt: non-security — std.crypto.secureZero is memory hygiene
+    /// (a guaranteed-not-elided scrub), not a FIPS-boundary crypto operation;
+    /// it stays std in both modes.
     pub fn deinit(self: *Self, allocator: ?std.mem.Allocator) void {
         // Zero the secret bytes in-place for defense-in-depth.
         // @constCast is required because the field is []const u8; we own
@@ -496,6 +504,10 @@ pub const TsigContext = struct {
         // Constant-time MAC comparison using known algorithm output sizes.
         // std.crypto.timing_safe.eql requires fixed-size arrays, so we convert
         // based on the expected MAC length for the configured algorithm.
+        //
+        // fips-exempt: non-security — timing_safe.eql is a constant-time byte
+        // compare, not a keyed/FIPS-boundary crypto primitive; the MAC itself
+        // is computed through the seam. It stays std in both modes.
         const mac_valid = switch (self.key.algorithm) {
             .hmac_md5 => tsig.mac.len == 16 and expected_mac.len == 16 and
                 std.crypto.timing_safe.eql([16]u8, tsig.mac[0..16].*, expected_mac[0..16].*),
@@ -883,6 +895,9 @@ pub const VerifyResult = struct {
 
 /// Securely zero an HMAC state struct to prevent key-derived material from
 /// leaking through stack memory (SEC-C25, CWE-244).
+///
+/// fips-exempt: non-security — std.crypto.secureZero is memory hygiene, not a
+/// FIPS-boundary crypto operation; it stays std in both modes.
 fn secureZeroHmac(comptime T: type, hmac_ptr: *T) void {
     const hmac_bytes: *[@sizeOf(T)]u8 = @ptrCast(hmac_ptr);
     std.crypto.secureZero(u8, hmac_bytes);
