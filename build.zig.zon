@@ -43,6 +43,32 @@
             .hash = "otel-0.1.9-B0v3ltPiNQD_qlCLj0oUor4puasXR8KWGfPpaE48icHy",
             .lazy = true,
         },
+        // FIPS-140-3 / PQC backend. Resolved only when a build reaches
+        // `b.lazyDependency("fips", ...)` under -Dfips=true. With the flag
+        // off the dependency is never fetched and the produced artifact
+        // links no OpenSSL and contains zero fips symbols.
+        //
+        // LOCAL PATH dep: the fips package is developed in-tree and has no
+        // published remote yet, so it is wired as a path. Zig requires path
+        // deps to be relative to the RESOLVED (symlink-followed) build root.
+        // In this workspace `devnw/zig/dns` is a symlink into
+        // src/gl/gitlab.com/devnw/zig/dns, while the fips checkout lives at
+        // the real src/devnw/zig/fips; the relative path below resolves from
+        // the resolved dns root to that canonical fips checkout.
+        // NOTE: a path dependency cannot be marked `.lazy`; laziness here is
+        // enforced by gating the `b.lazyDependency("fips", ...)` CALL behind
+        // `if (fips)` in build.zig, so the path is only ever resolved when
+        // -Dfips=true.
+        //
+        // Eventual production (git+https lazy) form once published:
+        //   .fips = .{
+        //       .url = "git+https://gitlab.com/devnw/zig/fips.git?ref=v0.1.0#<commit-sha>",
+        //       .hash = "<zig-package-hash>",
+        //       .lazy = true,
+        //   },
+        .fips = .{
+            .path = "../../../../../devnw/zig/fips",
+        },
     },
 
     // Specifies the set of files and directories that are included in this
