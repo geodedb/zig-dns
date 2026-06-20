@@ -35,6 +35,16 @@ pub const Algorithm = enum(u8) {
     ecdsa_p384_sha384 = 14,
     /// Ed25519
     ed25519 = 15,
+    /// ML-DSA-65 (FIPS 204) for SIG(0) DNSSEC transaction signatures.
+    /// FIPS-only: requires the linked FIPS provider (-Dfips=true).
+    ///
+    /// PROVISIONAL CODEPOINT: 17 is NOT a ratified IANA assignment. It is
+    /// the working-document value from draft-ietf-dnsop-dnssec-pqc and is
+    /// listed as Unassigned in the IANA DNSSEC Algorithm Numbers registry:
+    /// https://www.iana.org/assignments/dns-sec-alg-numbers/dns-sec-alg-numbers.xhtml
+    /// Update this single literal once IANA assigns the final value. See
+    /// docs/FIPS.md and Open Issues #2.
+    ml_dsa_65 = 17,
     /// Unknown/unrecognized algorithm values from wire data
     _,
 
@@ -46,6 +56,8 @@ pub const Algorithm = enum(u8) {
             .ecdsa_p256_sha256, .ecdsa_p384_sha384, .ed25519 => true,
             // RSA is FIPS-approved (RFC 3110); available only with the fips backend.
             .rsa_sha256, .rsa_sha512 => crypto_backend.fips_enabled,
+            // ML-DSA-65 (FIPS 204) is supported only with the fips backend.
+            .ml_dsa_65 => crypto_backend.fips_enabled,
             _ => false,
         };
     }
@@ -57,6 +69,7 @@ pub const Algorithm = enum(u8) {
             .ecdsa_p384_sha384 => 96, // r (48) + s (48)
             .ed25519 => 64,
             .rsa_sha256, .rsa_sha512 => null, // Variable
+            .ml_dsa_65 => 3309, // ML-DSA-65 signature size (FIPS 204)
             _ => null,
         };
     }
@@ -83,6 +96,9 @@ pub const Sig0KeyPair = struct {
         ecdsa_p256_sha256: std.crypto.sign.ecdsa.EcdsaP256Sha256.SecretKey,
         ecdsa_p384_sha384: std.crypto.sign.ecdsa.EcdsaP384Sha384.SecretKey,
         ed25519: std.crypto.sign.Ed25519.SecretKey,
+        // ML-DSA private keys are held by the seam-owned EVP keypair
+        // (MlDsaSig0Signer), never as a std typed key, so this is a marker.
+        ml_dsa_65: void,
     };
 
     /// Generate a new key pair
@@ -125,6 +141,8 @@ pub const Sig0KeyPair = struct {
                 };
             },
             .rsa_sha256, .rsa_sha512 => return error.UnsupportedAlgorithm,
+            // ML-DSA SIG(0) keys are seam-owned (MlDsaSig0Signer), not std keys.
+            .ml_dsa_65 => return error.UnsupportedAlgorithm,
             _ => return error.UnsupportedAlgorithm,
         }
     }
@@ -170,6 +188,8 @@ pub const Sig0KeyPair = struct {
                 return buf[0..d.len];
             },
             .rsa_sha256, .rsa_sha512 => return error.UnsupportedAlgorithm,
+            // ML-DSA uses the seam-owned EVP keypair; no raw private export.
+            .ml_dsa_65 => return error.UnsupportedAlgorithm,
             _ => return error.UnsupportedAlgorithm,
         }
     }
@@ -193,6 +213,7 @@ pub const Sig0KeyPair = struct {
                 std.crypto.secureZero(u8, key_ptr);
             },
             .rsa_sha256, .rsa_sha512 => {}, // void -- no key material
+            .ml_dsa_65 => {}, // void -- seam-owned EVP key, no std material here
             _ => {}, // Unknown algorithm -- no key material to zero
         }
         allocator.free(self.public_key);
@@ -218,6 +239,9 @@ pub const Sig0PublicKey = struct {
         ecdsa_p256_sha256: std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey,
         ecdsa_p384_sha384: std.crypto.sign.ecdsa.EcdsaP384Sha384.PublicKey,
         ed25519: std.crypto.sign.Ed25519.PublicKey,
+        // ML-DSA public keys are held by the seam-owned EVP keypair
+        // (MlDsaSig0Signer), never as a std typed key, so this is a marker.
+        ml_dsa_65: void,
     };
 
     /// Parse public key from DNSKEY RDATA
@@ -264,6 +288,8 @@ pub const Sig0PublicKey = struct {
                 };
             },
             .rsa_sha256, .rsa_sha512 => return error.UnsupportedAlgorithm,
+            // ML-DSA SIG(0) keys are seam-owned (MlDsaSig0Signer), not parsed here.
+            .ml_dsa_65 => return error.UnsupportedAlgorithm,
             _ => return error.UnsupportedAlgorithm,
         }
     }
@@ -298,6 +324,8 @@ pub const Sig0PublicKey = struct {
                 return buf[0..b.len];
             },
             .rsa_sha256, .rsa_sha512 => return error.UnsupportedAlgorithm,
+            // ML-DSA uses the seam-owned EVP keypair; no raw public export.
+            .ml_dsa_65 => return error.UnsupportedAlgorithm,
             _ => return error.UnsupportedAlgorithm,
         }
     }
@@ -399,6 +427,7 @@ pub const Sig0Context = struct {
             .ecdsa_p384_sha384 => .ecdsa_p384,
             .ed25519 => .ed25519,
             .rsa_sha256, .rsa_sha512 => .rsa_pkcs1,
+            .ml_dsa_65 => .ml_dsa_65,
             _ => null,
         };
     }
@@ -541,6 +570,118 @@ pub const Sig0Context = struct {
         };
     }
 
+    /// Sign a DNS message with a SIG(0) ML-DSA-65 record (FIPS-only).
+    ///
+    /// Builds the SAME on-wire SIG(0) RR structure as the classical `sign`
+    /// (root name 0, type SIG=24, class ANY=255, TTL 0, RDLENGTH, RDATA =
+    /// sig_data || signature) and increments ARCOUNT, so verifyMlDsa's
+    /// extractSig0/Sig0Record.parse path round-trips. The signature is the
+    /// ML-DSA-65 signature over sig_data || message via the seam KeyPair.
+    pub fn signMlDsa(self: *Self, message: []const u8, signer: *MlDsaSig0Signer) ![]u8 {
+        if (message.len < 12) return error.InvalidMessage;
+        const now: u32 = @intCast(@as(u64, @bitCast(timeSec())));
+        const expiration = std.math.add(u32, now, self.validity_seconds) catch return error.TimestampOverflow;
+
+        // SIG(0) RDATA without the signature.
+        var sig_rdata: std.ArrayList(u8) = .empty;
+        errdefer sig_rdata.deinit(self.allocator);
+        try sig_rdata.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0))); // type covered (0)
+        try sig_rdata.append(self.allocator, @intFromEnum(Algorithm.ml_dsa_65)); // algorithm (provisional 17)
+        try sig_rdata.append(self.allocator, 0); // labels (0 for SIG(0))
+        try sig_rdata.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, 0))); // original TTL
+        try sig_rdata.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, expiration)));
+        try sig_rdata.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, now)));
+        try sig_rdata.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 0))); // key tag (ML-DSA: unused, 0)
+        try encodeName(self.allocator, &sig_rdata, signer.name);
+
+        const sig_data = try sig_rdata.toOwnedSlice(self.allocator);
+        defer self.allocator.free(sig_data);
+
+        // Sign over sig_data || message.
+        var to_sign: std.ArrayList(u8) = .empty;
+        defer to_sign.deinit(self.allocator);
+        try to_sign.appendSlice(self.allocator, sig_data);
+        try to_sign.appendSlice(self.allocator, message);
+
+        // ML-DSA-65 signature is 3309 bytes (FIPS 204); 4096 is a safe ceiling.
+        const sig_out = try self.allocator.alloc(u8, 4096);
+        defer self.allocator.free(sig_out);
+        const n = try crypto_backend.Sig.sign(.ml_dsa_65, &signer.kp, to_sign.items, sig_out);
+        const signature = sig_out[0..n];
+
+        // Assemble the full message + SIG(0) RR (identical layout to `sign`).
+        var result: std.ArrayList(u8) = .empty;
+        errdefer result.deinit(self.allocator);
+        try result.appendSlice(self.allocator, message);
+
+        // Increment ARCOUNT (CWE-190 guarded).
+        const arcount = std.mem.readInt(u16, message[10..12], .big);
+        if (arcount == std.math.maxInt(u16)) return error.ArcountOverflow;
+        std.mem.writeInt(u16, result.items[10..12], arcount + 1, .big);
+
+        try result.append(self.allocator, 0); // RR name (root)
+        try result.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 24))); // type SIG
+        try result.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, 255))); // class ANY
+        try result.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u32, 0))); // TTL
+
+        const rdlength = sig_data.len + signature.len;
+        if (rdlength > std.math.maxInt(u16)) return error.RdlengthOverflow;
+        try result.appendSlice(self.allocator, &std.mem.toBytes(std.mem.nativeToBig(u16, @intCast(rdlength)))); // RDLENGTH
+        try result.appendSlice(self.allocator, sig_data); // RDATA: sig_data ...
+        try result.appendSlice(self.allocator, signature); // ... || signature
+        return result.toOwnedSlice(self.allocator);
+    }
+
+    /// Verify the ML-DSA-65 SIG(0) signature in `signed` (FIPS-only).
+    ///
+    /// PARSE-BASED: `signed` is a full DNS message with a SIG(0) RR appended by
+    /// signMlDsa. This reuses the SAME wire-parsing path as the classical
+    /// `verify` (extractSig0 -> Sig0Record.parse -> stripSig0) so the verified
+    /// bytes are exactly the on-wire `sig_data || stripped_message`, not a
+    /// re-derived guess. The trailing signature is taken from the parsed
+    /// record; no re-signing helper is used. The `signer` already holds the
+    /// seam-owned EVP KeyPair (public + private halves), so verification needs
+    /// no public-key import.
+    pub fn verifyMlDsa(self: *Self, signed: []const u8, signer: *MlDsaSig0Signer) !VerifyResult {
+        // Extract the SIG(0) RR (same extractor the classical verify uses).
+        const sig_info = try self.extractSig0(signed);
+        defer self.allocator.free(sig_info.sig_rdata);
+
+        var sig0 = try Sig0Record.parse(self.allocator, sig_info.sig_rdata);
+        defer sig0.deinit(self.allocator);
+
+        // Structural / policy checks (mirror classical verify).
+        if (sig0.type_covered != 0)
+            return VerifyResult{ .valid = false, .error_reason = "Invalid type covered" };
+        if (sig0.algorithm != .ml_dsa_65)
+            return VerifyResult{ .valid = false, .error_reason = "Algorithm mismatch" };
+        if (!dnsNamesEqual(sig0.signer_name, signer.name))
+            return VerifyResult{ .valid = false, .error_reason = "Signer name mismatch" };
+        if (sig0.sig_inception > sig0.sig_expiration)
+            return VerifyResult{ .valid = false, .error_reason = "Invalid validity window" };
+        const now: u32 = @intCast(@as(u64, @bitCast(timeSec())));
+        if (now < sig0.sig_inception or now > sig0.sig_expiration)
+            return VerifyResult{ .valid = false, .error_reason = "Signature expired or not yet valid" };
+
+        // Rebuild the signed input: SIG RDATA (without signature) || message
+        // (the message with the SIG(0) RR stripped and ARCOUNT decremented).
+        const msg_without_sig = try self.stripSig0(signed, sig_info);
+        defer self.allocator.free(msg_without_sig);
+        const sig_rdata_len = sig_info.sig_rdata.len - sig0.signature.len;
+        const sig_data_only = sig_info.sig_rdata[0..sig_rdata_len];
+
+        var to_verify: std.ArrayList(u8) = .empty;
+        defer to_verify.deinit(self.allocator);
+        try to_verify.appendSlice(self.allocator, sig_data_only);
+        try to_verify.appendSlice(self.allocator, msg_without_sig);
+
+        crypto_backend.Sig.verify(.ml_dsa_65, &signer.kp, to_verify.items, sig0.signature) catch |e| switch (e) {
+            error.VerifyFailed => return VerifyResult{ .valid = false, .error_reason = "Signature verification failed", .key_tag = sig0.key_tag },
+            else => return e,
+        };
+        return VerifyResult{ .valid = true, .error_reason = null, .key_tag = sig0.key_tag };
+    }
+
     fn computeSignature(self: *Self, key_pair: *const Sig0KeyPair, sig_data: []const u8, message: []const u8) ![]u8 {
         const sig_alg = toSigAlg(key_pair.algorithm) orelse return error.UnsupportedAlgorithm;
 
@@ -597,6 +738,8 @@ pub const Sig0Context = struct {
             .ed25519, .ecdsa_p256_sha256 => if (signature.len != 64) return false,
             .ecdsa_p384_sha384 => if (signature.len != 96) return false,
             .rsa_sha256, .rsa_sha512 => {}, // variable-length RSA signature
+            // ML-DSA SIG(0) goes through verifyMlDsa, not this classical path.
+            .ml_dsa_65 => return false,
             _ => return false,
         }
 
@@ -726,6 +869,22 @@ pub const Sig0Context = struct {
         std.mem.writeInt(u16, buffer.items[10..12], arcount - 1, .big);
 
         return buffer.toOwnedSlice(self.allocator);
+    }
+};
+
+/// ML-DSA-65 SIG(0) signer/verifier. Wraps a seam-owned EVP keypair
+/// (FIPS-only). The keypair is generated once and kept for the object's
+/// lifetime, so neither private- nor public-key import is required.
+pub const MlDsaSig0Signer = struct {
+    name: []const u8,
+    kp: crypto_backend.Sig.KeyPair,
+
+    pub fn init(name: []const u8) !MlDsaSig0Signer {
+        if (!crypto_backend.fips_enabled) return error.UnsupportedAlgorithm;
+        return .{ .name = name, .kp = try crypto_backend.Sig.generate(.ml_dsa_65) };
+    }
+    pub fn deinit(self: *MlDsaSig0Signer) void {
+        self.kp.deinit();
     }
 };
 
@@ -1388,4 +1547,40 @@ test "SIG(0) RSA reports unsupported under std shim (fips-only)" {
     if (crypto_backend.fips_enabled) return error.SkipZigTest;
     try std.testing.expect(!Algorithm.rsa_sha256.isSupported());
     try std.testing.expect(!Algorithm.rsa_sha512.isSupported());
+}
+
+test "SIG(0) ML-DSA-65 sign->verify round trips via fips.Sig (fips-only)" {
+    if (!crypto_backend.fips_enabled) return error.SkipZigTest; // std shim has no ML-DSA
+    const allocator = std.testing.allocator;
+    var signer = try MlDsaSig0Signer.init("host.example.com");
+    defer signer.deinit();
+    // Minimal DNS message: 12-byte header with ARCOUNT=0 so signMlDsa can
+    // append the SIG(0) RR and verifyMlDsa can parse it back.
+    const msg = [_]u8{0x00} ** 12;
+    var ctx = Sig0Context.init(allocator);
+    const signed = try ctx.signMlDsa(&msg, &signer);
+    defer allocator.free(signed);
+    // Parse-based verify: pass the SIGNED buffer (not the bare message).
+    const result = try ctx.verifyMlDsa(signed, &signer);
+    try std.testing.expect(result.valid);
+}
+test "SIG(0) ML-DSA-65 verify rejects a tampered message (fips-only)" {
+    if (!crypto_backend.fips_enabled) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var signer = try MlDsaSig0Signer.init("host.example.com");
+    defer signer.deinit();
+    const msg = [_]u8{0x00} ** 12;
+    var ctx = Sig0Context.init(allocator);
+    const signed = try ctx.signMlDsa(&msg, &signer);
+    defer allocator.free(signed);
+    // Flip a byte in the message body (the QID at offset 0) -> verify fails.
+    const tampered = try allocator.dupe(u8, signed);
+    defer allocator.free(tampered);
+    tampered[0] ^= 0xFF;
+    const result = try ctx.verifyMlDsa(tampered, &signer);
+    try std.testing.expect(!result.valid);
+}
+test "ML-DSA-65 SIG(0) algorithm reports unsupported under std shim" {
+    if (crypto_backend.fips_enabled) return error.SkipZigTest;
+    try std.testing.expect(!Algorithm.ml_dsa_65.isSupported());
 }
