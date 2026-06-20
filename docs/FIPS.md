@@ -118,3 +118,28 @@ The canonical `std_shim` returns `error.Unsupported` for RSA and for ALL PQC
 (ML-DSA / SLH-DSA / ML-KEM). `dns` surfaces this as `error.UnsupportedAlgorithm`
 for SIG(0). Consequently RSA and ML-DSA SIG(0) are fips-only; classical ECDSA
 and Ed25519 SIG(0) and SHA-2 TSIG work in both modes.
+
+## Dual-mode test gate
+
+Spec section 7 requires `dns` to be green with BOTH `-Dfips=false` (default,
+std shim, zero OpenSSL) AND `-Dfips=true` (OpenSSL FIPS backend). The Makefile
+encodes this gate:
+
+```sh
+# std shim only (no OpenSSL):
+make test-unit
+
+# FIPS backend only (-Dfips=true). Override the OpenSSL prefix with
+# OPENSSL_PREFIX=<prefix>; defaults to /usr/local/ssl:
+OPENSSL_CONF=/usr/local/ssl/ssl/openssl.cnf make test-fips
+
+# BOTH modes (the gate):
+OPENSSL_CONF=/usr/local/ssl/ssl/openssl.cnf make test-dual
+```
+
+`make test-fips` / `make test-dual` require the OpenSSL FIPS provider to be
+installed first. It is built by the `fips` package's `make deps`
+(`install-openssl-fips.sh`), which compiles the latest OpenSSL 3.x with
+`enable-fips` and installs it under `/usr/local/ssl` (override with
+`OPENSSL_PREFIX=`). In CI the `test-fips` job provisions the provider before
+running `make test-dual` (see `.gitlab-ci.yml`).

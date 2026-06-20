@@ -7,7 +7,7 @@
 #   make clean        - Clean build artifacts
 #   make help         - Show this help message
 
-.PHONY: all build test test-unit test-vectors clean check fmt fmt-check help
+.PHONY: all build test test-unit test-vectors test-fips test-dual clean check fmt fmt-check help
 .PHONY: bench scale-bench bench-save bench-compare bench-baseline
 
 # Default target - build and run all tests
@@ -47,6 +47,15 @@ test-rfc3596:
 test-rfc6891:
 	@echo "Running RFC 6891 tests..."
 	@zig build test-rfc6891 --summary all
+
+# Run the full suite against the linked FIPS provider (-Dfips=true).
+test-fips:
+	@echo "Running tests with FIPS backend (-Dfips=true)..."
+	@zig build test -Dfips=true -Dopenssl_path=$(or $(OPENSSL_PREFIX),/usr/local/ssl) --summary all
+
+# BOTH-modes gate: std shim (default) AND OpenSSL FIPS backend.
+test-dual: test-unit test-fips
+	@echo "Dual-mode (-Dfips on/off) tests completed"
 
 # Clean build artifacts
 clean:

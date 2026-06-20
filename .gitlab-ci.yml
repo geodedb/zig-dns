@@ -187,3 +187,35 @@ fuzz:
   allow_failure: true
   needs:
     - build
+
+# -----------------------------------------------------------------------------
+# FIPS / PQC dual-mode gate (spec section 7: BOTH -Dfips=false and -Dfips=true
+# must be green).
+#
+# The FIPS provider is built by the `fips` package's `make deps`
+# (install-openssl-fips.sh), which compiles the latest OpenSSL 3.x with
+# enable-fips and installs it under /usr/local/ssl. In a ci-catalog setup this
+# is the `zig-fips-build` component's setup job (spec section 8); the explicit
+# job below is the fallback used until that component include exists. Once a
+# `zig-fips-build` component is available, replace this job with that component
+# include and pass the repo's `make test-dual` command.
+#
+# `make test-dual` runs the std-shim suite (-Dfips=false, no OpenSSL) AND the
+# OpenSSL FIPS suite (-Dfips=true, -Dopenssl_path=/usr/local/ssl).
+test-fips:
+  stage: test
+  image: debian:bookworm-slim
+  before_script:
+    - apt-get update && apt-get install -y build-essential perl curl xz-utils python3 git
+    - *install-zig
+    # Provision the latest OpenSSL 3.x FIPS provider via the fips package.
+    - git clone --depth 1 https://gitlab.com/devnw/zig/fips.git /tmp/fips
+    - make -C /tmp/fips deps
+  script:
+    - export OPENSSL_CONF=/usr/local/ssl/ssl/openssl.cnf
+    - make test-dual OPENSSL_PREFIX=/usr/local/ssl
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  needs:
+    - build
