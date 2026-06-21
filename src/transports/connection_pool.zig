@@ -199,6 +199,7 @@ pub const ServerKey = struct {
 
     pub fn init(host: []const u8, port: u16, transport: TransportType) ServerKey {
         return .{
+            // fips-exempt: non-security — Wyhash is a non-cryptographic hashmap key, not a crypto op
             .host_hash = std.hash.Wyhash.hash(0, host),
             .port = port,
             .transport = transport,

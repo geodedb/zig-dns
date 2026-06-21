@@ -2009,6 +2009,12 @@ test "PF-NEW-02: Referral.deinit frees zone, server names, and servers slice" {
 // GAP-0839: DNSSEC validation wired into the resolution path
 // =========================================================================
 
+// fips-exempt: non-security — test-only scaffolding. These DNSSEC-validation
+// known-answer tests need byte-reproducible key material via
+// Ed25519.KeyPair.generateDeterministic(seed); the crypto_backend seam exposes
+// no caller-seeded deterministic keygen, and the verification path under test
+// already routes through the seam (resolver/dnssec.zig). Used only in `test`
+// blocks to mint fixed DNSKEY/RRSIG vectors, never in a security path.
 const TestEd25519 = std.crypto.sign.Ed25519;
 
 fn appendTestU16(list: *std.ArrayList(u8), allocator: std.mem.Allocator, v: u16) !void {

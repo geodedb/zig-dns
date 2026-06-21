@@ -347,6 +347,7 @@ pub const SplitDns = struct {
                 self.stats.rule_matches += 1;
 
                 // Update per-rule stats
+                // fips-exempt: non-security — Wyhash is a non-cryptographic stats key, not a crypto op
                 const name_hash = std.hash.Wyhash.hash(0, rule.name);
                 if (self.stats.rule_hits.getPtr(name_hash)) |count| {
                     count.* += 1;

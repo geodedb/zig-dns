@@ -468,7 +468,12 @@ pub const Cookie = struct {
             .server_cookie = null,
         };
 
-        // Use SipHash-2-4 for cookie computation
+        // Use SipHash-2-4 for cookie computation.
+        // fips-exempt: non-security — RFC 7873 DNS Cookies are a lightweight
+        // off-path anti-spoofing mechanism (RFC 7873 §6 names SipHash-2-4 as a
+        // suggested pseudorandom function), NOT a FIPS authentication boundary.
+        // The seam provides no SipHash, so this stays std in both modes; the
+        // wire format (8-byte client cookie) must remain byte-identical.
         var hasher = std.crypto.auth.siphash.SipHash64(2, 4).init(&secret);
         hasher.update(client_ip);
         hasher.update(server_ip);

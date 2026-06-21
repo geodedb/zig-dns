@@ -142,6 +142,8 @@ pub const HappyEyeballs = struct {
     pub fn connect(self: *Self, addresses: []const net.Address, hostname: []const u8) !AttemptResult {
         if (addresses.len == 0) return error.NoAddresses;
 
+        // fips-exempt: non-security — Wyhash is a non-cryptographic hash used only
+        // to deterministically order connection attempts, not a FIPS crypto op.
         const hostname_hash = std.hash.Wyhash.hash(0, hostname);
         const sorted = try self.sortAddresses(addresses, hostname_hash);
         defer self.allocator.free(sorted);
