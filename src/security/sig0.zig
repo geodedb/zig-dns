@@ -93,8 +93,13 @@ pub const Sig0KeyPair = struct {
     pub const PrivateKey = union(Algorithm) {
         rsa_sha256: void,
         rsa_sha512: void,
+        // fips-exempt: non-security — std typed SecretKey is the STORAGE
+        // representation for the raw private bytes that rawPrivateBytes exports
+        // into the seam's Sig.KeyPair.fromPrivateBytes; not a crypto operation.
         ecdsa_p256_sha256: std.crypto.sign.ecdsa.EcdsaP256Sha256.SecretKey,
+        // fips-exempt: non-security — std typed SecretKey storage (see above).
         ecdsa_p384_sha384: std.crypto.sign.ecdsa.EcdsaP384Sha384.SecretKey,
+        // fips-exempt: non-security — std typed SecretKey storage (see above).
         ed25519: std.crypto.sign.Ed25519.SecretKey,
         // ML-DSA private keys are held by the seam-owned EVP keypair
         // (MlDsaSig0Signer), never as a std typed key, so this is a marker.
@@ -122,9 +127,11 @@ pub const Sig0KeyPair = struct {
         switch (algorithm) {
             .ed25519 => {
                 const key_pair = if (crypto_backend.fips_enabled)
+                    // fips-exempt: non-security — KeyPair TYPE selector; fipsGenerate draws the seed from the FIPS DRBG (Csprng).
                     try fipsGenerate(std.crypto.sign.Ed25519.KeyPair)
                 else blk: {
                     const io_inst = std.Io.Threaded.global_single_threaded.io();
+                    // fips-exempt: non-security — consumer-owned non-fips keygen path (kept verbatim, compiled out under -Dfips).
                     break :blk std.crypto.sign.Ed25519.KeyPair.generate(io_inst);
                 };
                 const public_key = try allocator.dupe(u8, &key_pair.public_key.bytes);
@@ -138,9 +145,11 @@ pub const Sig0KeyPair = struct {
             },
             .ecdsa_p256_sha256 => {
                 const key_pair = if (crypto_backend.fips_enabled)
+                    // fips-exempt: non-security — KeyPair TYPE selector; fipsGenerate draws the seed from the FIPS DRBG (Csprng).
                     try fipsGenerate(std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair)
                 else blk: {
                     const io_inst = std.Io.Threaded.global_single_threaded.io();
+                    // fips-exempt: non-security — consumer-owned non-fips keygen path (kept verbatim, compiled out under -Dfips).
                     break :blk std.crypto.sign.ecdsa.EcdsaP256Sha256.KeyPair.generate(io_inst);
                 };
                 const public_key = try allocator.dupe(u8, &key_pair.public_key.toUncompressedSec1());
@@ -154,9 +163,11 @@ pub const Sig0KeyPair = struct {
             },
             .ecdsa_p384_sha384 => {
                 const key_pair = if (crypto_backend.fips_enabled)
+                    // fips-exempt: non-security — KeyPair TYPE selector; fipsGenerate draws the seed from the FIPS DRBG (Csprng).
                     try fipsGenerate(std.crypto.sign.ecdsa.EcdsaP384Sha384.KeyPair)
                 else blk: {
                     const io_inst = std.Io.Threaded.global_single_threaded.io();
+                    // fips-exempt: non-security — consumer-owned non-fips keygen path (kept verbatim, compiled out under -Dfips).
                     break :blk std.crypto.sign.ecdsa.EcdsaP384Sha384.KeyPair.generate(io_inst);
                 };
                 const public_key = try allocator.dupe(u8, &key_pair.public_key.toUncompressedSec1());
@@ -255,11 +266,13 @@ pub const Sig0KeyPair = struct {
                 std.crypto.secureZero(u8, &self.private_key.ed25519.bytes);
             },
             .ecdsa_p256_sha256 => {
+                // fips-exempt: non-security — compile-time @sizeOf of the typed key, not a crypto op
                 const key_ptr: *[@sizeOf(std.crypto.sign.ecdsa.EcdsaP256Sha256.SecretKey)]u8 =
                     @ptrCast(&self.private_key.ecdsa_p256_sha256);
                 std.crypto.secureZero(u8, key_ptr);
             },
             .ecdsa_p384_sha384 => {
+                // fips-exempt: non-security — compile-time @sizeOf of the typed key, not a crypto op
                 const key_ptr: *[@sizeOf(std.crypto.sign.ecdsa.EcdsaP384Sha384.SecretKey)]u8 =
                     @ptrCast(&self.private_key.ecdsa_p384_sha384);
                 std.crypto.secureZero(u8, key_ptr);
@@ -288,8 +301,13 @@ pub const Sig0PublicKey = struct {
     pub const PublicKey = union(Algorithm) {
         rsa_sha256: void,
         rsa_sha512: void,
+        // fips-exempt: non-security — std typed PublicKey is the STORAGE
+        // representation; rawPublicBytes exports it into the seam's
+        // Sig.KeyPair.fromPublicBytes for the actual verify. Not a crypto op.
         ecdsa_p256_sha256: std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey,
+        // fips-exempt: non-security — std typed PublicKey storage (see above).
         ecdsa_p384_sha384: std.crypto.sign.ecdsa.EcdsaP384Sha384.PublicKey,
+        // fips-exempt: non-security — std typed PublicKey storage (see above).
         ed25519: std.crypto.sign.Ed25519.PublicKey,
         // ML-DSA public keys are held by the seam-owned EVP keypair
         // (MlDsaSig0Signer), never as a std typed key, so this is a marker.
@@ -301,6 +319,9 @@ pub const Sig0PublicKey = struct {
         switch (algorithm) {
             .ed25519 => {
                 if (key_data.len != 32) return error.InvalidKeyLength;
+                // fips-exempt: non-security — parses/validates DNSKEY bytes into the
+                // typed PublicKey storage; the verify itself routes through the seam
+                // (verifySignature -> crypto_backend.Sig). Not a crypto operation.
                 const pk = std.crypto.sign.Ed25519.PublicKey.fromBytes(key_data[0..32].*) catch
                     return error.InvalidPublicKey;
                 return Self{
@@ -316,6 +337,8 @@ pub const Sig0PublicKey = struct {
                 var uncompressed: [65]u8 = undefined;
                 uncompressed[0] = 0x04;
                 @memcpy(uncompressed[1..], key_data);
+                // fips-exempt: non-security — parses/validates DNSKEY bytes into typed
+                // PublicKey storage; verify routes through the seam (see above).
                 const pk = std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey.fromSec1(&uncompressed) catch
                     return error.InvalidPublicKey;
                 return Self{
@@ -330,6 +353,8 @@ pub const Sig0PublicKey = struct {
                 var uncompressed: [97]u8 = undefined;
                 uncompressed[0] = 0x04;
                 @memcpy(uncompressed[1..], key_data);
+                // fips-exempt: non-security — parses/validates DNSKEY bytes into typed
+                // PublicKey storage; verify routes through the seam (see above).
                 const pk = std.crypto.sign.ecdsa.EcdsaP384Sha384.PublicKey.fromSec1(&uncompressed) catch
                     return error.InvalidPublicKey;
                 return Self{
@@ -1524,6 +1549,7 @@ test "SEC-C25: Sig0KeyPair.deinit zeroes private key material (ECDSA P-256)" {
     key_pair.deinit(allocator);
 
     // After deinit, private key struct bytes should be zeroed
+    // fips-exempt: non-security — test-only compile-time @sizeOf of the typed key, not a crypto op
     const key_ptr: *const [@sizeOf(std.crypto.sign.ecdsa.EcdsaP256Sha256.SecretKey)]u8 =
         @ptrCast(&key_pair.private_key.ecdsa_p256_sha256);
     for (key_ptr) |b| {
