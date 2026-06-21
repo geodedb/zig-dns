@@ -179,6 +179,7 @@ pub const TsigKey = struct {
             const mutable = @constCast(self.secret);
             const volatile_ptr: [*]volatile u8 = @ptrCast(mutable.ptr);
             const volatile_slice: []volatile u8 = volatile_ptr[0..mutable.len];
+            // fips-exempt: non-security — memory hygiene scrub, not a crypto op
             std.crypto.secureZero(u8, volatile_slice);
         }
         if (allocator) |alloc| {
@@ -510,14 +511,19 @@ pub const TsigContext = struct {
         // is computed through the seam. It stays std in both modes.
         const mac_valid = switch (self.key.algorithm) {
             .hmac_md5 => tsig.mac.len == 16 and expected_mac.len == 16 and
+                // fips-exempt: non-security — timing_safe.eql is a constant-time compare, not a crypto op
                 std.crypto.timing_safe.eql([16]u8, tsig.mac[0..16].*, expected_mac[0..16].*),
             .hmac_sha1 => tsig.mac.len == 20 and expected_mac.len == 20 and
+                // fips-exempt: non-security — timing_safe.eql is a constant-time compare, not a crypto op
                 std.crypto.timing_safe.eql([20]u8, tsig.mac[0..20].*, expected_mac[0..20].*),
             .hmac_sha256 => tsig.mac.len == 32 and expected_mac.len == 32 and
+                // fips-exempt: non-security — timing_safe.eql is a constant-time compare, not a crypto op
                 std.crypto.timing_safe.eql([32]u8, tsig.mac[0..32].*, expected_mac[0..32].*),
             .hmac_sha384 => tsig.mac.len == 48 and expected_mac.len == 48 and
+                // fips-exempt: non-security — timing_safe.eql is a constant-time compare, not a crypto op
                 std.crypto.timing_safe.eql([48]u8, tsig.mac[0..48].*, expected_mac[0..48].*),
             .hmac_sha512 => tsig.mac.len == 64 and expected_mac.len == 64 and
+                // fips-exempt: non-security — timing_safe.eql is a constant-time compare, not a crypto op
                 std.crypto.timing_safe.eql([64]u8, tsig.mac[0..64].*, expected_mac[0..64].*),
         };
         if (!mac_valid) {
@@ -635,10 +641,16 @@ pub const TsigContext = struct {
             // Available only when -Dfips=false (std-backed legacy support).
             .hmac_md5 => {
                 if (crypto_backend.fips_enabled) return error.UnsupportedAlgorithm;
+                // fips-exempt: non-security — legacy HMAC-MD5 is not FIPS-approved and is
+                // hard-disabled above under -Dfips; the seam has no MD5, so the std impl
+                // stays behind the non-fips guard (consumer-owned escape hatch).
                 hmacParts(std.crypto.auth.hmac.HmacMd5, self.key.secret, parts, result[0..16]);
             },
             .hmac_sha1 => {
                 if (crypto_backend.fips_enabled) return error.UnsupportedAlgorithm;
+                // fips-exempt: non-security — legacy HMAC-SHA1 is not FIPS-approved and is
+                // hard-disabled above under -Dfips; the seam has no SHA-1, so the std impl
+                // stays behind the non-fips guard (consumer-owned escape hatch).
                 hmacParts(std.crypto.auth.hmac.HmacSha1, self.key.secret, parts, result[0..20]);
             },
             // FIPS-approved HMAC over SHA-2: routed through the crypto seam.
@@ -900,6 +912,7 @@ pub const VerifyResult = struct {
 /// FIPS-boundary crypto operation; it stays std in both modes.
 fn secureZeroHmac(comptime T: type, hmac_ptr: *T) void {
     const hmac_bytes: *[@sizeOf(T)]u8 = @ptrCast(hmac_ptr);
+    // fips-exempt: non-security — memory hygiene scrub, not a crypto op
     std.crypto.secureZero(u8, hmac_bytes);
 }
 
