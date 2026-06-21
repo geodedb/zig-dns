@@ -430,6 +430,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "name", .module = name_mod },
 
             .{ .name = "types", .module = types_mod },
+            .{ .name = "crypto_backend", .module = crypto_backend_mod },
         },
     });
     // GAP-0839: the recursive resolver invokes the DNSSEC validator in its
@@ -1365,6 +1366,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "name", .module = name_mod },
                 .{ .name = "types", .module = types_mod },
                 .{ .name = "clock", .module = clock_mod },
+                .{ .name = "crypto_backend", .module = crypto_backend_mod },
             },
         }),
     });

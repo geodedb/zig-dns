@@ -47,6 +47,7 @@ const record = @import("record");
 const name_module = @import("name");
 const types = @import("types");
 const parallel = @import("parallel");
+const backend = @import("crypto_backend");
 
 const ResourceRecord = record.ResourceRecord;
 const DnskeyData = ResourceRecord.DnskeyData;
@@ -537,7 +538,14 @@ pub const Validator = struct {
             .ecdsap384sha384 => return verifyEcdsaP384(public_key, message, signature),
             // GAP-0842: RSA/SHA-256 (8) and RSA/SHA-512 (10) via
             // std.crypto.Certificate.rsa (RSASSA-PKCS1-v1_5, RFC 5702).
+            // fips-exempt: non-security — these args select the DigestInfo
+            // hash for the RSA verify performed inside verifyRsa (the
+            // consumer-owned RSA escape hatch below); they are a hash-type
+            // SELECTOR, not a standalone hash operation. The seam's RSA surface
+            // takes DER SubjectPublicKeyInfo and is fixed to SHA-256, so it
+            // cannot consume RFC 3110 keys nor RSA/SHA-512; see verifyRsa.
             .rsasha256 => return verifyRsa(std.crypto.hash.sha2.Sha256, public_key, message, signature),
+            // fips-exempt: non-security — RSA DigestInfo hash selector; see .rsasha256 above and verifyRsa.
             .rsasha512 => return verifyRsa(std.crypto.hash.sha2.Sha512, public_key, message, signature),
             .rsasha1 => {
                 // RSA/SHA-1 (5) is deliberately NOT supported: SHA-1 is
@@ -709,6 +717,12 @@ pub const Validator = struct {
         }
 
         // Initial hash: H(name || salt)
+        // fips-exempt: non-security — NSEC3 (RFC 5155 §5) defines exactly one
+        // hash algorithm: SHA-1 (algorithm 1). It is mandated by the wire
+        // protocol for authenticated denial of existence, is not an
+        // authentication/signature primitive, and the seam provides no SHA-1.
+        // Stays std in both modes; the 20-byte iterated digest must remain
+        // byte-identical.
         var hasher = std.crypto.hash.Sha1.init(.{});
         hasher.update(name);
         hasher.update(salt);
@@ -717,6 +731,7 @@ pub const Validator = struct {
         // Iterate: H(digest || salt)
         var i: u16 = 0;
         while (i < iterations) : (i += 1) {
+            // fips-exempt: non-security — NSEC3 SHA-1 iteration (RFC 5155 §5); see above.
             hasher = std.crypto.hash.Sha1.init(.{});
             hasher.update(&digest);
             hasher.update(salt);
@@ -900,6 +915,11 @@ fn computeDsDigest(
 ) ?[64]u8 {
     switch (digest_type) {
         .sha1 => {
+            // fips-exempt: non-security — DS digest type 1 is SHA-1 (RFC 4034
+            // §5.1.4). SHA-1 is not FIPS-approved and the seam has no SHA-1; a
+            // SHA-1 DS is treated as the weakest digest and is only ever
+            // accepted when no SHA-256/384 DS is available. Stays std in both
+            // modes; the 20-byte digest format must remain byte-identical.
             var hasher = std.crypto.hash.Sha1.init(.{});
             hasher.update(owner_name);
             hasher.update(dnskey_rdata);
@@ -909,21 +929,23 @@ fn computeDsDigest(
             return output;
         },
         .sha256 => {
-            var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-            hasher.update(owner_name);
-            hasher.update(dnskey_rdata);
-            const result = hasher.finalResult();
+            // RFC 4509 DS digest type 2 (SHA-256), routed through the seam.
+            var s = backend.HashStream.init(.sha256) catch return null;
+            defer s.deinit();
+            s.update(owner_name);
+            s.update(dnskey_rdata);
             var output: [64]u8 = undefined;
-            @memcpy(output[0..32], &result);
+            _ = s.final(output[0..32]) catch return null;
             return output;
         },
         .sha384 => {
-            var hasher = std.crypto.hash.sha2.Sha384.init(.{});
-            hasher.update(owner_name);
-            hasher.update(dnskey_rdata);
-            const result = hasher.finalResult();
+            // RFC 6605 DS digest type 4 (SHA-384), routed through the seam.
+            var s = backend.HashStream.init(.sha384) catch return null;
+            defer s.deinit();
+            s.update(owner_name);
+            s.update(dnskey_rdata);
             var output: [64]u8 = undefined;
-            @memcpy(output[0..48], &result);
+            _ = s.final(output[0..48]) catch return null;
             return output;
         },
         else => return null,
@@ -959,13 +981,16 @@ fn verifyEd25519(public_key: []const u8, message: []const u8, signature: []const
     if (public_key.len != 32) return error.InvalidSignature;
     if (signature.len != 64) return error.InvalidSignature;
 
-    const pk = std.crypto.sign.Ed25519.PublicKey.fromBytes(public_key[0..32].*) catch {
+    // Route Ed25519 verification through the FIPS crypto_backend seam. The
+    // 32-byte DNSSEC public key (RFC 8080) imports directly; the 64-byte
+    // signature is the raw R||S form the seam expects. Malformed key material
+    // surfaces as InvalidSignature; a well-formed but non-matching signature
+    // returns false (unchanged behavior vs the prior std.crypto path).
+    var kp = backend.Sig.KeyPair.fromPublicBytes(.ed25519, public_key) catch {
         return error.InvalidSignature;
     };
-
-    const sig = std.crypto.sign.Ed25519.Signature.fromBytes(signature[0..64].*);
-
-    sig.verify(message, pk) catch return false;
+    defer kp.deinit();
+    backend.Sig.verify(.ed25519, &kp, message, signature) catch return false;
     return true;
 }
 
@@ -980,16 +1005,15 @@ fn verifyEcdsaP256(public_key: []const u8, message: []const u8, signature: []con
     sec1_pk[0] = 0x04;
     @memcpy(sec1_pk[1..65], public_key);
 
-    const pk = std.crypto.sign.ecdsa.EcdsaP256Sha256.PublicKey.fromSec1(&sec1_pk) catch {
+    // Route ECDSA P-256/SHA-256 (RFC 6605) verification through the seam. The
+    // seam imports the SEC1 uncompressed point and verifies the raw 64-byte
+    // R||S signature; malformed key material -> InvalidSignature, bad
+    // signature -> false (behavior-preserving vs the prior std.crypto path).
+    var kp = backend.Sig.KeyPair.fromPublicBytes(.ecdsa_p256, &sec1_pk) catch {
         return error.InvalidSignature;
     };
-
-    // DNSSEC signature format: R || S (each 32 bytes)
-    var sig_bytes: [64]u8 = undefined;
-    @memcpy(&sig_bytes, signature[0..64]);
-    const sig = std.crypto.sign.ecdsa.EcdsaP256Sha256.Signature.fromBytes(sig_bytes);
-
-    sig.verify(message, pk) catch return false;
+    defer kp.deinit();
+    backend.Sig.verify(.ecdsa_p256, &kp, message, signature[0..64]) catch return false;
     return true;
 }
 
@@ -1004,16 +1028,14 @@ fn verifyEcdsaP384(public_key: []const u8, message: []const u8, signature: []con
     sec1_pk[0] = 0x04;
     @memcpy(sec1_pk[1..97], public_key);
 
-    const pk = std.crypto.sign.ecdsa.EcdsaP384Sha384.PublicKey.fromSec1(&sec1_pk) catch {
+    // Route ECDSA P-384/SHA-384 (RFC 6605) verification through the seam, as
+    // for P-256 above: SEC1 uncompressed point import + raw 96-byte R||S
+    // signature; malformed key -> InvalidSignature, bad signature -> false.
+    var kp = backend.Sig.KeyPair.fromPublicBytes(.ecdsa_p384, &sec1_pk) catch {
         return error.InvalidSignature;
     };
-
-    // DNSSEC signature format: R || S (each 48 bytes)
-    var sig_bytes: [96]u8 = undefined;
-    @memcpy(&sig_bytes, signature[0..96]);
-    const sig = std.crypto.sign.ecdsa.EcdsaP384Sha384.Signature.fromBytes(sig_bytes);
-
-    sig.verify(message, pk) catch return false;
+    defer kp.deinit();
+    backend.Sig.verify(.ecdsa_p384, &kp, message, signature[0..96]) catch return false;
     return true;
 }
 
@@ -1030,6 +1052,13 @@ fn verifyRsa(
     message: []const u8,
     signature: []const u8,
 ) ValidationError!bool {
+    // fips-exempt: non-security — consumer-owned RSA backend (escape hatch).
+    // RSASSA-PKCS1-v1_5 DNSSEC verification (RFC 5702) needs RFC 3110 wire-format
+    // public keys (exponent-length prefix + exponent + modulus) and BOTH SHA-256
+    // and SHA-512 DigestInfo. The crypto_backend seam's RSA surface accepts only
+    // DER SubjectPublicKeyInfo and is pinned to SHA-256, and under -Dfips=false
+    // returns Unsupported; so this verify-only RSA path stays on
+    // std.crypto.Certificate.rsa in both modes (no private-key/keygen here).
     const rsa = std.crypto.Certificate.rsa;
 
     // Parse RFC 3110 exponent length prefix
@@ -2191,6 +2220,12 @@ test "isNameInZone: name is not in zone" {
 // GAP-0841: RRSIG labels field validation (RFC 4035 Section 5.3.2)
 // =========================================================================
 
+// fips-exempt: non-security — test-only scaffolding. These RRSIG validation
+// known-answer tests mint byte-reproducible signatures via
+// Ed25519.KeyPair.generateDeterministic(seed); the crypto_backend seam exposes
+// no caller-seeded deterministic keygen, and the verification path under test
+// (verifyEd25519) already routes through the seam. Used only inside `test`
+// blocks, never in a security path.
 const TestEd25519 = std.crypto.sign.Ed25519;
 
 /// Test helper: build the RFC 4034 signed-data buffer (RRSIG RDATA without
@@ -2557,17 +2592,20 @@ test "GAP-0842: RSA rejects malformed RFC 3110 public keys" {
     // Too short to contain exponent length + exponent + modulus
     try std.testing.expectError(
         error.InvalidSignature,
+        // fips-exempt: non-security — test-only RSA DigestInfo hash selector for the consumer-owned RSA escape hatch (verifyRsa)
         verifyRsa(std.crypto.hash.sha2.Sha256, &[_]u8{0x03}, "msg", &[_]u8{0} ** 64),
     );
     // Exponent length runs past the key data (no modulus left)
     try std.testing.expectError(
         error.InvalidSignature,
+        // fips-exempt: non-security — test-only RSA DigestInfo hash selector for the consumer-owned RSA escape hatch (verifyRsa)
         verifyRsa(std.crypto.hash.sha2.Sha256, &[_]u8{ 0x10, 0x01, 0x00, 0x01 }, "msg", &[_]u8{0} ** 64),
     );
     // Signature length not matching the modulus length
     const pubkey = [_]u8{ 0x01, 0x03 } ++ [_]u8{0xAB} ** 64;
     try std.testing.expectError(
         error.InvalidSignature,
+        // fips-exempt: non-security — test-only RSA DigestInfo hash selector for the consumer-owned RSA escape hatch (verifyRsa)
         verifyRsa(std.crypto.hash.sha2.Sha256, &pubkey, "msg", &[_]u8{0} ** 63),
     );
 }
@@ -2590,6 +2628,7 @@ test "A9 (#298): SHA-1 DS digests are rejected unless explicitly allowed" {
     const key_tag = ResourceRecord.calculateKeyTag(&dnskey_rdata);
 
     // The matching SHA-1 DS digest: SHA1(owner_name || dnskey_rdata).
+    // fips-exempt: non-security — test-only SHA-1 DS digest (digest type 1, RFC 4034); the seam has no SHA-1, mirroring computeDsDigest.
     var hasher = std.crypto.hash.Sha1.init(.{});
     hasher.update(&owner_name);
     hasher.update(&dnskey_rdata);
