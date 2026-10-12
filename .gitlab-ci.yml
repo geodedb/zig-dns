@@ -212,34 +212,37 @@ fuzz:
 # FIPS / PQC dual-mode gate (spec section 7: BOTH -Dfips=false and -Dfips=true
 # must be green).
 #
-# The FIPS provider is built by the `fips` package's `make deps`
-# (install-openssl-fips.sh), which compiles the latest OpenSSL 3.x with
-# enable-fips and installs it under /usr/local/ssl. In a ci-catalog setup this
-# is the `zig-fips-build` component's setup job (spec section 8); the explicit
-# job below is the fallback used until that component include exists. Once a
-# `zig-fips-build` component is available, replace this job with that component
-# include and pass the repo's `make test-dual` command.
-#
-# `make test-dual` runs the std-shim suite (-Dfips=false, no OpenSSL) AND the
-# OpenSSL FIPS suite (-Dfips=true, -Dopenssl_path=/usr/local/ssl).
+# Provision the reviewed OpenSSL 3.6.5 release using the vendored installer.
+# Require authenticity against pinned official signing fingerprints; a system
+# OpenSSL installation or a moving upstream release cannot choose CI's version.
+# The provider and tests run in the same job and project-relative prefix.
 test-fips:
   stage: test
   image: debian:bookworm-slim
   before_script:
-    - apt-get update && apt-get install -y build-essential perl curl xz-utils python3 git
+    - apt-get update && apt-get install -y --no-install-recommends build-essential perl curl wget sudo gnupg xz-utils python3 ca-certificates
     - *install-zig
-    # Provision the latest OpenSSL 3.x FIPS provider via the fips package.
-    - git clone --depth 1 --branch v0.1.3 https://gitlab.com/devnw/zig/fips.git /tmp/fips
-    - make -C /tmp/fips deps
+    - wget -q https://www.openssl-library.org/source/pubkeys.asc -O /tmp/openssl-pubkeys.asc
+    - gpg --batch --import /tmp/openssl-pubkeys.asc
+    - OPENSSL_PREFIX="$CI_PROJECT_DIR/.openssl-fips" OPENSSL_VERSION="3.6.5" REQUIRE_GPG=1 bash scripts/install-openssl-fips.sh
   script:
-    - export OPENSSL_CONF=/usr/local/ssl/ssl/openssl.cnf
-    - make test-dual OPENSSL_PREFIX=/usr/local/ssl
+    - export OPENSSL_CONF="$CI_PROJECT_DIR/.openssl-fips/ssl/openssl.cnf"
+    - make test-dual OPENSSL_PREFIX="$CI_PROJECT_DIR/.openssl-fips"
   rules:
     - if: '$CI_COMMIT_TAG'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   needs:
     - build
+
+# Real primary/subkey signatures pass; tampering and untrusted keys fail closed.
+fips-release-signature:
+  stage: lint
+  image: debian:bookworm-slim
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends python3 gnupg
+  script:
+    - python3 scripts/test_release_signature.py
 
 # Disable merge_request_event pipelines. Jobs without rules never run in MR
 # pipelines, so the few MR-ruled jobs fail on `needs:` of jobs that are not
