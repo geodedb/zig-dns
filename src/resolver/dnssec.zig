@@ -907,7 +907,13 @@ fn isNameInZone(name: []const u8, zone: []const u8) bool {
     return true;
 }
 
-/// Compute DS digest (RFC 4034 Section 5.1.4)
+fn updateDsHash(stream: *backend.HashStream, input: []const u8) anyerror!void {
+    // The std shim is infallible; the provider backend reports update failures.
+    // Coerce both to an error union so DS validation fails closed in FIPS mode.
+    return stream.update(input);
+}
+
+/// Compute DS digest (RFC 4034 Section 5.1.4). Provider failures return null.
 fn computeDsDigest(
     owner_name: []const u8,
     dnskey_rdata: []const u8,
@@ -932,8 +938,8 @@ fn computeDsDigest(
             // RFC 4509 DS digest type 2 (SHA-256), routed through the seam.
             var s = backend.HashStream.init(.sha256) catch return null;
             defer s.deinit();
-            s.update(owner_name);
-            s.update(dnskey_rdata);
+            updateDsHash(&s, owner_name) catch return null;
+            updateDsHash(&s, dnskey_rdata) catch return null;
             var output: [64]u8 = undefined;
             _ = s.final(output[0..32]) catch return null;
             return output;
@@ -942,8 +948,8 @@ fn computeDsDigest(
             // RFC 6605 DS digest type 4 (SHA-384), routed through the seam.
             var s = backend.HashStream.init(.sha384) catch return null;
             defer s.deinit();
-            s.update(owner_name);
-            s.update(dnskey_rdata);
+            updateDsHash(&s, owner_name) catch return null;
+            updateDsHash(&s, dnskey_rdata) catch return null;
             var output: [64]u8 = undefined;
             _ = s.final(output[0..48]) catch return null;
             return output;
@@ -1450,12 +1456,20 @@ test "Validator.addTrustAnchor" {
     try std.testing.expectEqual(@as(u16, 20326), validator.trust_anchors.items[0].key_tag);
 }
 
-test "computeDsDigest with SHA-256" {
-    const owner = "example.com";
+test "computeDsDigest SHA-256 and SHA-384 known vectors across backends" {
+    const owner = "\x07example\x03com\x00";
     const dnskey_rdata = [_]u8{ 0x01, 0x01, 0x03, 0x08, 0xAA, 0xBB, 0xCC, 0xDD };
-
-    const digest = computeDsDigest(owner, &dnskey_rdata, .sha256);
-    try std.testing.expect(digest != null);
+    const vectors = [_]struct { algorithm: DigestType, expected_hex: []const u8 }{
+        .{ .algorithm = .sha256, .expected_hex = "d75517c04f110fc45b3591d671bd77bb6d0201cfaefe4a915d19cbac6fad16ff" },
+        .{ .algorithm = .sha384, .expected_hex = "1e3e4a89c255ca135f4f77ef1d3ba1917cb1423cd201e1534dc7dfd0e19a996e65a5f4f1dab9851532c718b508a376c2" },
+    };
+    for (vectors) |vector| {
+        var expected: [64]u8 = undefined;
+        const bytes = try std.fmt.hexToBytes(&expected, vector.expected_hex);
+        const digest = computeDsDigest(owner, &dnskey_rdata, vector.algorithm);
+        try std.testing.expect(digest != null);
+        try std.testing.expectEqualSlices(u8, bytes, digest.?[0..bytes.len]);
+    }
 }
 
 test "verifyEd25519 with invalid key size" {

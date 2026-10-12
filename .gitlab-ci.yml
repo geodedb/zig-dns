@@ -9,24 +9,44 @@ default:
     # PowerShell shell executor cannot run these bash job scripts. Pin to the
     # Linux fleet (OVH / Lab Servers / Company Cluster all carry "linux").
     - linux
+    - x86
 
 include:
   # Security scanning
   - component: gitlab.com/devnw/ci-catalog/security-sast@v1.55.8
+    inputs:
+      tags: ["company", "linux", "x86"]
   - component: gitlab.com/devnw/ci-catalog/security-dependency-scanning@v1.55.8
+    inputs:
+      tags: ["company", "linux", "x86"]
   - component: gitlab.com/devnw/ci-catalog/security-secrets@v1.55.8
+    inputs:
+      tags: ["company", "linux", "x86"]
   - component: gitlab.com/devnw/ci-catalog/security-gitleaks@v1.55.8
+    inputs:
+      tags: ["company", "linux", "x86"]
 
   # Code quality
   - component: gitlab.com/devnw/ci-catalog/zig-format@v1.55.8
+    inputs:
+      tags: ["company", "linux", "x86"]
 
   # SBOM
   - component: gitlab.com/devnw/ci-catalog/sbom-generate@v1.55.8
+    inputs:
+      tags: ["company", "linux", "x86"]
   - component: gitlab.com/devnw/ci-catalog/sbom-scan@v1.55.8
+    inputs:
+      tags: ["company", "linux", "x86"]
 
   # Release
   - component: gitlab.com/devnw/ci-catalog/release-semantic@v1.55.8
+    inputs:
+      tags: ["company", "linux", "x86"]
+      release_auth: job_token
   - component: gitlab.com/devnw/ci-catalog/zig-version-tag-check@v1.55.8
+    inputs:
+      tags: ["company", "linux", "x86"]
 
 variables:
   ZIG_VERSION: "0.16.0"
@@ -209,12 +229,13 @@ test-fips:
     - apt-get update && apt-get install -y build-essential perl curl xz-utils python3 git
     - *install-zig
     # Provision the latest OpenSSL 3.x FIPS provider via the fips package.
-    - git clone --depth 1 https://gitlab.com/devnw/zig/fips.git /tmp/fips
+    - git clone --depth 1 --branch v0.1.3 https://gitlab.com/devnw/zig/fips.git /tmp/fips
     - make -C /tmp/fips deps
   script:
     - export OPENSSL_CONF=/usr/local/ssl/ssl/openssl.cnf
     - make test-dual OPENSSL_PREFIX=/usr/local/ssl
   rules:
+    - if: '$CI_COMMIT_TAG'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   needs:
@@ -230,3 +251,26 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
       when: never
     - when: always
+
+# SONNY-4778: tools must not redirect Git operations into this worktree.
+hook-env-regression:
+  stage: lint
+  image: python:3.14-slim-bookworm
+  tags: [company, linux, x86]
+  before_script:
+    - apt-get update -qq && apt-get install -y --no-install-recommends git
+  script:
+    - python3 scripts/test_hook_env.py
+
+test-source-package:
+  stage: test
+  image: debian:trixie-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f
+  tags: [company, linux, x86]
+  before_script:
+    - *install-zig
+    - apt-get install -y --no-install-recommends git
+  script:
+    - python3 scripts/check_source_package.py --jobs 2
+  needs:
+    - build
+  allow_failure: false
