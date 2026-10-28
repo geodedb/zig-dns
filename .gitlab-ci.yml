@@ -201,8 +201,8 @@ fuzz:
     - build
 
 # -----------------------------------------------------------------------------
-# FIPS / PQC dual-mode gate (spec section 7: BOTH -Dfips=false and -Dfips=true
-# must be green).
+# The required test job covers the default backend. This job covers the FIPS
+# backend once; both modes remain required and make test-dual retains both.
 #
 # Provision the reviewed OpenSSL 3.6.5 release using the vendored installer.
 # Require authenticity against pinned official signing fingerprints; a system
@@ -219,7 +219,7 @@ test-fips:
     - OPENSSL_PREFIX="$CI_PROJECT_DIR/.openssl-fips" OPENSSL_VERSION="3.6.5" REQUIRE_GPG=1 bash scripts/install-openssl-fips.sh
   script:
     - export OPENSSL_CONF="$CI_PROJECT_DIR/.openssl-fips/ssl/openssl.cnf"
-    - make test-dual OPENSSL_PREFIX="$CI_PROJECT_DIR/.openssl-fips"
+    - make test-fips OPENSSL_PREFIX="$CI_PROJECT_DIR/.openssl-fips"
   rules:
     - if: '$CI_COMMIT_TAG'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
