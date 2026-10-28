@@ -55,7 +55,8 @@ const Name = record.Name;
 const Type = record.Type;
 const Class = record.Class;
 
-const tp = @import("thread_pool");
+const thread_pool_enabled = @import("build_options").thread_pool;
+const tp = if (thread_pool_enabled) @import("thread_pool") else struct {};
 const clock = @import("clock");
 
 const MAX_CHUNKS = 64;
@@ -91,10 +92,12 @@ const random_util = @import("random");
 /// must free it with this same allocator.
 pub const task_allocator: std.mem.Allocator = std.heap.smp_allocator;
 
-var global_pool: ?tp.ThreadPool = null;
+const Pool = if (thread_pool_enabled) tp.ThreadPool else void;
+var global_pool: ?Pool = null;
 var pool_mutex: Mutex = .{};
 
-pub fn getPool() *tp.ThreadPool {
+pub fn getPool() *Pool {
+    if (!thread_pool_enabled) @compileError("getPool requires -Dthread-pool=true; operations use the serial path when disabled");
     pool_mutex.lock();
     defer pool_mutex.unlock();
 
@@ -116,6 +119,7 @@ pub fn getPool() *tp.ThreadPool {
 /// // ... use parallel operations ...
 /// ```
 pub fn deinitPool() void {
+    if (!thread_pool_enabled) return;
     pool_mutex.lock();
     defer pool_mutex.unlock();
 
@@ -186,7 +190,7 @@ pub fn parallelZoneRecordParse(
 ) void {
     std.debug.assert(raw_records.len == results.len);
 
-    if (raw_records.len < 64) {
+    if (!thread_pool_enabled or raw_records.len < 64) {
         for (raw_records, 0..) |raw, i| {
             results[i] = parseRecord(allocator, raw);
         }
@@ -310,7 +314,7 @@ pub fn parallelDnssecValidate(
 ) void {
     std.debug.assert(inputs.len == results.len);
 
-    if (inputs.len < PARALLEL_DNSSEC_THRESHOLD) {
+    if (!thread_pool_enabled or inputs.len < PARALLEL_DNSSEC_THRESHOLD) {
         for (inputs, 0..) |input, i| {
             results[i] = validateDnssec(input);
         }
@@ -467,7 +471,7 @@ pub fn parallelBatchQuery(
 ) void {
     std.debug.assert(queries.len == results.len);
 
-    if (queries.len < 4) {
+    if (!thread_pool_enabled or queries.len < 4) {
         for (queries, 0..) |query, i| {
             results[i] = executeQuery(query, server, timeout_ms);
         }
@@ -597,7 +601,7 @@ pub fn parallelCachePrefetch(
 ) void {
     std.debug.assert(entries.len == results.len);
 
-    if (entries.len < 8) {
+    if (!thread_pool_enabled or entries.len < 8) {
         for (entries, 0..) |entry, i| {
             results[i] = prefetchEntry(entry, server);
         }
@@ -935,7 +939,57 @@ test "parallel cache prefetch - below threshold" {
     }
 }
 
+test "SONNY-4867 serial operations above every dispatch threshold never initialize a pool" {
+    if (thread_pool_enabled) return;
+    deinitPool();
+    try std.testing.expect(!isPoolInitialized());
+
+    const raw = [_]u8{0} ** 12;
+    const records = [_][]const u8{&raw} ** 64;
+    var parsed: [64]ParsedRecord = undefined;
+    parallelZoneRecordParse(std.testing.allocator, &records, &parsed);
+    for (parsed) |result| try std.testing.expect(result.valid);
+
+    // Invalid inputs still produce real structural validation results.
+    const invalid: DnssecValidateInput = .{ .rrsig = "", .rrset = &.{}, .dnskey = "" };
+    const validations = [_]DnssecValidateInput{invalid} ** PARALLEL_DNSSEC_THRESHOLD;
+    var validated: [PARALLEL_DNSSEC_THRESHOLD]DnssecValidateResult = undefined;
+    parallelDnssecValidate(&validations, &validated);
+    for (validated) |result| {
+        try std.testing.expect(!result.valid);
+        try std.testing.expectEqual(@as(?u8, 1), result.error_code);
+    }
+
+    const queries = [_]QuerySpec{.{ .domain = "example.com", .qtype = 1, .qclass = 1 }} ** 4;
+    var responses: [4]QueryResult = undefined;
+    parallelBatchQuery(&queries, &responses, "127.0.0.1", 1);
+    defer for (responses) |result| {
+        if (result.response) |response| task_allocator.free(response);
+    };
+    for (responses) |result| {
+        try std.testing.expect(result.success);
+        try std.testing.expect(result.response != null);
+        try std.testing.expect(result.response.?.len >= 12);
+    }
+
+    const entries = [_]PrefetchEntry{.{ .domain = "example.com", .qtype = 1, .expires_at = 1 }} ** 8;
+    var prefetched: [8]PrefetchResult = undefined;
+    parallelCachePrefetch(&entries, &prefetched, "127.0.0.1");
+    for (prefetched) |result| {
+        try std.testing.expect(result.refreshed);
+        try std.testing.expectEqual(@as(u32, 0), result.new_ttl);
+    }
+    try std.testing.expect(!isPoolInitialized());
+    deinitPool();
+    try std.testing.expect(!isPoolInitialized());
+}
+
 test "pool lifecycle - init and deinit" {
+    if (!thread_pool_enabled) {
+        deinitPool();
+        try std.testing.expect(!isPoolInitialized());
+        return;
+    }
     // Exercise the init path via getPool()
     _ = getPool();
     try std.testing.expect(isPoolInitialized());

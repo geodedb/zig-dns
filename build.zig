@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "feature_doq", feature_doq);
+    build_options.addOption(bool, "thread_pool", enable_tp);
     build_options.addOption([]const u8, "package_name", "dns");
     build_options.addOption(bool, "with_otel", with_otel);
     build_options.addOption(bool, "fips", fips);
@@ -215,18 +216,17 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // Parallel module for thread-pool-based parallelism (defined early for resolver deps)
-    const parallel_mod: ?*std.Build.Module = if (enable_tp) blk: {
-        break :blk b.addModule("parallel", .{
-            .root_source_file = b.path("src/parallel.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "record", .module = record_mod },
-                .{ .name = "message", .module = message_mod },
-            },
-        });
-    } else null;
+    // Keep the operations module present in serial builds; only the pool is optional.
+    const parallel_mod: ?*std.Build.Module = b.addModule("parallel", .{
+        .root_source_file = b.path("src/parallel.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "build_options", .module = build_options_mod },
+            .{ .name = "record", .module = record_mod },
+            .{ .name = "message", .module = message_mod },
+        },
+    });
     if (parallel_mod) |pm| {
         if (tp_mod) |tm| pm.addImport("thread_pool", tm);
     }
@@ -1504,22 +1504,8 @@ pub fn build(b: *std.Build) void {
     const test_parallel_step = b.step("test-parallel", "Run parallel operations tests");
 
     const parallel_test = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/parallel.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "record", .module = record_mod },
-                .{ .name = "message", .module = message_mod },
-                .{ .name = "sync", .module = sync_mod },
-                .{ .name = "clock", .module = clock_mod },
-                .{ .name = "random", .module = random_mod },
-            },
-        }),
+        .root_module = parallel_mod.?,
     });
-    if (tp_mod) |tm| {
-        parallel_test.root_module.addImport("thread_pool", tm);
-    }
     const run_parallel_test = b.addRunArtifact(parallel_test);
     test_parallel_step.dependOn(&run_parallel_test.step);
 
