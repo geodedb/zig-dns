@@ -97,10 +97,29 @@ pub const Address = extern union {
         }
     }
 
+    /// Total equality over any family the union can hold. Receive paths call
+    /// this with a source address filled in by the kernel (or left unwritten
+    /// when the peer has no address), so it must never assume an IP family.
+    ///
+    /// - Different families are unequal. In particular an IPv4 address never
+    ///   equals its IPv4-mapped IPv6 form (`::ffff:a.b.c.d`): a socket is
+    ///   opened with the server's family, so a genuine reply always carries
+    ///   that same family, and accepting a cross-family match would only
+    ///   widen the source check.
+    /// - IPv4 compares port and address (`sin_zero` is padding).
+    /// - IPv6 compares port, flowinfo, address and scope id.
+    /// - Any other family (AF_UNSPEC, AF_UNIX, unset storage) is unequal to
+    ///   everything, itself included: it is never a DNS server address.
     pub fn eql(a: Address, b: Address) bool {
-        const a_bytes = @as([*]const u8, @ptrCast(&a.any))[0..a.getOsSockLen()];
-        const b_bytes = @as([*]const u8, @ptrCast(&b.any))[0..b.getOsSockLen()];
-        return mem.eql(u8, a_bytes, b_bytes);
+        if (a.any.family != b.any.family) return false;
+        return switch (a.any.family) {
+            posix.AF.INET => a.in.sa.port == b.in.sa.port and a.in.sa.addr == b.in.sa.addr,
+            posix.AF.INET6 => a.in6.sa.port == b.in6.sa.port and
+                a.in6.sa.flowinfo == b.in6.sa.flowinfo and
+                a.in6.sa.scope_id == b.in6.sa.scope_id and
+                mem.eql(u8, &a.in6.sa.addr, &b.in6.sa.addr),
+            else => false,
+        };
     }
 
     pub fn getOsSockLen(self: Address) posix.socklen_t {

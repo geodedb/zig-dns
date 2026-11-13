@@ -317,7 +317,10 @@ pub const StubResolver = struct {
             // 4096 bytes matches EDNS default max payload (RFC 6891).
             // Responses exceeding this are truncated and fall back to TCP.
             var buffer: [4096]u8 = undefined;
-            var src_addr: net.Address = undefined;
+            // Zeroed, not undefined: a peer with no address (src_len 0) leaves
+            // this unwritten, and it must then read as AF_UNSPEC, which
+            // Address.eql rejects (SONNY-6447).
+            var src_addr: net.Address = std.mem.zeroes(net.Address);
             var src_len: std.posix.socklen_t = @sizeOf(net.Address);
             const recv_len = net.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len) catch |err| switch (err) {
                 error.WouldBlock, error.ConnectionTimedOut => return error.Timeout,
