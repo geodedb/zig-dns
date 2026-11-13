@@ -711,3 +711,90 @@ pub fn recv(sock: posix.socket_t, buf: []u8, flags: u32) RecvError!usize {
         else => |err| return posix.unexpectedErrno(err),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Address.eql across every family the union can hold (SONNY-6447)
+// ---------------------------------------------------------------------------
+
+/// An address whose family field is `family` and whose remaining bytes are
+/// `fill`. Models what a receive path hands to `eql` when the kernel did not
+/// (or could not) write an IP source address.
+fn rawFamilyAddress(family: posix.sa_family_t, fill: u8) Address {
+    var addr: Address = undefined;
+    @memset(mem.asBytes(&addr), fill);
+    addr.any.family = family;
+    return addr;
+}
+
+test "Address.eql: IPv4 compares port and address" {
+    const a = try Address.parseIp4("10.90.0.53", 53);
+    try std.testing.expect(Address.eql(a, try Address.parseIp4("10.90.0.53", 53)));
+    try std.testing.expect(!Address.eql(a, try Address.parseIp4("10.90.0.53", 5353)));
+    try std.testing.expect(!Address.eql(a, try Address.parseIp4("10.90.0.54", 53)));
+}
+
+test "Address.eql: IPv6 compares port, address and scope" {
+    const a = try Address.parseIp6("fe80::1%2", 53);
+    try std.testing.expect(Address.eql(a, try Address.parseIp6("fe80::1%2", 53)));
+    try std.testing.expect(!Address.eql(a, try Address.parseIp6("fe80::1%3", 53)));
+    try std.testing.expect(!Address.eql(a, try Address.parseIp6("fe80::1%2", 54)));
+    try std.testing.expect(!Address.eql(a, try Address.parseIp6("fe80::2%2", 53)));
+}
+
+test "Address.eql: IPv4 never equals IPv6, including its IPv4-mapped form" {
+    const v4 = try Address.parseIp4("192.0.2.1", 53);
+    const mapped = try Address.parseIp6("::ffff:192.0.2.1", 53);
+    const v6 = try Address.parseIp6("2001:db8::1", 53);
+    try std.testing.expect(!Address.eql(v4, mapped));
+    try std.testing.expect(!Address.eql(mapped, v4));
+    try std.testing.expect(!Address.eql(v4, v6));
+    try std.testing.expect(!Address.eql(v6, v4));
+    try std.testing.expect(Address.eql(mapped, try Address.parseIp6("::ffff:192.0.2.1", 53)));
+}
+
+test "Address.eql: a non-IP family is unequal to everything and never panics" {
+    const v4 = try Address.parseIp4("10.90.0.53", 53);
+    const v6 = try Address.parseIp6("2001:db8::53", 53);
+    // AF_UNSPEC (zeroed storage), AF_UNIX (a datagram from an unnamed unix
+    // peer), and 0xAAAA (Debug-mode `undefined` storage the kernel never
+    // wrote) are the values a receive path can hold.
+    const odd = [_]Address{
+        rawFamilyAddress(posix.AF.UNSPEC, 0),
+        rawFamilyAddress(posix.AF.UNIX, 0),
+        rawFamilyAddress(0xAAAA, 0xAA),
+        rawFamilyAddress(0xFFFF, 0xFF),
+    };
+    for (odd) |o| {
+        try std.testing.expect(!Address.eql(o, v4));
+        try std.testing.expect(!Address.eql(v4, o));
+        try std.testing.expect(!Address.eql(o, v6));
+        try std.testing.expect(!Address.eql(v6, o));
+        for (odd) |p| try std.testing.expect(!Address.eql(o, p));
+    }
+}
+
+test "recvfrom from a peer with no address leaves the source unset; eql rejects it" {
+    if (native_os != .linux) return error.SkipZigTest;
+    var fds: [2]i32 = undefined;
+    const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.DGRAM, 0, &fds);
+    try std.testing.expectEqual(posix.E.SUCCESS, posix.errno(rc));
+    defer close(fds[0]);
+    defer close(fds[1]);
+
+    const payload = "dns-reply";
+    try std.testing.expectEqual(payload.len, std.os.linux.write(fds[1], payload, payload.len));
+
+    // Exactly the receive shape used by stub.zig, recursive.zig and
+    // transports/udp.zig.
+    var buffer: [64]u8 = undefined;
+    var src_addr: Address = undefined;
+    var src_len: posix.socklen_t = @sizeOf(Address);
+    const n = try recvfrom(fds[0], &buffer, 0, &src_addr.any, &src_len);
+    try std.testing.expectEqual(payload.len, n);
+    // An unnamed peer reports a zero-length (or family-only) address: the
+    // kernel never wrote an IP family into src_addr.
+    try std.testing.expect(src_len < @sizeOf(posix.sockaddr.in));
+
+    const server = try Address.parseIp4("10.90.0.53", 53);
+    try std.testing.expect(!Address.eql(src_addr, server));
+}

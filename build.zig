@@ -1195,6 +1195,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "random", .source = "src/util/random.zig", .imports = &.{} },
         .{ .name = "lru", .source = "src/util/lru.zig", .imports = &.{} },
         .{ .name = "metrics", .source = "src/util/metrics.zig", .imports = &.{} },
+        .{ .name = "net_compat", .source = "src/util/net_compat.zig", .imports = &.{} },
         .{
             .name = "enhanced_metrics",
             .source = "src/util/enhanced_metrics.zig",
