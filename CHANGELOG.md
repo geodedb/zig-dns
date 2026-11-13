@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `net_compat.Address.eql` no longer reaches `unreachable` (a process abort)
+  when one side holds a non-IP family. The stub, recursive and UDP transport
+  receive paths compare the `recvfrom` source against the server address; a
+  datagram whose source the kernel does not report left that buffer
+  unwritten and crashed the caller (SONNY-6447). `eql` is now total:
+  different families, including IPv4 against its IPv4-mapped IPv6 form, are
+  unequal, and any non-IP family is unequal to everything. The receive
+  buffers start zeroed, so an unreported source reads as `AF_UNSPEC` and the
+  datagram is discarded as spurious.
+
 ## [0.1.20] - 2026-09-15
 
 ### Changed

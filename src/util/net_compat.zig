@@ -97,10 +97,29 @@ pub const Address = extern union {
         }
     }
 
+    /// Total equality over any family the union can hold. Receive paths call
+    /// this with a source address filled in by the kernel (or left unwritten
+    /// when the peer has no address), so it must never assume an IP family.
+    ///
+    /// - Different families are unequal. In particular an IPv4 address never
+    ///   equals its IPv4-mapped IPv6 form (`::ffff:a.b.c.d`): a socket is
+    ///   opened with the server's family, so a genuine reply always carries
+    ///   that same family, and accepting a cross-family match would only
+    ///   widen the source check.
+    /// - IPv4 compares port and address (`sin_zero` is padding).
+    /// - IPv6 compares port, flowinfo, address and scope id.
+    /// - Any other family (AF_UNSPEC, AF_UNIX, unset storage) is unequal to
+    ///   everything, itself included: it is never a DNS server address.
     pub fn eql(a: Address, b: Address) bool {
-        const a_bytes = @as([*]const u8, @ptrCast(&a.any))[0..a.getOsSockLen()];
-        const b_bytes = @as([*]const u8, @ptrCast(&b.any))[0..b.getOsSockLen()];
-        return mem.eql(u8, a_bytes, b_bytes);
+        if (a.any.family != b.any.family) return false;
+        return switch (a.any.family) {
+            posix.AF.INET => a.in.sa.port == b.in.sa.port and a.in.sa.addr == b.in.sa.addr,
+            posix.AF.INET6 => a.in6.sa.port == b.in6.sa.port and
+                a.in6.sa.flowinfo == b.in6.sa.flowinfo and
+                a.in6.sa.scope_id == b.in6.sa.scope_id and
+                mem.eql(u8, &a.in6.sa.addr, &b.in6.sa.addr),
+            else => false,
+        };
     }
 
     pub fn getOsSockLen(self: Address) posix.socklen_t {
@@ -710,4 +729,91 @@ pub fn recv(sock: posix.socket_t, buf: []u8, flags: u32) RecvError!usize {
         .TIMEDOUT => return error.ConnectionTimedOut,
         else => |err| return posix.unexpectedErrno(err),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Address.eql across every family the union can hold (SONNY-6447)
+// ---------------------------------------------------------------------------
+
+/// An address whose family field is `family` and whose remaining bytes are
+/// `fill`. Models what a receive path hands to `eql` when the kernel did not
+/// (or could not) write an IP source address.
+fn rawFamilyAddress(family: posix.sa_family_t, fill: u8) Address {
+    var addr: Address = undefined;
+    @memset(mem.asBytes(&addr), fill);
+    addr.any.family = family;
+    return addr;
+}
+
+test "Address.eql: IPv4 compares port and address" {
+    const a = try Address.parseIp4("10.90.0.53", 53);
+    try std.testing.expect(Address.eql(a, try Address.parseIp4("10.90.0.53", 53)));
+    try std.testing.expect(!Address.eql(a, try Address.parseIp4("10.90.0.53", 5353)));
+    try std.testing.expect(!Address.eql(a, try Address.parseIp4("10.90.0.54", 53)));
+}
+
+test "Address.eql: IPv6 compares port, address and scope" {
+    const a = try Address.parseIp6("fe80::1%2", 53);
+    try std.testing.expect(Address.eql(a, try Address.parseIp6("fe80::1%2", 53)));
+    try std.testing.expect(!Address.eql(a, try Address.parseIp6("fe80::1%3", 53)));
+    try std.testing.expect(!Address.eql(a, try Address.parseIp6("fe80::1%2", 54)));
+    try std.testing.expect(!Address.eql(a, try Address.parseIp6("fe80::2%2", 53)));
+}
+
+test "Address.eql: IPv4 never equals IPv6, including its IPv4-mapped form" {
+    const v4 = try Address.parseIp4("192.0.2.1", 53);
+    const mapped = try Address.parseIp6("::ffff:192.0.2.1", 53);
+    const v6 = try Address.parseIp6("2001:db8::1", 53);
+    try std.testing.expect(!Address.eql(v4, mapped));
+    try std.testing.expect(!Address.eql(mapped, v4));
+    try std.testing.expect(!Address.eql(v4, v6));
+    try std.testing.expect(!Address.eql(v6, v4));
+    try std.testing.expect(Address.eql(mapped, try Address.parseIp6("::ffff:192.0.2.1", 53)));
+}
+
+test "Address.eql: a non-IP family is unequal to everything and never panics" {
+    const v4 = try Address.parseIp4("10.90.0.53", 53);
+    const v6 = try Address.parseIp6("2001:db8::53", 53);
+    // AF_UNSPEC (zeroed storage), AF_UNIX (a datagram from an unnamed unix
+    // peer), and 0xAAAA (Debug-mode `undefined` storage the kernel never
+    // wrote) are the values a receive path can hold.
+    const odd = [_]Address{
+        rawFamilyAddress(posix.AF.UNSPEC, 0),
+        rawFamilyAddress(posix.AF.UNIX, 0),
+        rawFamilyAddress(0xAAAA, 0xAA),
+        rawFamilyAddress(0xFFFF, 0xFF),
+    };
+    for (odd) |o| {
+        try std.testing.expect(!Address.eql(o, v4));
+        try std.testing.expect(!Address.eql(v4, o));
+        try std.testing.expect(!Address.eql(o, v6));
+        try std.testing.expect(!Address.eql(v6, o));
+        for (odd) |p| try std.testing.expect(!Address.eql(o, p));
+    }
+}
+
+test "recvfrom from a peer with no address leaves the source unset; eql rejects it" {
+    if (native_os != .linux) return error.SkipZigTest;
+    var fds: [2]i32 = undefined;
+    const rc = std.os.linux.socketpair(posix.AF.UNIX, posix.SOCK.DGRAM, 0, &fds);
+    try std.testing.expectEqual(posix.E.SUCCESS, posix.errno(rc));
+    defer close(fds[0]);
+    defer close(fds[1]);
+
+    const payload = "dns-reply";
+    try std.testing.expectEqual(payload.len, std.os.linux.write(fds[1], payload, payload.len));
+
+    // Exactly the receive shape used by stub.zig, recursive.zig and
+    // transports/udp.zig.
+    var buffer: [64]u8 = undefined;
+    var src_addr: Address = undefined;
+    var src_len: posix.socklen_t = @sizeOf(Address);
+    const n = try recvfrom(fds[0], &buffer, 0, &src_addr.any, &src_len);
+    try std.testing.expectEqual(payload.len, n);
+    // An unnamed peer reports a zero-length (or family-only) address: the
+    // kernel never wrote an IP family into src_addr.
+    try std.testing.expect(src_len < @sizeOf(posix.sockaddr.in));
+
+    const server = try Address.parseIp4("10.90.0.53", 53);
+    try std.testing.expect(!Address.eql(src_addr, server));
 }
